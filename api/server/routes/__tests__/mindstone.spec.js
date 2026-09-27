@@ -64,6 +64,8 @@ const ENDPOINTS = [
   { method: 'post', path: 'permissions/advanced', write: true },
   { method: 'get', path: 'models', write: false },
   { method: 'post', path: 'providers/ollama-cloud', write: true },
+  { method: 'get', path: 'doctor', write: false },
+  { method: 'get', path: 'logs', write: false },
   { method: 'get', path: 'approvals', write: false },
   { method: 'get', path: 'approvals/0b5e7c1a-1111-4222-8333-444455556666', write: false },
   { method: 'get', path: 'approvals/0b5e7c1a', write: false },
@@ -213,6 +215,16 @@ describe('MindStone admin proxy', () => {
       ['post', 'providers/ol.lama'],
       ['post', 'x/providers/ollama'],
       ['get', 'x/models'],
+      // Diagnostics: GET doctor and logs only.
+      ['get', 'doctorx'],
+      ['get', 'doctor/x'],
+      ['get', 'logs/'],
+      ['get', 'logs/x'],
+      ['get', 'x/logs'],
+      ['get', 'x/doctor'],
+      ['post', 'doctor'],
+      ['post', 'logs'],
+      ['patch', 'logs'],
       // Approvals: lowercase ids of 8 to 36 characters, approve or reject, nothing else.
       ['get', 'approvalsx'],
       ['get', 'approvals/'],
@@ -292,6 +304,32 @@ describe('MindStone admin proxy', () => {
       fetchMock.mockClear();
       await request(app).get(`/api/mindstone/admin/${path}`).set('x-test-caller', 'manage');
       expect([path, fetchMock.mock.calls[0]?.[0]]).toEqual([path, expected]);
+    }
+  });
+
+  it('forwards only a digits-only lines, and only on logs', async () => {
+    const cases = [
+      ['logs', 'http://gateway.test:19790/admin/logs'],
+      ['logs?lines=80', 'http://gateway.test:19790/admin/logs?lines=80'],
+      ['logs?lines=500&x=1', 'http://gateway.test:19790/admin/logs?lines=500'],
+      ['logs?x=1', 'http://gateway.test:19790/admin/logs'],
+      ['doctor?lines=5', 'http://gateway.test:19790/admin/doctor'],
+      ['status?lines=5', 'http://gateway.test:19790/admin/status'],
+      ['approvals?lines=5', 'http://gateway.test:19790/admin/approvals'],
+      ['logs?all=1', 'http://gateway.test:19790/admin/logs'],
+    ];
+    for (const [path, expected] of cases) {
+      fetchMock.mockClear();
+      await request(app).get(`/api/mindstone/admin/${path}`).set('x-test-caller', 'manage');
+      expect([path, fetchMock.mock.calls[0]?.[0]]).toEqual([path, expected]);
+    }
+    for (const bad of ['-1', '1.5', 'abc', '1000', '', '%2F..', '5&lines=6']) {
+      fetchMock.mockClear();
+      const response = await request(app)
+        .get(`/api/mindstone/admin/logs?lines=${bad}`)
+        .set('x-test-caller', 'manage');
+      expect([bad, response.status]).toEqual([bad, 400]);
+      expect(fetchMock).not.toHaveBeenCalled();
     }
   });
 

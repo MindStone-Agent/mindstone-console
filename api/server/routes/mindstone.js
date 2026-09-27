@@ -34,6 +34,8 @@ const ALLOWED = [
   { method: 'GET', path: /^models$/ },
   { method: 'POST', path: /^providers\/[a-z][a-z-]{0,39}$/ },
   { method: 'POST', path: /^permissions\/advanced$/ },
+  { method: 'GET', path: /^doctor$/ },
+  { method: 'GET', path: /^logs$/ },
   { method: 'GET', path: /^approvals$/ },
   { method: 'GET', path: /^approvals\/[0-9a-f-]{8,36}$/ },
   { method: 'POST', path: /^approvals\/[0-9a-f-]{8,36}\/(approve|reject)$/ },
@@ -94,9 +96,20 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
     }
     headers['if-match'] = ifMatch;
   }
-  // The approvals list takes one query, all=1 (decided actions too); nothing
-  // else from the browser's query string reaches the gateway.
-  const query = path === 'approvals' && req.query?.all === '1' ? '?all=1' : '';
+  // Two queries reach the gateway, each on one path only: all=1 on the
+  // approvals list (decided actions too) and lines on the log tail; nothing
+  // else from the browser's query string does.
+  let query = path === 'approvals' && req.query?.all === '1' ? '?all=1' : '';
+  // lines: digits only here; the gateway checks the 1 to 500 range.
+  if (path === 'logs' && req.query?.lines !== undefined) {
+    const lines = req.query.lines;
+    if (typeof lines !== 'string' || !/^[0-9]{1,3}$/.test(lines)) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'lines must be a whole number from 1 to 500' });
+    }
+    query = `?lines=${lines}`;
+  }
   try {
     const response = await fetch(`${base}/admin/${path}${query}`, {
       method: req.method,
