@@ -22,7 +22,9 @@ Planned, per the design: config and onboarding screens backed by the gateway's c
 
 1. Start the MindStone-Agent gateway with chat completions enabled and token auth.
 2. `cd mindstone && cp .env.example .env`, fill in the secrets and the gateway token.
-3. `docker compose up -d --build`, then open http://localhost:3080. The first account registered is the admin.
+3. `docker compose up -d --build`. The page is published on 127.0.0.1:3080 only.
+4. Create the admin: `docker compose exec console npm run create-user <email> "<name>" <username>` (it asks for the password). The first account created is the admin, and later ones are users. Registration from the page is off (`ALLOW_REGISTRATION=false`); turn it on only on a network you trust, since the first account to register becomes the admin.
+5. Open http://localhost:3080 and sign in.
 
 ## License
 
