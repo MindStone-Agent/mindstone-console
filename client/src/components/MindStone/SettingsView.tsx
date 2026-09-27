@@ -209,6 +209,9 @@ export default function MindStoneSettingsView() {
               }
             >
               {localize(status.onboarded ? 'com_mindstone_onb_rerun' : 'com_mindstone_onb_start')}
+            </Link>{' '}
+            <Link to="/mindstone/diagnostics" className="ml-3 mt-2 inline-block text-sm underline">
+              {localize('com_mindstone_diag_title')}
             </Link>
           </section>
         )}

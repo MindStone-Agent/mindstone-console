@@ -64,6 +64,8 @@ const ENDPOINTS = [
   { method: 'post', path: 'permissions/advanced', write: true },
   { method: 'get', path: 'models', write: false },
   { method: 'post', path: 'providers/ollama-cloud', write: true },
+  { method: 'get', path: 'doctor', write: false },
+  { method: 'get', path: 'logs', write: false },
 ];
 
 /** What each caller should get from an allowlisted endpoint. */
@@ -205,6 +207,16 @@ describe('MindStone admin proxy', () => {
       ['post', 'providers/ollama%0A'],
       ['post', 'x/providers/ollama'],
       ['get', 'x/models'],
+      // Diagnostics: GET doctor and logs only.
+      ['get', 'doctorx'],
+      ['get', 'doctor/x'],
+      ['get', 'logs/'],
+      ['get', 'logs/x'],
+      ['get', 'x/logs'],
+      ['get', 'x/doctor'],
+      ['post', 'doctor'],
+      ['post', 'logs'],
+      ['patch', 'logs'],
       ['patch', 'config/mem.ory'],
     ];
     for (const [method, path] of outside) {
@@ -234,6 +246,30 @@ describe('MindStone admin proxy', () => {
       'x-mindstone-user-role': 'admin',
       'if-match': '"abc123"',
     });
+  });
+
+  it('forwards only a digits-only lines, and only on logs', async () => {
+    const cases = [
+      ['logs', 'http://gateway.test:19790/admin/logs'],
+      ['logs?lines=80', 'http://gateway.test:19790/admin/logs?lines=80'],
+      ['logs?lines=500&x=1', 'http://gateway.test:19790/admin/logs?lines=500'],
+      ['logs?x=1', 'http://gateway.test:19790/admin/logs'],
+      ['doctor?lines=5', 'http://gateway.test:19790/admin/doctor'],
+      ['status?lines=5', 'http://gateway.test:19790/admin/status'],
+    ];
+    for (const [path, expected] of cases) {
+      fetchMock.mockClear();
+      await request(app).get(`/api/mindstone/admin/${path}`).set('x-test-caller', 'manage');
+      expect([path, fetchMock.mock.calls[0]?.[0]]).toEqual([path, expected]);
+    }
+    for (const bad of ['-1', '1.5', 'abc', '1000', '', '%2F..', '5&lines=6']) {
+      fetchMock.mockClear();
+      const response = await request(app)
+        .get(`/api/mindstone/admin/logs?lines=${bad}`)
+        .set('x-test-caller', 'manage');
+      expect([bad, response.status]).toEqual([bad, 400]);
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
   });
 
   it("never forwards the browser's own If-Match header", async () => {

@@ -34,6 +34,8 @@ const ALLOWED = [
   { method: 'GET', path: /^models$/ },
   { method: 'POST', path: /^providers\/[a-z][a-z-]{0,39}$/ },
   { method: 'POST', path: /^permissions\/advanced$/ },
+  { method: 'GET', path: /^doctor$/ },
+  { method: 'GET', path: /^logs$/ },
 ];
 
 /** Gateway base URL: MINDSTONE_GATEWAY_URL is the OpenAI base (…/v1); the admin API sits at the root. */
@@ -89,8 +91,21 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
     }
     headers['if-match'] = ifMatch;
   }
+  // The log tail takes one query, lines (1 to 500 digits-only; the gateway
+  // checks the range); nothing else from the browser's query string reaches
+  // the gateway.
+  let query = '';
+  if (path === 'logs' && req.query?.lines !== undefined) {
+    const lines = req.query.lines;
+    if (typeof lines !== 'string' || !/^[0-9]{1,3}$/.test(lines)) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'lines must be a whole number from 1 to 500' });
+    }
+    query = `?lines=${lines}`;
+  }
   try {
-    const response = await fetch(`${base}/admin/${path}`, {
+    const response = await fetch(`${base}/admin/${path}${query}`, {
       method: req.method,
       headers,
       body: req.method === 'GET' ? undefined : JSON.stringify(req.body ?? {}),
