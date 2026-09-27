@@ -109,10 +109,14 @@ export default function MindStoneOnboardingView() {
   };
 
   const preset = info?.presets.find((candidate) => candidate.presetId === presetId);
+  // A key entered for one preset never carries over to another.
   useEffect(() => {
     setBaseUrl(preset?.baseUrl ?? '');
     setListFailed(false);
-  }, [preset]);
+    setKeyValue('');
+    setEnvName('');
+    setKeySource('paste');
+  }, [presetId, preset?.baseUrl]);
 
   // Models the agent can use now: from providers with a key (registered here or set up in the terminal).
   const usableModels = useMemo(() => {
@@ -156,7 +160,7 @@ export default function MindStoneOnboardingView() {
     try {
       const body: Record<string, unknown> = {};
       if (!preset.needsKey && baseUrl && baseUrl !== preset.baseUrl) body.baseUrl = baseUrl;
-      if (preset.needsKey || keyValue || envName) {
+      if (preset.needsKey) {
         if (keySource === 'paste' && keyValue) {
           // The key goes to the secrets endpoint, then the provider refers to it by name.
           const secret = `${preset.providerId}.key`;
@@ -231,16 +235,25 @@ export default function MindStoneOnboardingView() {
     }
   };
 
+  /** Turn advanced settings off; false if that failed (the error is shown). */
   const turnOffAccess = async () => {
     setBusy(true);
     try {
       await request.post(`${BASE}/permissions/advanced`, { enabled: false });
       await load();
+      return true;
     } catch (error) {
       setMessage({ ok: false, text: errorText(error) ?? localize('com_mindstone_not_changed') });
+      return false;
     } finally {
       setBusy(false);
     }
+  };
+
+  /** Onboarding is done: advanced settings go off before the first chat. */
+  const startChat = async () => {
+    if (permissions?.advancedSettings && !(await turnOffAccess())) return;
+    navigate('/c/new');
   };
 
   const card = 'rounded-xl border border-border-medium bg-surface-primary p-4';
@@ -534,8 +547,8 @@ export default function MindStoneOnboardingView() {
               <button
                 type="button"
                 className={primary}
-                disabled={!status.onboarded}
-                onClick={() => navigate('/c/new')}
+                disabled={!status.onboarded || busy}
+                onClick={() => void startChat()}
               >
                 {localize('com_mindstone_onb_start_chat')}
               </button>

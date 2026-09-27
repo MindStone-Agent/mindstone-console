@@ -2973,7 +2973,7 @@
   "com_mindstone_onb_persona_hint": "This shapes how the agent works with you. You can change it later.",
   "com_mindstone_onb_done_title": "MindStone is set up",
   "com_mindstone_onb_not_done_title": "Almost there",
-  "com_mindstone_onb_optional_hint": "Memory and connectors are optional; you can set them up on the settings page. When you're done, turn advanced settings off.",
+  "com_mindstone_onb_optional_hint": "Memory and connectors are optional; you can set them up on the settings page. Starting a chat turns advanced settings off.",
   "com_mindstone_onb_start_chat": "Start a chat",
   "com_mindstone_onb_open_settings": "Open settings",
   "com_mindstone_onb_turn_off_access": "Turn off advanced settings"

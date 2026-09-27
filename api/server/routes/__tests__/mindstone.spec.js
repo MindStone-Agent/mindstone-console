@@ -196,6 +196,16 @@ describe('MindStone admin proxy', () => {
       ['post', 'providers/Ollama'],
       ['post', 'providers/..%2F..%2Fv1'],
       ['get', 'providers/ollama'],
+      ['post', 'providers/'],
+      ['post', 'providers/..'],
+      ['post', 'providers/%2E%2E'],
+      ['post', 'providers/.ollama'],
+      ['post', 'providers/-'],
+      ['post', 'providers/ollama%00'],
+      ['post', 'providers/ollama%0A'],
+      ['post', 'x/providers/ollama'],
+      ['get', 'x/models'],
+      ['patch', 'config/mem.ory'],
     ];
     for (const [method, path] of outside) {
       const response = await call('manage', { method, path });
