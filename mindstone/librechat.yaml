@@ -1,0 +1,27 @@
+# MindStone Console config. The only endpoint is the MindStone-Agent gateway, reached
+# with its service token; the browser never sees the token. Each persona the gateway
+# lists at /v1/models (mindstone/<agentId>) appears as a model.
+version: 1.2.8
+cache: true
+interface:
+  endpointsMenu: true
+  modelSelect: true
+  parameters: false
+  presets: false
+  agents: false
+  memories: false
+endpoints:
+  custom:
+    - name: 'MindStone'
+      apiKey: '${MINDSTONE_GATEWAY_TOKEN}'
+      baseURL: '${MINDSTONE_GATEWAY_URL}'
+      models:
+        default: ['mindstone/default']
+        fetch: true
+      titleConvo: false
+      modelDisplayLabel: 'MindStone'
+      headers:
+        x-mindstone-user-id: '{{LIBRECHAT_USER_ID}}'
+        x-mindstone-user-role: '{{LIBRECHAT_USER_ROLE}}'
+        x-mindstone-conversation-id: '{{LIBRECHAT_BODY_CONVERSATIONID}}'
+      forcePrompt: false
