@@ -31,6 +31,8 @@ const ALLOWED = [
   { method: 'PATCH', path: /^config\/[A-Za-z]+$/ },
   { method: 'POST', path: /^secrets\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/ },
   { method: 'GET', path: /^permissions$/ },
+  { method: 'GET', path: /^models$/ },
+  { method: 'POST', path: /^providers\/[a-z][a-z-]{0,39}$/ },
   { method: 'POST', path: /^permissions\/advanced$/ },
 ];
 

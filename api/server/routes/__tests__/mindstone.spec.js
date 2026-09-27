@@ -62,6 +62,8 @@ const ENDPOINTS = [
   { method: 'patch', path: 'config/memory', write: true },
   { method: 'post', path: 'secrets/telegram-token', write: true },
   { method: 'post', path: 'permissions/advanced', write: true },
+  { method: 'get', path: 'models', write: false },
+  { method: 'post', path: 'providers/ollama-cloud', write: true },
 ];
 
 /** What each caller should get from an allowlisted endpoint. */
@@ -189,6 +191,11 @@ describe('MindStone admin proxy', () => {
       ['patch', 'config/memory%2F..%2F..%2Fv1'],
       ['post', 'permissions/advanced/x'],
       ['post', 'secrets/telegram-token/x'],
+      ['get', 'modelsx'],
+      ['post', 'providers/ollama/x'],
+      ['post', 'providers/Ollama'],
+      ['post', 'providers/..%2F..%2Fv1'],
+      ['get', 'providers/ollama'],
     ];
     for (const [method, path] of outside) {
       const response = await call('manage', { method, path });
