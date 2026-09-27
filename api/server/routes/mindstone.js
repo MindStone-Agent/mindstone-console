@@ -34,6 +34,8 @@ const ALLOWED = [
   { method: 'GET', path: /^models$/ },
   { method: 'POST', path: /^providers\/[a-z][a-z-]{0,39}$/ },
   { method: 'POST', path: /^permissions\/advanced$/ },
+  { method: 'GET', path: /^secrets$/ },
+  { method: 'DELETE', path: /^secrets\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/ },
 ];
 
 /** Gateway base URL: MINDSTONE_GATEWAY_URL is the OpenAI base (…/v1); the admin API sits at the root. */
