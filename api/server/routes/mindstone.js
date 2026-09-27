@@ -34,6 +34,7 @@ const ALLOWED = [
   { method: 'GET', path: /^models$/ },
   { method: 'POST', path: /^providers\/[a-z][a-z-]{0,39}$/ },
   { method: 'POST', path: /^permissions\/advanced$/ },
+  { method: 'POST', path: /^restart$/ },
   { method: 'GET', path: /^secrets$/ },
   { method: 'DELETE', path: /^secrets\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/ },
 ];

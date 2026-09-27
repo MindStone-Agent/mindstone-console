@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
 import { useAuthContext, useLocalize } from '~/hooks';
+import RestartGateway from './RestartGateway';
 
 type Step = { done: boolean; detail: string };
 type Status = { onboarded: boolean; steps: Record<string, Step> };
@@ -61,6 +62,7 @@ export default function MindStoneSettingsView() {
     text: string;
     errors?: FieldError[];
   } | null>(null);
+  const [restartNeeded, setRestartNeeded] = useState(false);
   const [secretName, setSecretName] = useState('');
   const [secretValue, setSecretValue] = useState('');
   const [secretResult, setSecretResult] = useState<string | null>(null);
@@ -120,6 +122,7 @@ export default function MindStoneSettingsView() {
         changed: string[];
         restartRequired: boolean;
       };
+      if (result.restartRequired) setRestartNeeded(true);
       setSaveResult({
         ok: true,
         text: result.changed.length
@@ -373,6 +376,8 @@ export default function MindStoneSettingsView() {
             )}
           </section>
         )}
+
+        <RestartGateway needed={restartNeeded} />
       </div>
     </div>
   );

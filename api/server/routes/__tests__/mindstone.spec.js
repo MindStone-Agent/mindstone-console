@@ -64,6 +64,7 @@ const ENDPOINTS = [
   { method: 'post', path: 'permissions/advanced', write: true },
   { method: 'get', path: 'models', write: false },
   { method: 'post', path: 'providers/ollama-cloud', write: true },
+  { method: 'post', path: 'restart', write: true },
   { method: 'get', path: 'secrets', write: false },
   { method: 'delete', path: 'secrets/telegram-token', write: true },
 ];
@@ -208,6 +209,12 @@ describe('MindStone admin proxy', () => {
       ['post', 'providers/ol.lama'],
       ['post', 'x/providers/ollama'],
       ['get', 'x/models'],
+      // Restart: POST only, exactly.
+      ['get', 'restart'],
+      ['post', 'restartx'],
+      ['post', 'restart/now'],
+      ['post', 'x/restart'],
+      ['delete', 'restart'],
       // Stored secrets: list, and delete one by a plain name.
       ['get', 'secretsx'],
       ['get', 'secrets/'],
