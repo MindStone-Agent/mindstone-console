@@ -8,8 +8,10 @@ services:
       context: ..
       dockerfile: Dockerfile
     image: mindstone-console:local
+    # Loopback only: the page lets people sign in and reach the agent. Put a
+    # reverse proxy with TLS in front before exposing it to a network.
     ports:
-      - "3080:3080"
+      - "127.0.0.1:3080:3080"
     depends_on:
       - mongodb
     user: "${UID:-1000}:${GID:-1000}"
