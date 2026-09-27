@@ -13,7 +13,6 @@ import { useLocalize } from '~/hooks';
 type Secret = {
   name: string;
   kind: 'file' | 'link' | 'other';
-  size?: number;
   modifiedAt?: string;
   tokenFile: string;
   usedBy: string[];
@@ -21,6 +20,11 @@ type Secret = {
 };
 
 const BASE = '/api/mindstone/admin';
+
+/** The names the gateway's secrets endpoint accepts; anything else was made on the host (#92). */
+function storable(name: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name) && !name.includes('..');
+}
 
 function errorText(error: unknown): string | undefined {
   const data = (error as { response?: { data?: { error?: unknown } } })?.response?.data;
@@ -119,13 +123,12 @@ export default function MindStoneSecretsView() {
                     <span className="font-mono text-sm">{secret.name}</span>{' '}
                     <span className="text-xs text-text-secondary">
                       {secret.kind}
-                      {secret.size !== undefined ? ` · ${secret.size} B` : ''}
                       {secret.modifiedAt
                         ? ` · ${new Date(secret.modifiedAt).toLocaleString()}`
                         : ''}
                     </span>
                   </div>
-                  {secret.gatewayCredential || secret.kind !== 'file' ? (
+                  {secret.gatewayCredential || secret.kind !== 'file' || !storable(secret.name) ? (
                     <span className="text-xs text-text-secondary">
                       {localize(
                         secret.gatewayCredential
