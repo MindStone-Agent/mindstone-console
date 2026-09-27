@@ -9,7 +9,7 @@ import { request } from 'librechat-data-provider';
 
 type Step = { done: boolean; detail: string };
 type Status = { onboarded: boolean; steps: Record<string, Step> };
-type Permissions = { advancedSettings: boolean; grantedBy?: string; grantedAt?: string };
+type Permissions = { advancedSettings: boolean; grantedBy?: string; grantedAt?: string; expiresAt?: string };
 type FieldError = { path?: string; error: string };
 
 const BASE = '/api/mindstone/admin';
@@ -260,14 +260,16 @@ export default function MindStoneSettingsView() {
               Advanced settings
             </h2>
             <p className="mb-2 text-sm text-text-secondary">
-              File paths, Pi extensions and built-in tools, the workspace, packs, skills and gateway auth can run code or read files on the
-              gateway's machine. They can be edited here only while this is on.
+              Most settings can only be changed while this is on. That covers file paths, URLs, environment variables, Pi's built-in tools,
+              the workspace, packs and skills, and anything that lets someone new reach the agent: a new or re-enabled connector, a new
+              sender or chat, or who counts as the owner. Turning it on lasts one hour. Gateway sign-in can only be changed on the gateway
+              host.
             </p>
             {permissions.advancedSettings ? (
               <div className="flex items-center gap-3">
                 <span data-testid="ms-advanced-state">
                   On{permissions.grantedBy ? `, granted by ${permissions.grantedBy}` : ''}
-                  {permissions.grantedAt ? ` at ${new Date(permissions.grantedAt).toLocaleString()}` : ''}.
+                  {permissions.expiresAt ? `, until ${new Date(permissions.expiresAt).toLocaleTimeString()}` : ''}.
                 </span>
                 <button type="button" className="rounded border border-border-medium px-3 py-1" onClick={() => void setAdvanced(false)}>
                   Turn off
