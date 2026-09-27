@@ -9,6 +9,7 @@ import {
   RequestPasswordReset,
 } from '~/components/Auth';
 import { MarketplaceProvider } from '~/components/Agents/MarketplaceContext';
+import MindStoneOnboardingView from '~/components/MindStone/OnboardingView';
 import MindStoneSettingsView from '~/components/MindStone/SettingsView';
 import AgentMarketplace from '~/components/Agents/Marketplace';
 import { OAuthSuccess, OAuthError } from '~/components/OAuth';
@@ -144,6 +145,11 @@ export const router = createBrowserRouter(
               /** MindStone settings (MindStone-Agent #38, P2). The server route enforces admin. */
               path: 'mindstone',
               element: <MindStoneSettingsView />,
+            },
+            {
+              /** MindStone guided setup (MindStone-Agent #38, P2). The server route enforces admin. */
+              path: 'mindstone/onboarding',
+              element: <MindStoneOnboardingView />,
             },
             {
               path: 'prompts',

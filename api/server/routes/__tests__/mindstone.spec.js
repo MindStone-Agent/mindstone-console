@@ -62,6 +62,8 @@ const ENDPOINTS = [
   { method: 'patch', path: 'config/memory', write: true },
   { method: 'post', path: 'secrets/telegram-token', write: true },
   { method: 'post', path: 'permissions/advanced', write: true },
+  { method: 'get', path: 'models', write: false },
+  { method: 'post', path: 'providers/ollama-cloud', write: true },
 ];
 
 /** What each caller should get from an allowlisted endpoint. */
@@ -189,6 +191,21 @@ describe('MindStone admin proxy', () => {
       ['patch', 'config/memory%2F..%2F..%2Fv1'],
       ['post', 'permissions/advanced/x'],
       ['post', 'secrets/telegram-token/x'],
+      ['get', 'modelsx'],
+      ['post', 'providers/ollama/x'],
+      ['post', 'providers/Ollama'],
+      ['post', 'providers/..%2F..%2Fv1'],
+      ['get', 'providers/ollama'],
+      ['post', 'providers/'],
+      ['post', 'providers/..'],
+      ['post', 'providers/%2E%2E'],
+      ['post', 'providers/.ollama'],
+      ['post', 'providers/-'],
+      ['post', 'providers/ollama%00'],
+      ['post', 'providers/ollama%0A'],
+      ['post', 'x/providers/ollama'],
+      ['get', 'x/models'],
+      ['patch', 'config/mem.ory'],
     ];
     for (const [method, path] of outside) {
       const response = await call('manage', { method, path });
@@ -226,7 +243,7 @@ describe('MindStone admin proxy', () => {
       .set('if-match', '"abc123"')
       .send({ value: 1 });
     const [, init] = fetchMock.mock.calls[0];
-    expect(init.headers).not.toHaveProperty('if-match');
+    expect(new Headers(init.headers).has('if-match')).toBe(false);
   });
 
   it('refuses a malformed ifMatch instead of dropping it', async () => {

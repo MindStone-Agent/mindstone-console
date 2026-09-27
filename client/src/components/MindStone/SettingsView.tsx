@@ -5,6 +5,7 @@
  * storage, and the advanced-settings permission.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
 import { useAuthContext, useLocalize } from '~/hooks';
 
@@ -199,6 +200,16 @@ export default function MindStoneSettingsView() {
                 </li>
               ))}
             </ul>
+            <Link
+              to="/mindstone/onboarding"
+              className={
+                status.onboarded
+                  ? 'mt-2 inline-block text-sm underline'
+                  : 'mt-3 inline-block rounded bg-surface-submit px-4 py-2 text-white'
+              }
+            >
+              {localize(status.onboarded ? 'com_mindstone_onb_rerun' : 'com_mindstone_onb_start')}
+            </Link>
           </section>
         )}
 
