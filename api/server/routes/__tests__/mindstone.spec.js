@@ -203,6 +203,7 @@ describe('MindStone admin proxy', () => {
       ['post', 'providers/-'],
       ['post', 'providers/ollama%00'],
       ['post', 'providers/ollama%0A'],
+      ['post', 'providers/ol.lama'],
       ['post', 'x/providers/ollama'],
       ['get', 'x/models'],
       ['patch', 'config/mem.ory'],
