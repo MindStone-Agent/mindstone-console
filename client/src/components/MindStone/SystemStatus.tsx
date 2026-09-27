@@ -215,6 +215,8 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
   }
 
   const connectorIssues = (c: Connector): Issue[] => {
+    // A disabled connector isn't run, so what it last reported isn't a problem now.
+    if (!c.enabled) return [];
     const issues: Issue[] = [];
     const state = text(c.runtime?.state);
     const lastError = text(c.runtime?.lastError);
@@ -231,10 +233,10 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
     if (c.credential?.warning) issues.push({ tone: 'warning', text: text(c.credential.warning) });
     if (c.sendPolicy?.warning) issues.push({ tone: 'warning', text: text(c.sendPolicy.warning) });
     if (lastError) issues.push({ tone: 'error', text: lastError });
-    else if (state === 'error') {
-      issues.push({ tone: 'error', text: localize('com_mindstone_sys_state_error_detail') });
+    if (state === 'error') {
+      issues.push({ tone: 'warning', text: localize('com_mindstone_sys_failed_restart') });
     }
-    if (c.enabled && (state === 'never_started' || state === 'stopped')) {
+    if (state === 'never_started' || state === 'stopped') {
       issues.push({ tone: 'warning', text: localize('com_mindstone_sys_not_running') });
     }
     const dead = count(c.queue?.dead);
@@ -456,8 +458,12 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
             <ul className="flex flex-col gap-2">
               {connectorRows.map((c) => {
                 const state = text(c.runtime?.state);
-                const stateLabel = STATES[state] ? localize(STATES[state]) : state;
+                const stateLabel = Object.hasOwn(STATES, state) ? localize(STATES[state]) : state;
                 const policy = text(c.sendPolicy?.effective);
+                // Only a policy worth knowing: approval required, or a default overridden.
+                // (A connector with no replies, like calendar, reports its default "auto".)
+                const showPolicy =
+                  policy === 'approval_required' || c.sendPolicy?.overridden === true;
                 return (
                   <li
                     key={text(c.connectorId)}
@@ -484,9 +490,11 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
                         1: n(c.queue?.delivered),
                         2: n(c.queue?.dead),
                       })}
-                      {policy
+                      {policy && showPolicy
                         ? ` ${localize('com_mindstone_sys_send_policy', {
-                            0: POLICIES[policy] ? localize(POLICIES[policy]) : policy,
+                            0: Object.hasOwn(POLICIES, policy)
+                              ? localize(POLICIES[policy])
+                              : policy,
                           })}`
                         : ''}
                     </div>

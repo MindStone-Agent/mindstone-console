@@ -141,6 +141,9 @@ describe('MindStone SystemStatus', () => {
     expect(slack).toHaveTextContent('slack sends without approval');
     expect(slack).toHaveTextContent('invalid_auth');
     expect(slack).toHaveTextContent('com_mindstone_sys_dead[2]');
+    expect(slack).toHaveTextContent('com_mindstone_sys_send_policy[com_mindstone_sys_policy_auto]');
+    expect(slack).toHaveTextContent('com_mindstone_sys_state_error');
+    expect(slack).toHaveTextContent('com_mindstone_sys_failed_restart');
     expect(screen.getByTestId('ms-sys-agent-ghost')).toHaveTextContent(
       'com_mindstone_sys_no_identity',
     );
@@ -151,12 +154,12 @@ describe('MindStone SystemStatus', () => {
   it('counts the problems below when the core checks pass', () => {
     const system = { ...problems(), ok: true, config: healthy.config };
     render(<SystemStatus system={system} />);
-    // sqlite-vec, Pi dir, broken, slack x4 (credential, policy, runtime, dead), ghost x2
+    // sqlite-vec, Pi dir, broken, slack x5 (credential, policy, runtime, restart, dead), ghost x2
     expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(
-      'com_mindstone_sys_ok_issues[9]',
+      'com_mindstone_sys_ok_issues[10]',
     );
     expect(screen.getByTestId('ms-system-overall')).toHaveClass('text-orange-500');
-    expect(warnings()).toHaveLength(10); // the nine, plus the top line
+    expect(warnings()).toHaveLength(11); // the ten, plus the top line
   });
 
   it('does not describe Pi isolation when Pi sessions are not in use', () => {
@@ -212,6 +215,50 @@ describe('MindStone SystemStatus', () => {
     );
     expect(discord).toHaveTextContent('com_mindstone_sys_not_running');
     expect(discord).toHaveTextContent('com_mindstone_sys_dead_one[1]');
+  });
+
+  it('warns about a stopped connector and one that failed without saying why', () => {
+    const system = {
+      ...healthy,
+      connectors: [
+        { connectorId: 'slack', enabled: true, runtime: { state: 'stopped' } },
+        { connectorId: 'email', enabled: true, runtime: { state: 'error' } },
+      ],
+    };
+    render(<SystemStatus system={system} />);
+    expect(screen.getByTestId('ms-sys-connector-slack')).toHaveTextContent(
+      'com_mindstone_sys_not_running',
+    );
+    expect(screen.getByTestId('ms-sys-connector-email')).toHaveTextContent(
+      'com_mindstone_sys_failed_restart',
+    );
+  });
+
+  it("counts nothing for a disabled connector, and hides a default policy it doesn't use", () => {
+    const system = {
+      ...healthy,
+      connectors: [
+        {
+          connectorId: 'discord',
+          enabled: false,
+          credential: { configured: true, present: false, error: 'secret file not found' },
+          runtime: { state: 'error', lastError: 'old failure' },
+          queue: { pending: 0, delivered: 0, dead: 0 },
+        },
+        {
+          connectorId: 'calendar',
+          enabled: true,
+          sendPolicy: { effective: 'auto', overridden: false },
+          runtime: { state: 'running' },
+        },
+      ],
+    };
+    render(<SystemStatus system={system} />);
+    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(/^com_mindstone_sys_ok$/);
+    expect(warnings()).toHaveLength(0);
+    expect(screen.getByTestId('ms-sys-connector-calendar')).not.toHaveTextContent(
+      'com_mindstone_sys_send_policy',
+    );
   });
 
   it('does not crash on a partial or differently shaped status from another gateway version', () => {
@@ -277,7 +324,7 @@ describe('MindStone SystemStatus against a real gateway payload', () => {
   it('renders it, counts the broken connector, and shows its error once', () => {
     render(<SystemStatus system={real} />);
     expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(
-      'com_mindstone_sys_ok_issues_one[1]',
+      'com_mindstone_sys_ok_issues[2]',
     );
     const telegram = screen.getByTestId('ms-sys-connector-telegram');
     expect(telegram).toHaveTextContent('com_mindstone_sys_enabled_lc');
