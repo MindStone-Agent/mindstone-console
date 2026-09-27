@@ -2,8 +2,10 @@
  * MindStone Console: server-side proxy to the MindStone-Agent gateway's admin
  * API (MindStone-Agent #38, P2). The browser calls /api/mindstone/admin/*; this
  * route checks the LibreChat session and the ACCESS_ADMIN capability, then
- * calls the gateway with the service token (which never reaches the browser)
- * and the signed-in user's id, with role "admin".
+ * calls the gateway with the service token and the separate admin credential
+ * (neither ever reaches the browser) and the signed-in user's id, with role
+ * "admin". The browser passes an If-Match etag as ?ifMatch=, since the
+ * Console's request helper can't set headers.
  */
 const express = require('express');
 const { SystemCapabilities } = require('@librechat/data-schemas');
@@ -38,22 +40,40 @@ router.all('/admin/*', async (req, res) => {
   }
   const base = gatewayBase();
   const token = process.env.MINDSTONE_GATEWAY_TOKEN;
-  if (!base || !token) {
-    return res.status(503).json({ ok: false, error: 'MINDSTONE_GATEWAY_URL and MINDSTONE_GATEWAY_TOKEN must be set on the Console server' });
+  const adminToken = process.env.MINDSTONE_ADMIN_TOKEN;
+  if (!base || !token || !adminToken) {
+    return res.status(503).json({
+      ok: false,
+      error: 'MINDSTONE_GATEWAY_URL, MINDSTONE_GATEWAY_TOKEN and MINDSTONE_ADMIN_TOKEN must be set on the Console server',
+    });
+  }
+  const userId = req.user?.id ?? req.user?._id;
+  if (!userId) {
+    return res.status(401).json({ ok: false, error: 'no signed-in user' });
+  }
+  const headers = {
+    authorization: `Bearer ${token}`,
+    'content-type': 'application/json',
+    'x-mindstone-admin-token': adminToken,
+    'x-mindstone-user-id': String(userId),
+    'x-mindstone-user-role': 'admin',
+  };
+  const ifMatch = typeof req.query?.ifMatch === 'string' ? req.query.ifMatch : undefined;
+  if (ifMatch && ifMatch.length <= 100 && /^"[0-9a-f]+"$/.test(ifMatch)) {
+    headers['if-match'] = ifMatch;
   }
   try {
     const response = await fetch(`${base}/admin/${path}`, {
       method: req.method,
-      headers: {
-        authorization: `Bearer ${token}`,
-        'content-type': 'application/json',
-        'x-mindstone-user-id': String(req.user?.id ?? req.user?._id ?? 'unknown'),
-        'x-mindstone-user-role': 'admin',
-      },
+      headers,
       body: req.method === 'GET' ? undefined : JSON.stringify(req.body ?? {}),
       signal: AbortSignal.timeout(15_000),
     });
     const text = await response.text();
+    const etag = response.headers.get('etag');
+    if (etag) {
+      res.set('ETag', etag);
+    }
     res.status(response.status);
     res.type('application/json');
     return res.send(text);

@@ -40,6 +40,7 @@ function errorBody(error: unknown): { error?: string; errors?: FieldError[] } {
 export default function MindStoneSettingsView() {
   const [status, setStatus] = useState<Status | null>(null);
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
+  const [etag, setEtag] = useState<string | null>(null);
   const [permissions, setPermissions] = useState<Permissions | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [section, setSection] = useState('routing');
@@ -54,11 +55,12 @@ export default function MindStoneSettingsView() {
     try {
       const [s, c, p] = await Promise.all([
         request.get<Status>(`${BASE}/status`),
-        request.get<{ config: Record<string, unknown> }>(`${BASE}/config`),
+        request.get<{ config: Record<string, unknown>; etag?: string }>(`${BASE}/config`),
         request.get<{ permissions: Permissions }>(`${BASE}/permissions`),
       ]);
       setStatus(s);
       setConfig(c.config);
+      setEtag(c.etag ?? null);
       setPermissions(p.permissions);
       setLoadError(null);
     } catch (error) {
@@ -87,7 +89,9 @@ export default function MindStoneSettingsView() {
   const save = async () => {
     if (draftError) return;
     try {
-      const result = (await request.patch(`${BASE}/config/${section}`, JSON.parse(draft))) as {
+      // The gateway refuses the save (412) if the config changed since this page read it.
+      const query = etag ? `?ifMatch=${encodeURIComponent(etag)}` : '';
+      const result = (await request.patch(`${BASE}/config/${section}${query}`, JSON.parse(draft))) as {
         changed: string[];
         restartRequired: boolean;
       };
@@ -100,7 +104,12 @@ export default function MindStoneSettingsView() {
       await load();
     } catch (error) {
       const body = errorBody(error);
-      setSaveResult({ ok: false, text: body.error ?? 'Not saved.', errors: body.errors });
+      const stale = (error as { response?: { status?: number } })?.response?.status === 412;
+      setSaveResult({
+        ok: false,
+        text: stale ? 'The settings changed since you opened them, so nothing was saved. Reload to see the current values, then make your change again.' : body.error ?? 'Not saved.',
+        errors: body.errors,
+      });
     }
   };
 
