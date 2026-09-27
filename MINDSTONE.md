@@ -21,6 +21,9 @@ Planned, per the design: visibility and approvals (P3).
 
 ## Run it locally
 
+Use the files in `mindstone/` only. The repo root's `docker-compose.yml`, `deploy-compose.yml` and `.env.example` are upstream LibreChat's: they publish on every interface and allow open registration.
+
+
 1. Start the MindStone-Agent gateway with chat completions enabled and token auth.
 2. `cd mindstone && cp .env.example .env`, fill in the secrets and the gateway token. For the settings page, also set `MINDSTONE_ADMIN_TOKEN`, and on the gateway set `gateway.admin.tokenSha256` to its SHA-256 (`printf %s "<token>" | shasum -a 256`), so the gateway never holds the credential itself. The settings page needs an admin with `read:configs` (to view) and `manage:configs` (to change), platform-wide; the default ADMIN role has both.
 3. `docker compose up -d --build`. The page is published on 127.0.0.1:3080 only.
