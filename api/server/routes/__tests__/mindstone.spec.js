@@ -4,6 +4,12 @@
  * replaced by a stand-in that checks the capability names the route asks for
  * (and platformOnly), so these tests pin the route's wiring; the real
  * capability check is LibreChat's own.
+ *
+ * The stand-in is stricter than production for tenant users: it refuses any
+ * user with a tenantId when platformOnly is set, while the real check
+ * (packages/api/src/middleware/capabilities.ts) looks for that user's own
+ * grants at platform level. In the single-tenant compose nobody has a
+ * tenantId, so it makes no difference there.
  */
 const express = require('express');
 const request = require('supertest');
@@ -164,9 +170,29 @@ describe('MindStone admin proxy', () => {
   });
 
   it('an endpoint outside the allowlist is 404 and never reaches the gateway', async () => {
-    for (const path of ['v1/chat/completions', 'config/..%2F..%2Fv1', 'secrets/../config']) {
-      const response = await call('manage', { method: 'post', path });
-      expect(response.status).toBe(404);
+    const outside = [
+      ['post', 'v1/chat/completions'],
+      ['post', 'config/..%2F..%2Fv1'],
+      ['post', 'secrets/../config'],
+      // A secret name that can hold a slash would reach any gateway path.
+      ['post', 'secrets/a/..%2F..%2Fv1%2Fchat%2Fcompletions'],
+      ['post', 'secrets/a%2F..%2F..%2Fv1%2Fchat%2Fcompletions'],
+      ['post', 'secrets/..'],
+      ['post', 'secrets/.env'],
+      ['post', 'secrets/'],
+      // Anchored at both ends.
+      ['get', 'statusx'],
+      ['get', 'xstatus'],
+      ['get', 'config/memory'],
+      ['get', 'permissionsx'],
+      ['patch', 'config/memory/extra'],
+      ['patch', 'config/memory%2F..%2F..%2Fv1'],
+      ['post', 'permissions/advanced/x'],
+      ['post', 'secrets/telegram-token/x'],
+    ];
+    for (const [method, path] of outside) {
+      const response = await call('manage', { method, path });
+      expect([path, response.status]).toEqual([path, 404]);
     }
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -191,6 +217,16 @@ describe('MindStone admin proxy', () => {
       'x-mindstone-user-role': 'admin',
       'if-match': '"abc123"',
     });
+  });
+
+  it("never forwards the browser's own If-Match header", async () => {
+    await request(app)
+      .patch('/api/mindstone/admin/config/memory')
+      .set('x-test-caller', 'manage')
+      .set('if-match', '"abc123"')
+      .send({ value: 1 });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers).not.toHaveProperty('if-match');
   });
 
   it('refuses a malformed ifMatch instead of dropping it', async () => {
