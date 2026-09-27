@@ -274,6 +274,9 @@ export default function MindStoneSettingsView() {
           <h2 id="ms-secrets" className="mb-2 text-lg font-medium">
             {localize('com_mindstone_store_secret')}
           </h2>
+          <Link to="/mindstone/secrets" className="mb-2 inline-block text-sm underline">
+            {localize('com_mindstone_sec_manage')}
+          </Link>
           <p className="mb-2 text-sm text-text-secondary">
             {localize('com_mindstone_store_secret_hint')}
           </p>
