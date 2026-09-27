@@ -233,7 +233,7 @@ describe('MindStone admin proxy', () => {
       .set('if-match', '"abc123"')
       .send({ value: 1 });
     const [, init] = fetchMock.mock.calls[0];
-    expect(init.headers).not.toHaveProperty('if-match');
+    expect(new Headers(init.headers).has('if-match')).toBe(false);
   });
 
   it('refuses a malformed ifMatch instead of dropping it', async () => {
