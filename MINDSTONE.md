@@ -22,7 +22,7 @@ Planned, per the design: visibility and approvals (P3).
 ## Run it locally
 
 1. Start the MindStone-Agent gateway with chat completions enabled and token auth.
-2. `cd mindstone && cp .env.example .env`, fill in the secrets and the gateway token. For the settings page, also set `MINDSTONE_ADMIN_TOKEN` and give the gateway the same value through `gateway.admin.tokenEnv` or `gateway.admin.tokenFile`.
+2. `cd mindstone && cp .env.example .env`, fill in the secrets and the gateway token. For the settings page, also set `MINDSTONE_ADMIN_TOKEN`, and on the gateway set `gateway.admin.tokenSha256` to its SHA-256 (`printf %s "<token>" | shasum -a 256`), so the gateway never holds the credential itself. The settings page needs an admin with `read:configs` (to view) and `manage:configs` (to change), platform-wide; the default ADMIN role has both.
 3. `docker compose up -d --build`, then open http://localhost:3080. The first account registered is the admin.
 
 ## License

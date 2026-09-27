@@ -1,18 +1,26 @@
 /**
  * MindStone Console: server-side proxy to the MindStone-Agent gateway's admin
  * API (MindStone-Agent #38, P2). The browser calls /api/mindstone/admin/*; this
- * route checks the LibreChat session and the ACCESS_ADMIN capability, then
- * calls the gateway with the service token and the separate admin credential
- * (neither ever reaches the browser) and the signed-in user's id, with role
- * "admin". The browser passes an If-Match etag as ?ifMatch=, since the
- * Console's request helper can't set headers.
+ * route checks the LibreChat session and capabilities, then calls the gateway
+ * with the service token and the separate admin credential (neither ever
+ * reaches the browser) and the signed-in user's id, with role "admin". The
+ * browser passes an If-Match etag as ?ifMatch=, since the Console's request
+ * helper can't set headers.
+ *
+ * Capabilities: like LibreChat's other admin routers, access:admin alone isn't
+ * enough. Reading the gateway config needs read:configs; changing it needs
+ * manage:configs; both platform-level, since there is one gateway for every
+ * tenant.
  */
 const express = require('express');
-const { SystemCapabilities } = require('@librechat/data-schemas');
+const { logger, SystemCapabilities } = require('@librechat/data-schemas');
 const { requireCapability } = require('~/server/middleware/roles/capabilities');
 const { requireJwtAuth } = require('~/server/middleware');
 
 const router = express.Router();
+
+const requireRead = requireCapability(SystemCapabilities.READ_CONFIGS, { platformOnly: true });
+const requireManage = requireCapability(SystemCapabilities.MANAGE_CONFIGS, { platformOnly: true });
 
 router.use(requireJwtAuth, requireCapability(SystemCapabilities.ACCESS_ADMIN));
 
@@ -32,8 +40,15 @@ function gatewayBase() {
   return url.replace(/\/+$/, '').replace(/\/v1$/, '');
 }
 
+/** Reads need read:configs, writes need manage:configs. */
+function requireForMethod(req, res, next) {
+  return (req.method === 'GET' ? requireRead : requireManage)(req, res, next);
+}
+
 // Express 5 path syntax: a named wildcard, whose value is an array of segments.
-router.all('/admin/*path', async (req, res) => {
+router.all('/admin/*path', requireForMethod, async (req, res) => {
+  // Nothing here may be cached: the config is masked, but it is still the config.
+  res.set('Cache-Control', 'no-store');
   const segments = req.params.path;
   const path = Array.isArray(segments) ? segments.join('/') : (segments ?? '');
   const allowed = ALLOWED.some((rule) => rule.method === req.method && rule.path.test(path));
@@ -60,8 +75,13 @@ router.all('/admin/*path', async (req, res) => {
     'x-mindstone-user-id': String(userId),
     'x-mindstone-user-role': 'admin',
   };
-  const ifMatch = typeof req.query?.ifMatch === 'string' ? req.query.ifMatch : undefined;
-  if (ifMatch && ifMatch.length <= 100 && /^"[0-9a-f]+"$/.test(ifMatch)) {
+  const ifMatch = req.query?.ifMatch;
+  if (ifMatch !== undefined) {
+    // A present but malformed etag is refused rather than dropped, so a save
+    // never silently loses its stale-write guard.
+    if (typeof ifMatch !== 'string' || ifMatch.length > 100 || !/^"[0-9a-f]+"$/.test(ifMatch)) {
+      return res.status(400).json({ ok: false, error: 'ifMatch must be the etag the settings page read' });
+    }
     headers['if-match'] = ifMatch;
   }
   try {
@@ -69,9 +89,21 @@ router.all('/admin/*path', async (req, res) => {
       method: req.method,
       headers,
       body: req.method === 'GET' ? undefined : JSON.stringify(req.body ?? {}),
+      // Never follow a redirect: fetch would carry the admin credential (and
+      // the body, which can hold a secret) to wherever it points.
+      redirect: 'error',
       signal: AbortSignal.timeout(15_000),
     });
     const text = await response.text();
+    if (response.status === 401) {
+      // The gateway refused the Console's own credentials. Passing 401 through
+      // would read as an expired session in the browser and log the admin out.
+      logger.error('[mindstone] the gateway refused the Console credentials (401)');
+      return res.status(502).json({
+        ok: false,
+        error: "the MindStone gateway refused the Console's credentials; check MINDSTONE_GATEWAY_TOKEN and MINDSTONE_ADMIN_TOKEN",
+      });
+    }
     const etag = response.headers.get('etag');
     if (etag) {
       res.set('ETag', etag);
@@ -80,7 +112,10 @@ router.all('/admin/*path', async (req, res) => {
     res.type('application/json');
     return res.send(text);
   } catch (error) {
-    return res.status(502).json({ ok: false, error: `the MindStone gateway didn't answer: ${error?.message ?? error}` });
+    // Logged here, never sent: a fetch error can quote a header value (the
+    // tokens) or a URL with credentials.
+    logger.error('[mindstone] gateway request failed', error);
+    return res.status(502).json({ ok: false, error: "the MindStone gateway didn't answer" });
   }
 });
 
