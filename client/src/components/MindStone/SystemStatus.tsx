@@ -19,7 +19,8 @@ type Connector = {
   };
   sendPolicy?: { effective?: string; overridden?: boolean; warning?: string };
   runtime?: { state?: string; lastError?: string; updatedAt?: string };
-  queue?: { pending?: number; delivered?: number; dead?: number };
+  /** `error` is set when the queue file can't be read; the counts are then unknown, not 0. */
+  queue?: { pending?: number; delivered?: number; dead?: number; error?: string };
 };
 
 export type SystemStatusData = {
@@ -89,6 +90,27 @@ const text = (value: unknown): string => {
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return value == null ? '' : JSON.stringify(value);
+};
+/**
+ * Gateway error text with credential shapes masked. The gateway is meant to
+ * keep credentials out of what it reports; this is a second layer for text
+ * such as a failed request URL that carried a bot token.
+ */
+const SECRET_SHAPES: RegExp[] = [
+  /(?<!\d)\d{6,}:[A-Za-z0-9_-]{30,}/g, // Telegram bot token, also inside a /bot<token>/ URL
+  /\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}/g, // OpenAI / Anthropic keys
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g, // Slack tokens
+  /\bgh[pousr]_[A-Za-z0-9]{20,}/g, // GitHub tokens
+  /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi,
+];
+const masked = (value: unknown): string => {
+  let out = text(value).replace(/(\/\/)[^/\s@]+@/g, '$1***@'); // URL user info
+  for (const shape of SECRET_SHAPES) {
+    out = out.replace(shape, (match, scheme?: string) =>
+      typeof scheme === 'string' && /^(Bearer|Basic)$/i.test(scheme) ? `${scheme} ***` : '***',
+    );
+  }
+  return out;
 };
 const count = (value: unknown): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : 0;
@@ -177,18 +199,18 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
       text: localize('com_mindstone_sys_config_missing', { 0: text(config.path) }),
     });
   }
-  if (config?.error) configIssues.push({ tone: 'error', text: text(config.error) });
+  if (config?.error) configIssues.push({ tone: 'error', text: masked(config.error) });
 
   const memoryIssues: Issue[] = [];
   if (sqlite && sqlite.present !== false && sqlite.sqliteVec?.available === false) {
     if (sqlite.sqliteVec.error) {
       memoryIssues.push({
         tone: 'warning',
-        text: localize('com_mindstone_sys_sqlite_vec', { 0: text(sqlite.sqliteVec.error) }),
+        text: localize('com_mindstone_sys_sqlite_vec', { 0: masked(sqlite.sqliteVec.error) }),
       });
     }
   }
-  if (sqlite?.error) memoryIssues.push({ tone: 'error', text: text(sqlite.error) });
+  if (sqlite?.error) memoryIssues.push({ tone: 'error', text: masked(sqlite.error) });
 
   const piIssues: Issue[] =
     pi?.active && pi.usesGlobalPiAgentDir
@@ -215,12 +237,19 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
   }
 
   const connectorIssues = (c: Connector): Issue[] => {
-    // A disabled connector isn't run, so what it last reported isn't a problem now.
-    if (!c.enabled) return [];
     const issues: Issue[] = [];
+    // The queue is read now, so an unreadable one is a problem whether or not the connector runs.
+    if (c.queue?.error) {
+      issues.push({
+        tone: 'error',
+        text: localize('com_mindstone_sys_queue_unreadable', { 0: masked(c.queue.error) }),
+      });
+    }
+    // A disabled connector isn't run, so what it last reported isn't a problem now.
+    if (!c.enabled) return issues;
     const state = text(c.runtime?.state);
-    const lastError = text(c.runtime?.lastError);
-    const credentialError = text(c.credential?.error);
+    const lastError = masked(c.runtime?.lastError);
+    const credentialError = masked(c.credential?.error);
     if (c.credential?.configured && !c.credential.present) {
       // The runtime error usually repeats the credential error; show it once.
       if (!(credentialError && lastError.includes(credentialError))) {
@@ -230,8 +259,8 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
         });
       }
     }
-    if (c.credential?.warning) issues.push({ tone: 'warning', text: text(c.credential.warning) });
-    if (c.sendPolicy?.warning) issues.push({ tone: 'warning', text: text(c.sendPolicy.warning) });
+    if (c.credential?.warning) issues.push({ tone: 'warning', text: masked(c.credential.warning) });
+    if (c.sendPolicy?.warning) issues.push({ tone: 'warning', text: masked(c.sendPolicy.warning) });
     if (lastError) issues.push({ tone: 'error', text: lastError });
     if (state === 'error') {
       issues.push({ tone: 'warning', text: localize('com_mindstone_sys_failed_restart') });
@@ -244,7 +273,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
       issues.push({
         tone: 'warning',
         text: localize(dead === 1 ? 'com_mindstone_sys_dead_one' : 'com_mindstone_sys_dead', {
-          0: n(dead),
+          count: dead,
         }),
       });
     }
@@ -255,7 +284,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
     ...(a.identityExists === false
       ? [{ tone: 'warning' as const, text: localize('com_mindstone_sys_no_identity') }]
       : []),
-    ...(a.error ? [{ tone: 'error' as const, text: text(a.error) }] : []),
+    ...(a.error ? [{ tone: 'error' as const, text: masked(a.error) }] : []),
   ];
 
   const problemCount =
@@ -267,18 +296,30 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
     agentRows.reduce((total, a) => total + agentIssues(a).length, 0);
 
   let overall: { className: string; message: string };
-  if (!system.ok) {
+  if (system.ok === false) {
     overall = { className: 'text-red-500', message: localize('com_mindstone_sys_not_ok') };
   } else if (problemCount > 0) {
     overall = {
       className: 'text-orange-500',
       message: localize(
-        problemCount === 1 ? 'com_mindstone_sys_ok_issues_one' : 'com_mindstone_sys_ok_issues',
-        { 0: n(problemCount) },
+        problemCount === 1 ? 'com_mindstone_sys_issues_one' : 'com_mindstone_sys_issues',
+        { count: problemCount },
       ),
     };
-  } else {
+    if (system.ok === true) {
+      overall.message = localize(
+        problemCount === 1 ? 'com_mindstone_sys_ok_issues_one' : 'com_mindstone_sys_ok_issues',
+        { count: problemCount },
+      );
+    }
+  } else if (system.ok === true) {
     overall = { className: 'text-green-600', message: localize('com_mindstone_sys_ok') };
+  } else {
+    // A status without `ok` says nothing about the core checks either way.
+    overall = {
+      className: 'text-text-secondary',
+      message: localize('com_mindstone_sys_ok_unknown'),
+    };
   }
 
   return (
@@ -295,13 +336,13 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
           </h3>
           <dl>
             <Row label={localize('com_mindstone_sys_address')}>{text(gateway.baseUrl)}</Row>
-            <Row label={localize('com_mindstone_sys_sign_in')}>
+            <Row label={localize('com_mindstone_sys_sign_in')} testId="ms-sys-signin">
               {text(gateway.auth?.mode)}
               {gateway.auth?.required === false
                 ? ` (${localize('com_mindstone_sys_not_required')})`
                 : ''}
             </Row>
-            <Row label={localize('com_mindstone_sys_http_api')}>
+            <Row label={localize('com_mindstone_sys_http_api')} testId="ms-sys-http">
               {localize('com_mindstone_sys_http_detail', {
                 0: on(gateway.http?.modelsEnabled),
                 1: on(gateway.http?.chatCompletionsEnabled),
@@ -309,7 +350,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
               })}
             </Row>
             {routing && (
-              <Row label={localize('com_mindstone_sys_routing')}>
+              <Row label={localize('com_mindstone_sys_routing')} testId="ms-sys-routing">
                 {[routing.mode, routing.defaultAgentId, routing.defaultModel]
                   .map(text)
                   .filter(Boolean)
@@ -326,7 +367,9 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
             {localize('com_mindstone_sys_webchat')}
           </h3>
           <dl>
-            <Row label={localize('com_mindstone_sys_enabled')}>{yes(webchat.enabled)}</Row>
+            <Row label={localize('com_mindstone_sys_enabled')} testId="ms-sys-webchat-enabled">
+              {yes(webchat.enabled)}
+            </Row>
             {webchat.url && (
               <Row label={localize('com_mindstone_sys_address')}>{text(webchat.url)}</Row>
             )}
@@ -361,7 +404,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
                   {n(sqlite.duplicateTextChunks)}
                 </Row>
               )}
-              {sqlite.updatedAt && (
+              {Boolean(sqlite.updatedAt) && (
                 <Row label={localize('com_mindstone_sys_updated')}>{when(sqlite.updatedAt)}</Row>
               )}
             </dl>
@@ -456,7 +499,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
             </p>
           ) : (
             <ul className="flex flex-col gap-2">
-              {connectorRows.map((c) => {
+              {connectorRows.map((c, index) => {
                 const state = text(c.runtime?.state);
                 const stateLabel = Object.hasOwn(STATES, state) ? localize(STATES[state]) : state;
                 const policy = text(c.sendPolicy?.effective);
@@ -466,7 +509,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
                   policy === 'approval_required' || c.sendPolicy?.overridden === true;
                 return (
                   <li
-                    key={text(c.connectorId)}
+                    key={`${text(c.connectorId)}:${index}`}
                     data-testid={`ms-sys-connector-${text(c.connectorId)}`}
                     className="text-sm"
                   >
@@ -485,11 +528,14 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
                         }`
                       : ''}
                     <div className="text-text-secondary">
-                      {localize('com_mindstone_sys_queue', {
-                        0: n(c.queue?.pending),
-                        1: n(c.queue?.delivered),
-                        2: n(c.queue?.dead),
-                      })}
+                      {/* An unreadable queue has unknown counts, not zero; its error shows below. */}
+                      {c.queue?.error
+                        ? localize('com_mindstone_sys_queue_unknown')
+                        : localize('com_mindstone_sys_queue', {
+                            0: n(c.queue?.pending),
+                            1: n(c.queue?.delivered),
+                            2: n(c.queue?.dead),
+                          })}
                       {policy && showPolicy
                         ? ` ${localize('com_mindstone_sys_send_policy', {
                             0: Object.hasOwn(POLICIES, policy)
@@ -513,8 +559,11 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
             {localize('com_mindstone_sys_agents')}
           </h3>
           <ul className="flex flex-col gap-1 text-sm">
-            {agentRows.map((a) => (
-              <li key={text(a.agentId)} data-testid={`ms-sys-agent-${text(a.agentId)}`}>
+            {agentRows.map((a, index) => (
+              <li
+                key={`${text(a.agentId)}:${index}`}
+                data-testid={`ms-sys-agent-${text(a.agentId)}`}
+              >
                 <strong>{text(a.name) || text(a.agentId)}</strong>
                 <Issues issues={agentIssues(a)} />
               </li>

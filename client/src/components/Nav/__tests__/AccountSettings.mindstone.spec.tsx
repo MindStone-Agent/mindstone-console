@@ -1,11 +1,14 @@
 import { SystemRoles } from 'librechat-data-provider';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import AccountSettings from '../AccountSettings';
 
 let mockRole: string | undefined;
 let mockSmallScreen = false;
-const mockSetSidebarOpen = jest.fn((_next: boolean, afterSlide?: () => void) => afterSlide?.());
+let mockAfterSlide: (() => void) | undefined;
+const mockSetSidebarOpen = jest.fn((_next: boolean, afterSlide?: () => void) => {
+  mockAfterSlide = afterSlide;
+});
 
 jest.mock('recoil', () => ({
   ...jest.requireActual('recoil'),
@@ -51,6 +54,7 @@ function renderMenu() {
 describe('AccountSettings MindStone link', () => {
   beforeEach(() => {
     mockSmallScreen = false;
+    mockAfterSlide = undefined;
     mockSetSidebarOpen.mockClear();
   });
 
@@ -68,6 +72,9 @@ describe('AccountSettings MindStone link', () => {
     renderMenu();
     fireEvent.click(await screen.findByTestId('nav-mindstone'));
     expect(mockSetSidebarOpen).toHaveBeenCalledWith(false, expect.any(Function));
+    // Nothing navigates until the drawer's slide hands over.
+    expect(screen.queryByTestId('mindstone-page')).toBeNull();
+    act(() => mockAfterSlide?.());
     expect(await screen.findByTestId('mindstone-page')).toBeInTheDocument();
   });
 

@@ -301,6 +301,140 @@ describe('MindStone SystemStatus', () => {
   });
 });
 
+describe('MindStone SystemStatus rows and errors', () => {
+  it('shows the gateway, web chat and routing rows with their values', () => {
+    render(<SystemStatus system={healthy} />);
+    expect(screen.getByTestId('ms-sys-signin')).toHaveTextContent(/token$/);
+    expect(screen.getByTestId('ms-sys-signin')).not.toHaveTextContent(
+      'com_mindstone_sys_not_required',
+    );
+    expect(screen.getByTestId('ms-sys-http')).toHaveTextContent(
+      'com_mindstone_sys_http_detail[com_mindstone_sys_on|com_mindstone_sys_on|com_mindstone_sys_off]',
+    );
+    expect(screen.getByTestId('ms-sys-routing')).toHaveTextContent(
+      'pi-session, main, claude-sonnet-5',
+    );
+    expect(screen.getByTestId('ms-sys-webchat-enabled')).toHaveTextContent('com_mindstone_sys_yes');
+  });
+
+  it('says sign-in is not required only when the gateway says so', () => {
+    const system = {
+      ...healthy,
+      gateway: { ...healthy.gateway, auth: { mode: 'none', required: false } },
+    };
+    render(<SystemStatus system={system} />);
+    expect(screen.getByTestId('ms-sys-signin')).toHaveTextContent('com_mindstone_sys_not_required');
+  });
+
+  it('shows config, memory and credential-warning errors, and counts them', () => {
+    const system: SystemStatusData = {
+      ...healthy,
+      config: { ...healthy.config, error: 'config.json: unexpected token' },
+      memory: { sqlite: { ...healthy.memory!.sqlite, error: 'database is locked' } },
+      connectors: [
+        {
+          ...healthy.connectors![0],
+          credential: { configured: true, present: true, warning: 'token file is world-readable' },
+        },
+      ],
+    };
+    render(<SystemStatus system={system} />);
+    expect(screen.getByText('config.json: unexpected token')).toBeInTheDocument();
+    expect(screen.getByText('database is locked')).toBeInTheDocument();
+    expect(screen.getByText('token file is world-readable')).toBeInTheDocument();
+    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(
+      'com_mindstone_sys_ok_issues[3]',
+    );
+  });
+
+  it('masks credentials in gateway error text', () => {
+    const token = '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw';
+    const system: SystemStatusData = {
+      ...healthy,
+      connectors: [
+        {
+          connectorId: 'telegram',
+          enabled: true,
+          runtime: {
+            state: 'error',
+            lastError: `Failed to parse URL from htp://api.telegram.org/bot${token}/getMe`,
+          },
+          credential: {
+            configured: true,
+            present: true,
+            warning: 'rejected sk-proj-AbCdEf1234567890XYZ and xoxb-1234-5678-abcdefgh',
+          },
+          sendPolicy: {
+            effective: 'auto',
+            overridden: true,
+            warning: 'Bearer abcdefghijklmnop sent',
+          },
+        },
+      ],
+      config: { exists: true, error: 'fetch https://user:hunter22@models.example/v1 failed' },
+    };
+    render(<SystemStatus system={system} />);
+    const page = screen.getByTestId('ms-system').textContent ?? '';
+    for (const secret of [
+      token,
+      'AbCdEf1234567890XYZ',
+      'xoxb-1234',
+      'abcdefghijklmnop',
+      'hunter22',
+    ]) {
+      expect(page).not.toContain(secret);
+    }
+    expect(page).toContain('Failed to parse URL from htp://api.telegram.org/bot***/getMe');
+    expect(page).toContain('Bearer ***');
+    expect(page).toContain('https://***@models.example/v1');
+  });
+
+  it('shows an unreadable queue as unknown, not zero, and counts it even when disabled', () => {
+    const system: SystemStatusData = {
+      ...healthy,
+      connectors: [
+        {
+          connectorId: 'email',
+          enabled: false,
+          runtime: { state: 'never_started' },
+          queue: { pending: 0, delivered: 0, dead: 0, error: 'EACCES: permission denied' },
+        },
+      ],
+    };
+    render(<SystemStatus system={system} />);
+    const email = screen.getByTestId('ms-sys-connector-email');
+    expect(email).toHaveTextContent('com_mindstone_sys_queue_unknown');
+    expect(email).not.toHaveTextContent('com_mindstone_sys_queue[');
+    expect(email).toHaveTextContent(
+      'com_mindstone_sys_queue_unreadable[EACCES: permission denied]',
+    );
+    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(
+      'com_mindstone_sys_ok_issues_one[1]',
+    );
+  });
+
+  it('is neutral when the status has no ok field', () => {
+    const { ok: _ok, ...rest } = healthy;
+    const { unmount } = render(<SystemStatus system={rest} />);
+    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(
+      /^com_mindstone_sys_ok_unknown$/,
+    );
+    expect(screen.getByTestId('ms-system-overall')).toHaveClass('text-text-secondary');
+    unmount();
+    render(<SystemStatus system={{ ...rest, config: { exists: false, path: '/x' } }} />);
+    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(
+      'com_mindstone_sys_issues_one[1]',
+    );
+  });
+
+  it('renders no stray 0 for a zero timestamp', () => {
+    const system = { ...healthy, memory: { sqlite: { ...healthy.memory!.sqlite, updatedAt: 0 } } };
+    render(<SystemStatus system={system as unknown as SystemStatusData} />);
+    expect(screen.getByTestId('ms-sys-memory').textContent).not.toMatch(/0$/);
+    expect(screen.getByTestId('ms-sys-memory')).not.toHaveTextContent('com_mindstone_sys_updated');
+  });
+});
+
 describe('MindStone SystemStatus memory without a database', () => {
   it('says there is no database yet, without also warning about the vector extension', () => {
     const system = {
