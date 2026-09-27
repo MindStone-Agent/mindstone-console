@@ -34,6 +34,9 @@ const ALLOWED = [
   { method: 'GET', path: /^models$/ },
   { method: 'POST', path: /^providers\/[a-z][a-z-]{0,39}$/ },
   { method: 'POST', path: /^permissions\/advanced$/ },
+  { method: 'GET', path: /^approvals$/ },
+  { method: 'GET', path: /^approvals\/[0-9a-f-]{8,36}$/ },
+  { method: 'POST', path: /^approvals\/[0-9a-f-]{8,36}\/(approve|reject)$/ },
 ];
 
 /** Gateway base URL: MINDSTONE_GATEWAY_URL is the OpenAI base (…/v1); the admin API sits at the root. */
@@ -89,8 +92,11 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
     }
     headers['if-match'] = ifMatch;
   }
+  // The approvals list takes one query, all=1 (decided actions too); nothing
+  // else from the browser's query string reaches the gateway.
+  const query = path === 'approvals' && req.query?.all === '1' ? '?all=1' : '';
   try {
-    const response = await fetch(`${base}/admin/${path}`, {
+    const response = await fetch(`${base}/admin/${path}${query}`, {
       method: req.method,
       headers,
       body: req.method === 'GET' ? undefined : JSON.stringify(req.body ?? {}),

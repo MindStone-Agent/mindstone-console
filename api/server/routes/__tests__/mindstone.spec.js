@@ -64,6 +64,11 @@ const ENDPOINTS = [
   { method: 'post', path: 'permissions/advanced', write: true },
   { method: 'get', path: 'models', write: false },
   { method: 'post', path: 'providers/ollama-cloud', write: true },
+  { method: 'get', path: 'approvals', write: false },
+  { method: 'get', path: 'approvals/0b5e7c1a-1111-4222-8333-444455556666', write: false },
+  { method: 'get', path: 'approvals/0b5e7c1a', write: false },
+  { method: 'post', path: 'approvals/0b5e7c1a-1111-4222-8333-444455556666/approve', write: true },
+  { method: 'post', path: 'approvals/0b5e7c1a/reject', write: true },
 ];
 
 /** What each caller should get from an allowlisted endpoint. */
@@ -205,6 +210,25 @@ describe('MindStone admin proxy', () => {
       ['post', 'providers/ollama%0A'],
       ['post', 'x/providers/ollama'],
       ['get', 'x/models'],
+      // Approvals: lowercase ids of 8 to 36 characters, approve or reject, nothing else.
+      ['get', 'approvalsx'],
+      ['get', 'approvals/'],
+      ['get', 'approvals/0b5e7c1'],
+      ['get', 'approvals/0B5E7C1A'],
+      ['get', 'approvals/0b5e7c1a-1111-4222-8333-4444555566667'],
+      ['get', 'approvals/0b5e7c1a/approve'],
+      ['get', 'approvals/..%2Fconfig'],
+      ['get', 'approvals/0b5e7c1a%2F..'],
+      ['post', 'approvals'],
+      ['post', 'approvals/0b5e7c1a'],
+      ['post', 'approvals/0b5e7c1a/approvex'],
+      ['post', 'approvals/0b5e7c1a/delete'],
+      ['post', 'approvals/0b5e7c1a/approve/x'],
+      ['post', 'approvals/0b5e7c1g/approve'],
+      ['post', 'approvals/0B5E7C1A/approve'],
+      ['post', 'approvals/0b5e.7c1a/approve'],
+      ['post', 'x/approvals/0b5e7c1a/approve'],
+      ['patch', 'approvals/0b5e7c1a/approve'],
       ['patch', 'config/mem.ory'],
     ];
     for (const [method, path] of outside) {
@@ -234,6 +258,22 @@ describe('MindStone admin proxy', () => {
       'x-mindstone-user-role': 'admin',
       'if-match': '"abc123"',
     });
+  });
+
+  it('forwards only all=1, and only on the approvals list', async () => {
+    const cases = [
+      ['approvals?all=1', 'http://gateway.test:19790/admin/approvals?all=1'],
+      ['approvals?all=1&x=2', 'http://gateway.test:19790/admin/approvals?all=1'],
+      ['approvals?all=true', 'http://gateway.test:19790/admin/approvals'],
+      ['approvals?x=1', 'http://gateway.test:19790/admin/approvals'],
+      ['status?all=1', 'http://gateway.test:19790/admin/status'],
+      ['approvals/0b5e7c1a?all=1', 'http://gateway.test:19790/admin/approvals/0b5e7c1a'],
+    ];
+    for (const [path, expected] of cases) {
+      fetchMock.mockClear();
+      await request(app).get(`/api/mindstone/admin/${path}`).set('x-test-caller', 'manage');
+      expect([path, fetchMock.mock.calls[0]?.[0]]).toEqual([path, expected]);
+    }
   });
 
   it("never forwards the browser's own If-Match header", async () => {
