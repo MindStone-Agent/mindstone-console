@@ -29,18 +29,14 @@ const healthy: SystemStatusData = {
       sqliteVec: { available: true, version: 'v0.1.6' },
     },
   },
-  routing: { mode: 'single', defaultAgentId: 'main', defaultModel: 'claude-sonnet-5' },
+  routing: { mode: 'pi-session', defaultAgentId: 'main', defaultModel: 'claude-sonnet-5' },
   piSessionSafety: {
     active: true,
-    routingMode: 'single',
+    routingMode: 'pi-session',
     usesGlobalPiAgentDir: false,
     resumeCap: { enabled: true, maxEntries: 800 },
   },
-  personas: {
-    count: 3,
-    brokenCount: 0,
-    resolvedForDefaultSession: { personaId: 'engineer', reason: 'default' },
-  },
+  personas: { count: 3, brokenCount: 0, configuredActive: 'engineer', routeRules: 2 },
   skills: { builtinCount: 5, installedCount: 2, draftCount: 1, brokenCount: 0 },
   knowledgebases: { count: 1, indexedCount: 1, brokenCount: 0, entryCount: 40 },
   connectors: [
@@ -48,7 +44,7 @@ const healthy: SystemStatusData = {
       connectorId: 'telegram',
       enabled: true,
       credential: { configured: true, present: true, source: 'file' },
-      sendPolicy: { effective: 'approval', overridden: false },
+      sendPolicy: { effective: 'approval_required', overridden: false },
       runtime: { state: 'running' },
       queue: { pending: 4, delivered: 120, dead: 0 },
     },
@@ -66,7 +62,7 @@ const problems = (): SystemStatusData => ({
       sqliteVec: { available: false, error: 'extension not found' },
     },
   },
-  piSessionSafety: { active: false, usesGlobalPiAgentDir: true },
+  piSessionSafety: { active: true, routingMode: 'pi-session', usesGlobalPiAgentDir: true },
   personas: { count: 2, brokenCount: 1 },
   connectors: [
     {
@@ -82,6 +78,8 @@ const problems = (): SystemStatusData => ({
   handoff: { exists: false, bytes: 0 },
 });
 
+const warnings = () => document.querySelectorAll('.text-red-500, .text-orange-500');
+
 describe('MindStone SystemStatus', () => {
   it('says so when the gateway sends no system block', () => {
     render(<SystemStatus system={undefined} />);
@@ -90,7 +88,7 @@ describe('MindStone SystemStatus', () => {
 
   it('renders every section of a healthy status, including connector queue depth', () => {
     render(<SystemStatus system={healthy} />);
-    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent('com_mindstone_sys_ok');
+    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(/^com_mindstone_sys_ok$/);
     for (const heading of [
       'com_mindstone_sys_gateway',
       'com_mindstone_sys_webchat',
@@ -107,17 +105,23 @@ describe('MindStone SystemStatus', () => {
     expect(screen.getByTestId('ms-sys-memory')).toHaveTextContent(
       'com_mindstone_sys_memory_counts[12|340|338]',
     );
-    expect(screen.getByTestId('ms-sys-personas')).toHaveTextContent('[3|engineer]');
+    expect(screen.getByTestId('ms-sys-personas')).toHaveTextContent(
+      'com_mindstone_sys_personas_count[3]',
+    );
+    expect(screen.getByTestId('ms-sys-persona-active')).toHaveTextContent('engineer');
+    expect(screen.getByTestId('ms-sys-pi')).toHaveTextContent('com_mindstone_sys_pi_in_use');
+    expect(screen.getByTestId('ms-sys-pi')).toHaveTextContent('com_mindstone_sys_yes');
     const telegram = screen.getByTestId('ms-sys-connector-telegram');
     expect(telegram).toHaveTextContent('com_mindstone_sys_queue[4|120|0]');
-    expect(telegram).toHaveTextContent('com_mindstone_sys_send_policy[approval]');
-    expect(telegram).toHaveTextContent('running');
+    expect(telegram).toHaveTextContent(
+      'com_mindstone_sys_send_policy[com_mindstone_sys_policy_approval]',
+    );
+    expect(telegram).toHaveTextContent('com_mindstone_sys_state_running');
     expect(screen.getByTestId('ms-sys-agent-main')).toHaveTextContent('Mira');
     expect(
       screen.getByText('com_mindstone_sys_handoff_detail', { exact: false }),
     ).toHaveTextContent('[1,050|');
-    // A healthy status shows no warnings or errors.
-    expect(document.querySelector('.text-red-500, .text-orange-500')).toBeNull();
+    expect(warnings()).toHaveLength(0);
   });
 
   it('surfaces every problem the gateway reports', () => {
@@ -130,6 +134,7 @@ describe('MindStone SystemStatus', () => {
       screen.getByText('com_mindstone_sys_sqlite_vec[extension not found]'),
     ).toBeInTheDocument();
     expect(screen.getByText('com_mindstone_sys_pi_global')).toBeInTheDocument();
+    expect(screen.getByTestId('ms-sys-pi')).toHaveTextContent('com_mindstone_sys_no');
     expect(screen.getByText('com_mindstone_sys_broken[1|0|0]')).toBeInTheDocument();
     const slack = screen.getByTestId('ms-sys-connector-slack');
     expect(slack).toHaveTextContent('SLACK_BOT_TOKEN is not set');
@@ -141,6 +146,72 @@ describe('MindStone SystemStatus', () => {
     );
     expect(screen.getByTestId('ms-sys-agent-ghost')).toHaveTextContent('IDENTITY.md unreadable');
     expect(screen.getByText('com_mindstone_sys_handoff_none')).toBeInTheDocument();
+  });
+
+  it('counts the problems below when the core checks pass', () => {
+    const system = { ...problems(), ok: true, config: healthy.config };
+    render(<SystemStatus system={system} />);
+    // sqlite-vec, Pi dir, broken, slack x4 (credential, policy, runtime, dead), ghost x2
+    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(
+      'com_mindstone_sys_ok_issues[9]',
+    );
+    expect(screen.getByTestId('ms-system-overall')).toHaveClass('text-orange-500');
+    expect(warnings()).toHaveLength(10); // the nine, plus the top line
+  });
+
+  it('does not describe Pi isolation when Pi sessions are not in use', () => {
+    const system = {
+      ...healthy,
+      piSessionSafety: {
+        active: false,
+        routingMode: 'placeholder',
+        usesGlobalPiAgentDir: true,
+        resumeCap: { enabled: true, maxEntries: 800 },
+      },
+    };
+    render(<SystemStatus system={system} />);
+    const pi = screen.getByTestId('ms-sys-pi');
+    expect(pi).toHaveTextContent('com_mindstone_sys_pi_not_used[placeholder]');
+    expect(pi).not.toHaveTextContent('com_mindstone_sys_pi_dir_isolated');
+    expect(pi).not.toHaveTextContent('com_mindstone_sys_resume_cap');
+    expect(screen.queryByText('com_mindstone_sys_pi_global')).toBeNull();
+    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(/^com_mindstone_sys_ok$/);
+  });
+
+  it('warns about an active persona when none are installed, and names no default', () => {
+    const system = {
+      ...healthy,
+      personas: { count: 0, brokenCount: 0, configuredActive: 'ghost' },
+    };
+    render(<SystemStatus system={system} />);
+    expect(screen.getByTestId('ms-sys-personas')).toHaveTextContent(
+      /^com_mindstone_sys_personas:com_mindstone_sys_personas_count\[0\]$/,
+    );
+    expect(screen.getByText('com_mindstone_sys_persona_missing[ghost]')).toBeInTheDocument();
+    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(
+      'com_mindstone_sys_ok_issues_one[1]',
+    );
+  });
+
+  it('warns about an enabled connector that is not running, and dates its state', () => {
+    const system = {
+      ...healthy,
+      connectors: [
+        {
+          connectorId: 'discord',
+          enabled: true,
+          runtime: { state: 'never_started', updatedAt: '2026-09-27T20:00:00Z' },
+          queue: { pending: 0, delivered: 0, dead: 1 },
+        },
+      ],
+    };
+    render(<SystemStatus system={system} />);
+    const discord = screen.getByTestId('ms-sys-connector-discord');
+    expect(discord).toHaveTextContent(
+      'com_mindstone_sys_state_as_of[com_mindstone_sys_state_never_started|',
+    );
+    expect(discord).toHaveTextContent('com_mindstone_sys_not_running');
+    expect(discord).toHaveTextContent('com_mindstone_sys_dead_one[1]');
   });
 
   it('does not crash on a partial or differently shaped status from another gateway version', () => {
@@ -155,33 +226,31 @@ describe('MindStone SystemStatus', () => {
     expect(screen.queryByRole('heading', { name: 'com_mindstone_sys_connectors' })).toBeNull();
     unmount();
     const holes = { ...healthy, connectors: [null, healthy.connectors![0]], agents: [null] };
-    render(<SystemStatus system={holes as unknown as SystemStatusData} />);
+    const second = render(<SystemStatus system={holes as unknown as SystemStatusData} />);
     expect(screen.getByTestId('ms-sys-connector-telegram')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'com_mindstone_sys_agents' })).toBeNull();
+    second.unmount();
+    const wrongLeaves = {
+      ...healthy,
+      personas: { count: 'three', configuredActive: { id: 'x' } },
+      connectors: [
+        {
+          connectorId: 'weird',
+          enabled: true,
+          runtime: { state: 7, lastError: { code: 'E1' }, updatedAt: 12 },
+          queue: { pending: '4', dead: null },
+        },
+      ],
+    };
+    render(<SystemStatus system={wrongLeaves as unknown as SystemStatusData} />);
+    const weird = screen.getByTestId('ms-sys-connector-weird');
+    expect(weird).toHaveTextContent('{"code":"E1"}');
+    expect(weird).toHaveTextContent('com_mindstone_sys_queue[0|0|0]');
   });
 
   it('says when no connectors are configured', () => {
     render(<SystemStatus system={{ ...healthy, connectors: [] }} />);
     expect(screen.getByText('com_mindstone_sys_connectors_none')).toBeInTheDocument();
-  });
-});
-
-describe('MindStone SystemStatus against a real gateway payload', () => {
-  /** Captured from a live gateway's GET /admin/status (paths rewritten): an enabled Telegram
-   *  connector whose token file is missing, and a disabled Discord connector. */
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const real = require('./gatewayStatus.fixture.json') as SystemStatusData;
-
-  it('renders it, and shows the broken connector once even though the core checks pass', () => {
-    render(<SystemStatus system={real} />);
-    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent('com_mindstone_sys_ok');
-    const telegram = screen.getByTestId('ms-sys-connector-telegram');
-    expect(telegram).toHaveTextContent('com_mindstone_sys_enabled_lc');
-    expect(telegram).toHaveTextContent('error');
-    expect(telegram.querySelectorAll('.text-red-500')).toHaveLength(1);
-    expect(telegram).toHaveTextContent('credential unresolved: secret file not found');
-    expect(screen.getByTestId('ms-sys-connector-discord')).toHaveTextContent('never started');
-    expect(screen.getByTestId('ms-sys-agent-default')).toBeInTheDocument();
   });
 });
 
@@ -199,11 +268,29 @@ describe('MindStone SystemStatus memory without a database', () => {
   });
 });
 
-describe('MindStone SystemStatus persona line', () => {
-  it('leaves out the default persona when none resolves', () => {
-    render(<SystemStatus system={{ ...healthy, personas: { count: 0, brokenCount: 0 } }} />);
-    expect(screen.getByTestId('ms-sys-personas')).toHaveTextContent(
-      'com_mindstone_sys_personas_count[0]',
+describe('MindStone SystemStatus against a real gateway payload', () => {
+  /** Captured from a live gateway's GET /admin/status (paths rewritten): an enabled Telegram
+   *  connector whose token file is missing, and a disabled Discord connector. */
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const real = require('./gatewayStatus.fixture.json') as SystemStatusData;
+
+  it('renders it, counts the broken connector, and shows its error once', () => {
+    render(<SystemStatus system={real} />);
+    expect(screen.getByTestId('ms-system-overall')).toHaveTextContent(
+      'com_mindstone_sys_ok_issues_one[1]',
     );
+    const telegram = screen.getByTestId('ms-sys-connector-telegram');
+    expect(telegram).toHaveTextContent('com_mindstone_sys_enabled_lc');
+    expect(telegram).toHaveTextContent('com_mindstone_sys_state_error');
+    expect(telegram.querySelectorAll('.text-red-500')).toHaveLength(1);
+    expect(telegram).toHaveTextContent('credential unresolved: secret file not found');
+    expect(screen.getByTestId('ms-sys-connector-discord')).toHaveTextContent(
+      'com_mindstone_sys_state_never_started',
+    );
+    expect(screen.getByTestId('ms-sys-connector-discord')).not.toHaveTextContent(
+      'com_mindstone_sys_not_running',
+    );
+    expect(screen.getByTestId('ms-sys-pi')).toHaveTextContent('com_mindstone_sys_pi_not_used');
+    expect(screen.getByTestId('ms-sys-agent-default')).toBeInTheDocument();
   });
 });

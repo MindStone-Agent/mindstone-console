@@ -4,6 +4,7 @@
  * optional so an older or newer gateway cannot blank the settings page.
  */
 import type { ReactNode } from 'react';
+import type { TranslationKeys } from '~/hooks';
 import { useLocalize } from '~/hooks';
 
 type Connector = {
@@ -17,7 +18,7 @@ type Connector = {
     warning?: string;
   };
   sendPolicy?: { effective?: string; overridden?: boolean; warning?: string };
-  runtime?: { state?: string; lastError?: string; inboundCount?: number; deniedCount?: number };
+  runtime?: { state?: string; lastError?: string; updatedAt?: string };
   queue?: { pending?: number; delivered?: number; dead?: number };
 };
 
@@ -66,7 +67,7 @@ export type SystemStatusData = {
     count?: number;
     brokenCount?: number;
     configuredActive?: string;
-    resolvedForDefaultSession?: { personaId?: string; reason?: string };
+    routeRules?: number;
   };
   skills?: {
     builtinCount?: number;
@@ -83,14 +84,45 @@ export type SystemStatusData = {
   connectors?: Connector[];
 };
 
-const n = (value: number | undefined) => new Intl.NumberFormat().format(value ?? 0);
-const when = (iso: string | undefined) => (iso ? new Date(iso).toLocaleString() : '');
+/** Gateway text as a string, whatever arrives: a wrong type must not blank the page. */
+const text = (value: unknown): string => {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return value == null ? '' : JSON.stringify(value);
+};
+const count = (value: unknown): number =>
+  typeof value === 'number' && Number.isFinite(value) ? value : 0;
+const n = (value: unknown) => new Intl.NumberFormat().format(count(value));
+const when = (iso: unknown) => {
+  const date = typeof iso === 'string' ? new Date(iso) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString() : text(iso);
+};
 
-function Problem({ tone, children }: { tone: 'error' | 'warning'; children: ReactNode }) {
+const STATES: Record<string, TranslationKeys> = {
+  running: 'com_mindstone_sys_state_running',
+  stopped: 'com_mindstone_sys_state_stopped',
+  error: 'com_mindstone_sys_state_error',
+  never_started: 'com_mindstone_sys_state_never_started',
+};
+const POLICIES: Record<string, TranslationKeys> = {
+  auto: 'com_mindstone_sys_policy_auto',
+  approval_required: 'com_mindstone_sys_policy_approval',
+};
+
+type Issue = { tone: 'error' | 'warning'; text: string };
+
+function Issues({ issues }: { issues: Issue[] }) {
   return (
-    <p className={tone === 'error' ? 'text-sm text-red-500' : 'text-sm text-orange-500'}>
-      {children}
-    </p>
+    <>
+      {issues.map((issue, i) => (
+        <p
+          key={i}
+          className={issue.tone === 'error' ? 'text-sm text-red-500' : 'text-sm text-orange-500'}
+        >
+          {issue.text}
+        </p>
+      ))}
+    </>
   );
 }
 
@@ -137,21 +169,122 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
   const connectorRows = Array.isArray(connectors) ? connectors.filter(isRow) : null;
   const agentRows = Array.isArray(agents) ? agents.filter(isRow) : [];
 
+  // Every problem shown below, collected once so the top line can count them.
+  const configIssues: Issue[] = [];
+  if (config?.exists === false) {
+    configIssues.push({
+      tone: 'error',
+      text: localize('com_mindstone_sys_config_missing', { 0: text(config.path) }),
+    });
+  }
+  if (config?.error) configIssues.push({ tone: 'error', text: text(config.error) });
+
+  const memoryIssues: Issue[] = [];
+  if (sqlite && sqlite.present !== false && sqlite.sqliteVec?.available === false) {
+    if (sqlite.sqliteVec.error) {
+      memoryIssues.push({
+        tone: 'warning',
+        text: localize('com_mindstone_sys_sqlite_vec', { 0: text(sqlite.sqliteVec.error) }),
+      });
+    }
+  }
+  if (sqlite?.error) memoryIssues.push({ tone: 'error', text: text(sqlite.error) });
+
+  const piIssues: Issue[] =
+    pi?.active && pi.usesGlobalPiAgentDir
+      ? [{ tone: 'warning', text: localize('com_mindstone_sys_pi_global') }]
+      : [];
+
+  const contentIssues: Issue[] = [];
+  const broken = [personas?.brokenCount, skills?.brokenCount, kbs?.brokenCount].map(count);
+  if (broken.some(Boolean)) {
+    contentIssues.push({
+      tone: 'warning',
+      text: localize('com_mindstone_sys_broken', {
+        0: n(broken[0]),
+        1: n(broken[1]),
+        2: n(broken[2]),
+      }),
+    });
+  }
+  if (personas?.configuredActive && count(personas.count) === 0) {
+    contentIssues.push({
+      tone: 'warning',
+      text: localize('com_mindstone_sys_persona_missing', { 0: text(personas.configuredActive) }),
+    });
+  }
+
+  const connectorIssues = (c: Connector): Issue[] => {
+    const issues: Issue[] = [];
+    const state = text(c.runtime?.state);
+    const lastError = text(c.runtime?.lastError);
+    const credentialError = text(c.credential?.error);
+    if (c.credential?.configured && !c.credential.present) {
+      // The runtime error usually repeats the credential error; show it once.
+      if (!(credentialError && lastError.includes(credentialError))) {
+        issues.push({
+          tone: 'error',
+          text: credentialError || localize('com_mindstone_sys_credential_missing'),
+        });
+      }
+    }
+    if (c.credential?.warning) issues.push({ tone: 'warning', text: text(c.credential.warning) });
+    if (c.sendPolicy?.warning) issues.push({ tone: 'warning', text: text(c.sendPolicy.warning) });
+    if (lastError) issues.push({ tone: 'error', text: lastError });
+    else if (state === 'error') {
+      issues.push({ tone: 'error', text: localize('com_mindstone_sys_state_error_detail') });
+    }
+    if (c.enabled && (state === 'never_started' || state === 'stopped')) {
+      issues.push({ tone: 'warning', text: localize('com_mindstone_sys_not_running') });
+    }
+    const dead = count(c.queue?.dead);
+    if (dead) {
+      issues.push({
+        tone: 'warning',
+        text: localize(dead === 1 ? 'com_mindstone_sys_dead_one' : 'com_mindstone_sys_dead', {
+          0: n(dead),
+        }),
+      });
+    }
+    return issues;
+  };
+
+  const agentIssues = (a: { identityExists?: boolean; error?: string }): Issue[] => [
+    ...(a.identityExists === false
+      ? [{ tone: 'warning' as const, text: localize('com_mindstone_sys_no_identity') }]
+      : []),
+    ...(a.error ? [{ tone: 'error' as const, text: text(a.error) }] : []),
+  ];
+
+  const problemCount =
+    configIssues.length +
+    memoryIssues.length +
+    piIssues.length +
+    contentIssues.length +
+    (connectorRows ?? []).reduce((total, c) => total + connectorIssues(c).length, 0) +
+    agentRows.reduce((total, a) => total + agentIssues(a).length, 0);
+
+  let overall: { className: string; message: string };
+  if (!system.ok) {
+    overall = { className: 'text-red-500', message: localize('com_mindstone_sys_not_ok') };
+  } else if (problemCount > 0) {
+    overall = {
+      className: 'text-orange-500',
+      message: localize(
+        problemCount === 1 ? 'com_mindstone_sys_ok_issues_one' : 'com_mindstone_sys_ok_issues',
+        { 0: n(problemCount) },
+      ),
+    };
+  } else {
+    overall = { className: 'text-green-600', message: localize('com_mindstone_sys_ok') };
+  }
+
   return (
     <div data-testid="ms-system">
-      <p data-testid="ms-system-overall" className={system.ok ? 'text-green-600' : 'text-red-500'}>
-        {localize(system.ok ? 'com_mindstone_sys_ok' : 'com_mindstone_sys_not_ok')}
+      <p data-testid="ms-system-overall" className={overall.className}>
+        {overall.message}
       </p>
-      {config && (
-        <>
-          {config.exists === false && (
-            <Problem tone="error">
-              {localize('com_mindstone_sys_config_missing', { 0: config.path ?? '' })}
-            </Problem>
-          )}
-          {config.error && <Problem tone="error">{config.error}</Problem>}
-        </>
-      )}
+      <Issues issues={configIssues} />
 
       {gateway && (
         <section aria-labelledby="ms-sys-gateway">
@@ -159,9 +292,9 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
             {localize('com_mindstone_sys_gateway')}
           </h3>
           <dl>
-            <Row label={localize('com_mindstone_sys_address')}>{gateway.baseUrl}</Row>
+            <Row label={localize('com_mindstone_sys_address')}>{text(gateway.baseUrl)}</Row>
             <Row label={localize('com_mindstone_sys_sign_in')}>
-              {gateway.auth?.mode ?? ''}
+              {text(gateway.auth?.mode)}
               {gateway.auth?.required === false
                 ? ` (${localize('com_mindstone_sys_not_required')})`
                 : ''}
@@ -176,6 +309,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
             {routing && (
               <Row label={localize('com_mindstone_sys_routing')}>
                 {[routing.mode, routing.defaultAgentId, routing.defaultModel]
+                  .map(text)
                   .filter(Boolean)
                   .join(', ')}
               </Row>
@@ -191,7 +325,9 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
           </h3>
           <dl>
             <Row label={localize('com_mindstone_sys_enabled')}>{yes(webchat.enabled)}</Row>
-            {webchat.url && <Row label={localize('com_mindstone_sys_address')}>{webchat.url}</Row>}
+            {webchat.url && (
+              <Row label={localize('com_mindstone_sys_address')}>{text(webchat.url)}</Row>
+            )}
             <Row label={localize('com_mindstone_sys_api_sign_in')}>
               {yes(webchat.apiAuthApplies)}
             </Row>
@@ -210,7 +346,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
             </p>
           ) : (
             <dl>
-              <Row label={localize('com_mindstone_sys_search')}>{sqlite.vectorBackend}</Row>
+              <Row label={localize('com_mindstone_sys_search')}>{text(sqlite.vectorBackend)}</Row>
               <Row label={localize('com_mindstone_sys_indexed')}>
                 {localize('com_mindstone_sys_memory_counts', {
                   0: n(sqlite.sources),
@@ -218,7 +354,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
                   2: n(sqlite.embeddedChunks),
                 })}
               </Row>
-              {Boolean(sqlite.duplicateTextChunks) && (
+              {Boolean(count(sqlite.duplicateTextChunks)) && (
                 <Row label={localize('com_mindstone_sys_duplicates')}>
                   {n(sqlite.duplicateTextChunks)}
                 </Row>
@@ -228,25 +364,27 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
               )}
             </dl>
           )}
-          {sqlite.present !== false &&
-            sqlite.sqliteVec?.available === false &&
-            sqlite.sqliteVec.error && (
-              <Problem tone="warning">
-                {localize('com_mindstone_sys_sqlite_vec', { 0: sqlite.sqliteVec.error })}
-              </Problem>
-            )}
-          {sqlite.error && <Problem tone="error">{sqlite.error}</Problem>}
+          <Issues issues={memoryIssues} />
         </section>
       )}
 
       {pi && (
-        <section aria-labelledby="ms-sys-pi">
+        <section aria-labelledby="ms-sys-pi" data-testid="ms-sys-pi">
           <h3 id="ms-sys-pi" className={heading}>
             {localize('com_mindstone_sys_pi')}
           </h3>
           <dl>
-            <Row label={localize('com_mindstone_sys_isolated')}>{yes(pi.active)}</Row>
-            {pi.resumeCap && (
+            <Row label={localize('com_mindstone_sys_pi_sessions')}>
+              {pi.active
+                ? localize('com_mindstone_sys_pi_in_use')
+                : localize('com_mindstone_sys_pi_not_used', { 0: text(pi.routingMode) })}
+            </Row>
+            {pi.active && (
+              <Row label={localize('com_mindstone_sys_pi_dir_isolated')}>
+                {yes(!pi.usesGlobalPiAgentDir)}
+              </Row>
+            )}
+            {pi.active && pi.resumeCap && (
               <Row label={localize('com_mindstone_sys_resume_cap')}>
                 {pi.resumeCap.enabled
                   ? localize('com_mindstone_sys_entries', { 0: n(pi.resumeCap.maxEntries) })
@@ -254,9 +392,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
               </Row>
             )}
           </dl>
-          {pi.usesGlobalPiAgentDir && (
-            <Problem tone="warning">{localize('com_mindstone_sys_pi_global')}</Problem>
-          )}
+          <Issues issues={piIssues} />
         </section>
       )}
 
@@ -268,15 +404,20 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
           <dl>
             {personas && (
               <Row label={localize('com_mindstone_sys_personas')} testId="ms-sys-personas">
-                {(personas.resolvedForDefaultSession?.personaId ?? personas.configuredActive)
-                  ? localize('com_mindstone_sys_personas_detail', {
-                      0: n(personas.count),
-                      1:
-                        personas.resolvedForDefaultSession?.personaId ??
-                        personas.configuredActive ??
-                        '',
-                    })
-                  : localize('com_mindstone_sys_personas_count', { 0: n(personas.count) })}
+                {localize('com_mindstone_sys_personas_count', { 0: n(personas.count) })}
+              </Row>
+            )}
+            {personas?.configuredActive && (
+              <Row
+                label={localize('com_mindstone_sys_persona_active')}
+                testId="ms-sys-persona-active"
+              >
+                {text(personas.configuredActive)}
+              </Row>
+            )}
+            {Boolean(count(personas?.routeRules)) && (
+              <Row label={localize('com_mindstone_sys_persona_routes')}>
+                {n(personas?.routeRules)}
               </Row>
             )}
             {skills && (
@@ -298,15 +439,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
               </Row>
             )}
           </dl>
-          {[personas?.brokenCount, skills?.brokenCount, kbs?.brokenCount].some(Boolean) && (
-            <Problem tone="warning">
-              {localize('com_mindstone_sys_broken', {
-                0: n(personas?.brokenCount),
-                1: n(skills?.brokenCount),
-                2: n(kbs?.brokenCount),
-              })}
-            </Problem>
-          )}
+          <Issues issues={contentIssues} />
         </section>
       )}
 
@@ -321,48 +454,46 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
             </p>
           ) : (
             <ul className="flex flex-col gap-2">
-              {connectorRows.map((c) => (
-                <li
-                  key={c.connectorId}
-                  data-testid={`ms-sys-connector-${c.connectorId}`}
-                  className="text-sm"
-                >
-                  <strong>{c.connectorId}</strong>{' '}
-                  {localize(
-                    c.enabled ? 'com_mindstone_sys_enabled_lc' : 'com_mindstone_sys_disabled_lc',
-                  )}
-                  {c.runtime?.state ? `, ${c.runtime.state.replace(/_/g, ' ')}` : ''}
-                  <div className="text-text-secondary">
-                    {localize('com_mindstone_sys_queue', {
-                      0: n(c.queue?.pending),
-                      1: n(c.queue?.delivered),
-                      2: n(c.queue?.dead),
-                    })}
-                    {c.sendPolicy?.effective
-                      ? ` ${localize('com_mindstone_sys_send_policy', { 0: c.sendPolicy.effective })}`
-                      : ''}
-                  </div>
-                  {c.credential?.configured &&
-                    !c.credential.present &&
-                    !(c.credential.error && c.runtime?.lastError?.includes(c.credential.error)) && (
-                      <Problem tone="error">
-                        {c.credential.error ?? localize('com_mindstone_sys_credential_missing')}
-                      </Problem>
+              {connectorRows.map((c) => {
+                const state = text(c.runtime?.state);
+                const stateLabel = STATES[state] ? localize(STATES[state]) : state;
+                const policy = text(c.sendPolicy?.effective);
+                return (
+                  <li
+                    key={text(c.connectorId)}
+                    data-testid={`ms-sys-connector-${text(c.connectorId)}`}
+                    className="text-sm"
+                  >
+                    <strong>{text(c.connectorId)}</strong>{' '}
+                    {localize(
+                      c.enabled ? 'com_mindstone_sys_enabled_lc' : 'com_mindstone_sys_disabled_lc',
                     )}
-                  {c.credential?.warning && (
-                    <Problem tone="warning">{c.credential.warning}</Problem>
-                  )}
-                  {c.sendPolicy?.warning && (
-                    <Problem tone="warning">{c.sendPolicy.warning}</Problem>
-                  )}
-                  {c.runtime?.lastError && <Problem tone="error">{c.runtime.lastError}</Problem>}
-                  {Boolean(c.queue?.dead) && (
-                    <Problem tone="warning">
-                      {localize('com_mindstone_sys_dead', { 0: n(c.queue?.dead) })}
-                    </Problem>
-                  )}
-                </li>
-              ))}
+                    {stateLabel
+                      ? `, ${
+                          c.runtime?.updatedAt
+                            ? localize('com_mindstone_sys_state_as_of', {
+                                0: stateLabel,
+                                1: when(c.runtime.updatedAt),
+                              })
+                            : stateLabel
+                        }`
+                      : ''}
+                    <div className="text-text-secondary">
+                      {localize('com_mindstone_sys_queue', {
+                        0: n(c.queue?.pending),
+                        1: n(c.queue?.delivered),
+                        2: n(c.queue?.dead),
+                      })}
+                      {policy
+                        ? ` ${localize('com_mindstone_sys_send_policy', {
+                            0: POLICIES[policy] ? localize(POLICIES[policy]) : policy,
+                          })}`
+                        : ''}
+                    </div>
+                    <Issues issues={connectorIssues(c)} />
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>
@@ -375,10 +506,9 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
           </h3>
           <ul className="flex flex-col gap-1 text-sm">
             {agentRows.map((a) => (
-              <li key={a.agentId} data-testid={`ms-sys-agent-${a.agentId}`}>
-                <strong>{a.name ?? a.agentId}</strong>
-                {a.identityExists === false ? `: ${localize('com_mindstone_sys_no_identity')}` : ''}
-                {a.error && <Problem tone="error">{a.error}</Problem>}
+              <li key={text(a.agentId)} data-testid={`ms-sys-agent-${text(a.agentId)}`}>
+                <strong>{text(a.name) || text(a.agentId)}</strong>
+                <Issues issues={agentIssues(a)} />
               </li>
             ))}
           </ul>

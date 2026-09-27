@@ -3,7 +3,7 @@ import { useSetRecoilState } from 'recoil';
 import * as Menu from '@ariakit/react/menu';
 import { useNavigate } from 'react-router-dom';
 import { SystemRoles } from 'librechat-data-provider';
-import { GearIcon, DropdownMenuSeparator, Avatar } from '@librechat/client';
+import { GearIcon, DropdownMenuSeparator, Avatar, useMediaQuery } from '@librechat/client';
 import {
   Archive,
   ChevronRight,
@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { ArchivedChatsModal } from '~/components/Nav/SettingsTabs/General/ArchivedChatsModal';
 import { useGetStartupConfig, useGetUserBalance } from '~/data-provider';
+import useSidebarToggle from '~/hooks/Nav/useSidebarToggle';
 import { useAuthContext } from '~/hooks/AuthContext';
 import { useLocalize } from '~/hooks';
 import Settings from './Settings';
@@ -105,6 +106,16 @@ function AccountSettings({ collapsed = false }: { collapsed?: boolean }) {
   const [showArchived, setShowArchived] = useState(false);
   const accountSettingsButtonRef = useRef<HTMLButtonElement>(null);
   const navigate = useNavigate();
+  const isSmallScreen = useMediaQuery('(max-width: 768px)');
+  const { setSidebarOpen } = useSidebarToggle();
+  /** On a phone the menu sits in the drawer: close it first, as conversation links do. */
+  const openMindStone = () => {
+    if (isSmallScreen) {
+      setSidebarOpen(false, () => navigate('/mindstone'));
+      return;
+    }
+    navigate('/mindstone');
+  };
 
   return (
     <Menu.MenuProvider placement={collapsed ? 'right-end' : undefined}>
@@ -176,7 +187,7 @@ function AccountSettings({ collapsed = false }: { collapsed?: boolean }) {
         {/* The page's API is admin-only on the server; the link is only shown to admins. */}
         {user?.role === SystemRoles.ADMIN && (
           <Menu.MenuItem
-            onClick={() => navigate('/mindstone')}
+            onClick={openMindStone}
             className="select-item text-sm"
             data-testid="nav-mindstone"
           >

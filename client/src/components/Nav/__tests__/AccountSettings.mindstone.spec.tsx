@@ -4,6 +4,8 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import AccountSettings from '../AccountSettings';
 
 let mockRole: string | undefined;
+let mockSmallScreen = false;
+const mockSetSidebarOpen = jest.fn((_next: boolean, afterSlide?: () => void) => afterSlide?.());
 
 jest.mock('recoil', () => ({
   ...jest.requireActual('recoil'),
@@ -25,7 +27,9 @@ jest.mock('@librechat/client', () => ({
   GearIcon: () => null,
   DropdownMenuSeparator: () => <hr />,
   Avatar: () => null,
+  useMediaQuery: () => mockSmallScreen,
 }));
+jest.mock('~/hooks/Nav/useSidebarToggle', () => () => ({ setSidebarOpen: mockSetSidebarOpen }));
 jest.mock('../Settings', () => () => null);
 jest.mock('~/components/Nav/SettingsTabs/General/ArchivedChatsModal', () => ({
   ArchivedChatsModal: () => null,
@@ -45,10 +49,25 @@ function renderMenu() {
 }
 
 describe('AccountSettings MindStone link', () => {
+  beforeEach(() => {
+    mockSmallScreen = false;
+    mockSetSidebarOpen.mockClear();
+  });
+
   it('shows admins a MindStone item that opens /mindstone', async () => {
     mockRole = SystemRoles.ADMIN;
     renderMenu();
     fireEvent.click(await screen.findByTestId('nav-mindstone'));
+    expect(await screen.findByTestId('mindstone-page')).toBeInTheDocument();
+    expect(mockSetSidebarOpen).not.toHaveBeenCalled();
+  });
+
+  it('closes the drawer first on a phone, then opens /mindstone', async () => {
+    mockRole = SystemRoles.ADMIN;
+    mockSmallScreen = true;
+    renderMenu();
+    fireEvent.click(await screen.findByTestId('nav-mindstone'));
+    expect(mockSetSidebarOpen).toHaveBeenCalledWith(false, expect.any(Function));
     expect(await screen.findByTestId('mindstone-page')).toBeInTheDocument();
   });
 
