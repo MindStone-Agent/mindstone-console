@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { request } from 'librechat-data-provider';
+import { useAuthContext } from '~/hooks';
 
 type Step = { done: boolean; detail: string };
 type Status = { onboarded: boolean; steps: Record<string, Step> };
@@ -38,6 +39,7 @@ function errorBody(error: unknown): { error?: string; errors?: FieldError[] } {
 }
 
 export default function MindStoneSettingsView() {
+  const { user } = useAuthContext();
   const [status, setStatus] = useState<Status | null>(null);
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [etag, setEtag] = useState<string | null>(null);
@@ -74,8 +76,13 @@ export default function MindStoneSettingsView() {
 
   useEffect(() => {
     setDraft(JSON.stringify(config?.[section] ?? {}, null, 2));
-    setSaveResult(null);
   }, [config, section]);
+
+  // Clear the last save's message when the admin switches section, not when
+  // the page reloads the config after a save (that would hide "Saved").
+  useEffect(() => {
+    setSaveResult(null);
+  }, [section]);
 
   const draftError = useMemo(() => {
     try {
@@ -268,7 +275,10 @@ export default function MindStoneSettingsView() {
             {permissions.advancedSettings ? (
               <div className="flex items-center gap-3">
                 <span data-testid="ms-advanced-state">
-                  On{permissions.grantedBy ? `, granted by ${permissions.grantedBy}` : ''}
+                  On
+                  {permissions.grantedBy
+                    ? `, granted by ${permissions.grantedBy === user?.id ? 'you' : 'another admin'}`
+                    : ''}
                   {permissions.expiresAt ? `, until ${new Date(permissions.expiresAt).toLocaleTimeString()}` : ''}.
                 </span>
                 <button type="button" className="rounded border border-border-medium px-3 py-1" onClick={() => void setAdvanced(false)}>

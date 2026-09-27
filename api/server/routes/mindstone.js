@@ -32,8 +32,10 @@ function gatewayBase() {
   return url.replace(/\/+$/, '').replace(/\/v1$/, '');
 }
 
-router.all('/admin/*', async (req, res) => {
-  const path = req.params[0] ?? '';
+// Express 5 path syntax: a named wildcard, whose value is an array of segments.
+router.all('/admin/*path', async (req, res) => {
+  const segments = req.params.path;
+  const path = Array.isArray(segments) ? segments.join('/') : (segments ?? '');
   const allowed = ALLOWED.some((rule) => rule.method === req.method && rule.path.test(path));
   if (!allowed) {
     return res.status(404).json({ ok: false, error: 'unknown MindStone admin endpoint' });
