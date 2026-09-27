@@ -8,6 +8,7 @@ import {
   TwoFactorScreen,
   RequestPasswordReset,
 } from '~/components/Auth';
+import MindStoneHostedProvidersView from '~/components/MindStone/HostedProvidersView';
 import { MarketplaceProvider } from '~/components/Agents/MarketplaceContext';
 import MindStoneOnboardingView from '~/components/MindStone/OnboardingView';
 import MindStoneApprovalsView from '~/components/MindStone/ApprovalsView';
@@ -157,6 +158,11 @@ export const router = createBrowserRouter(
               /** MindStone approvals (MindStone-Agent #84). The server route enforces admin. */
               path: 'mindstone/approvals',
               element: <MindStoneApprovalsView />,
+            },
+            {
+              /** MindStone hosted-provider API keys (MindStone-Agent #98). The server route enforces admin. */
+              path: 'mindstone/providers',
+              element: <MindStoneHostedProvidersView />,
             },
             {
               /** MindStone stored secrets (MindStone-Agent #88). The server route enforces admin. */

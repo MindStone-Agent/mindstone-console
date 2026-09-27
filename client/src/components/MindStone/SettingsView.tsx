@@ -212,6 +212,9 @@ export default function MindStoneSettingsView() {
             </Link>{' '}
             <Link to="/mindstone/approvals" className="ml-3 mt-2 inline-block text-sm underline">
               {localize('com_mindstone_appr_title')}
+            </Link>{' '}
+            <Link to="/mindstone/providers" className="ml-3 mt-2 inline-block text-sm underline">
+              {localize('com_mindstone_hp_title')}
             </Link>
           </section>
         )}
