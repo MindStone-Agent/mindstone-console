@@ -6,11 +6,16 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { request } from 'librechat-data-provider';
-import { useAuthContext } from '~/hooks';
+import { useAuthContext, useLocalize } from '~/hooks';
 
 type Step = { done: boolean; detail: string };
 type Status = { onboarded: boolean; steps: Record<string, Step> };
-type Permissions = { advancedSettings: boolean; grantedBy?: string; grantedAt?: string; expiresAt?: string };
+type Permissions = {
+  advancedSettings: boolean;
+  grantedBy?: string;
+  grantedAt?: string;
+  expiresAt?: string;
+};
 type FieldError = { path?: string; error: string };
 
 const BASE = '/api/mindstone/admin';
@@ -35,11 +40,14 @@ const CONFIRMATION = 'enable advanced settings';
 
 function errorBody(error: unknown): { error?: string; errors?: FieldError[] } {
   const data = (error as { response?: { data?: unknown } })?.response?.data;
-  return data && typeof data === 'object' ? (data as { error?: string; errors?: FieldError[] }) : { error: String(error) };
+  return data && typeof data === 'object'
+    ? (data as { error?: string; errors?: FieldError[] })
+    : { error: String(error) };
 }
 
 export default function MindStoneSettingsView() {
   const { user } = useAuthContext();
+  const localize = useLocalize();
   const [status, setStatus] = useState<Status | null>(null);
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [etag, setEtag] = useState<string | null>(null);
@@ -47,7 +55,11 @@ export default function MindStoneSettingsView() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [section, setSection] = useState('routing');
   const [draft, setDraft] = useState('');
-  const [saveResult, setSaveResult] = useState<{ ok: boolean; text: string; errors?: FieldError[] } | null>(null);
+  const [saveResult, setSaveResult] = useState<{
+    ok: boolean;
+    text: string;
+    errors?: FieldError[];
+  } | null>(null);
   const [secretName, setSecretName] = useState('');
   const [secretValue, setSecretValue] = useState('');
   const [secretResult, setSecretResult] = useState<string | null>(null);
@@ -66,9 +78,9 @@ export default function MindStoneSettingsView() {
       setPermissions(p.permissions);
       setLoadError(null);
     } catch (error) {
-      setLoadError(errorBody(error).error ?? 'Could not reach the MindStone gateway.');
+      setLoadError(errorBody(error).error ?? localize('com_mindstone_gateway_unreachable'));
     }
-  }, []);
+  }, [localize]);
 
   useEffect(() => {
     void load();
@@ -87,26 +99,35 @@ export default function MindStoneSettingsView() {
   const draftError = useMemo(() => {
     try {
       const parsed = JSON.parse(draft);
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? null : 'The section must be a JSON object.';
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? null
+        : localize('com_mindstone_section_not_object');
     } catch (error) {
-      return `Not valid JSON: ${(error as Error).message}`;
+      return localize('com_mindstone_invalid_json', { 0: (error as Error).message });
     }
-  }, [draft]);
+  }, [draft, localize]);
 
   const save = async () => {
     if (draftError) return;
     try {
       // The gateway refuses the save (412) if the config changed since this page read it.
       const query = etag ? `?ifMatch=${encodeURIComponent(etag)}` : '';
-      const result = (await request.patch(`${BASE}/config/${section}${query}`, JSON.parse(draft))) as {
+      const result = (await request.patch(
+        `${BASE}/config/${section}${query}`,
+        JSON.parse(draft),
+      )) as {
         changed: string[];
         restartRequired: boolean;
       };
       setSaveResult({
         ok: true,
         text: result.changed.length
-          ? `Saved: ${result.changed.join(', ')}.${result.restartRequired ? ' Restart the gateway for these to take effect.' : ' Applies on the next message.'}`
-          : 'No changes.',
+          ? `${localize('com_mindstone_saved', { 0: result.changed.join(', ') })} ${localize(
+              result.restartRequired
+                ? 'com_mindstone_saved_restart'
+                : 'com_mindstone_saved_next_message',
+            )}`
+          : localize('com_mindstone_no_changes'),
       });
       await load();
     } catch (error) {
@@ -114,7 +135,9 @@ export default function MindStoneSettingsView() {
       const stale = (error as { response?: { status?: number } })?.response?.status === 412;
       setSaveResult({
         ok: false,
-        text: stale ? 'The settings changed since you opened them, so nothing was saved. Reload to see the current values, then make your change again.' : body.error ?? 'Not saved.',
+        text: stale
+          ? localize('com_mindstone_stale_save')
+          : (body.error ?? localize('com_mindstone_not_saved')),
         errors: body.errors,
       });
     }
@@ -122,23 +145,31 @@ export default function MindStoneSettingsView() {
 
   const storeSecret = async () => {
     try {
-      const result = (await request.post(`${BASE}/secrets/${encodeURIComponent(secretName)}`, { value: secretValue })) as {
+      const result = (await request.post(`${BASE}/secrets/${encodeURIComponent(secretName)}`, {
+        value: secretValue,
+      })) as {
         tokenFile: string;
       };
       setSecretValue('');
-      setSecretResult(`Stored. Reference it in config as tokenFile: "${result.tokenFile}".`);
+      setSecretResult(localize('com_mindstone_secret_stored', { 0: result.tokenFile }));
     } catch (error) {
-      setSecretResult(errorBody(error).error ?? 'Not stored.');
+      setSecretResult(errorBody(error).error ?? localize('com_mindstone_secret_not_stored'));
     }
   };
 
   const setAdvanced = async (enabled: boolean) => {
     try {
-      await request.post(`${BASE}/permissions/advanced`, enabled ? { enabled, confirm: confirmText } : { enabled });
+      await request.post(
+        `${BASE}/permissions/advanced`,
+        enabled ? { enabled, confirm: confirmText } : { enabled },
+      );
       setConfirmText('');
       await load();
     } catch (error) {
-      setSaveResult({ ok: false, text: errorBody(error).error ?? 'Not changed.' });
+      setSaveResult({
+        ok: false,
+        text: errorBody(error).error ?? localize('com_mindstone_not_changed'),
+      });
     }
   };
 
@@ -146,7 +177,7 @@ export default function MindStoneSettingsView() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-4xl flex-col gap-4 p-6 text-text-primary">
-        <h1 className="text-2xl font-semibold">MindStone settings</h1>
+        <h1 className="text-2xl font-semibold">{localize('com_mindstone_settings_title')}</h1>
         {loadError && (
           <div role="alert" className="rounded-lg border border-red-500 p-3 text-red-500">
             {loadError}
@@ -156,7 +187,9 @@ export default function MindStoneSettingsView() {
         {status && (
           <section className={card} aria-labelledby="ms-onboarding">
             <h2 id="ms-onboarding" className="mb-2 text-lg font-medium">
-              {status.onboarded ? 'Set up' : 'Getting started'}
+              {localize(
+                status.onboarded ? 'com_mindstone_set_up' : 'com_mindstone_getting_started',
+              )}
             </h2>
             <ul className="flex flex-col gap-1">
               {Object.entries(status.steps).map(([name, step]) => (
@@ -172,15 +205,15 @@ export default function MindStoneSettingsView() {
         {config && (
           <section className={card} aria-labelledby="ms-config">
             <h2 id="ms-config" className="mb-2 text-lg font-medium">
-              Configuration
+              {localize('com_mindstone_configuration')}
             </h2>
             <label className="mb-2 flex items-center gap-2">
-              Section
+              {localize('com_mindstone_section')}
               <select
                 className="rounded border border-border-medium bg-surface-secondary p-1"
                 value={section}
                 onChange={(e) => setSection(e.target.value)}
-                aria-label="Config section"
+                aria-label={localize('com_mindstone_config_section')}
               >
                 {SECTIONS.map((name) => (
                   <option key={name} value={name}>
@@ -190,13 +223,13 @@ export default function MindStoneSettingsView() {
               </select>
             </label>
             <p className="mb-2 text-sm text-text-secondary">
-              Secrets show as {'{ "set": true }'}. Leave them as they are to keep them; store a new one below. Set a key to null to remove it.
+              {localize('com_mindstone_secrets_hint', { 0: '{ "set": true }' })}
             </p>
             <textarea
               className="h-72 w-full rounded border border-border-medium bg-surface-secondary p-2 font-mono text-sm"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              aria-label={`${section} settings (JSON)`}
+              aria-label={localize('com_mindstone_section_json', { 0: section })}
               spellCheck={false}
             />
             {draftError && <p className="text-sm text-red-500">{draftError}</p>}
@@ -206,10 +239,13 @@ export default function MindStoneSettingsView() {
               onClick={() => void save()}
               disabled={Boolean(draftError)}
             >
-              Save {section}
+              {localize('com_mindstone_save_section', { 0: section })}
             </button>
             {saveResult && (
-              <div role="status" className={saveResult.ok ? 'mt-2 text-green-600' : 'mt-2 text-red-500'}>
+              <div
+                role="status"
+                className={saveResult.ok ? 'mt-2 text-green-600' : 'mt-2 text-red-500'}
+              >
                 {saveResult.text}
                 {saveResult.errors && (
                   <ul className="list-disc pl-5">
@@ -225,24 +261,26 @@ export default function MindStoneSettingsView() {
 
         <section className={card} aria-labelledby="ms-secrets">
           <h2 id="ms-secrets" className="mb-2 text-lg font-medium">
-            Store a secret
+            {localize('com_mindstone_store_secret')}
           </h2>
-          <p className="mb-2 text-sm text-text-secondary">API keys and bot tokens are stored on the gateway, never shown again.</p>
+          <p className="mb-2 text-sm text-text-secondary">
+            {localize('com_mindstone_store_secret_hint')}
+          </p>
           <div className="flex flex-wrap gap-2">
             <input
               className="rounded border border-border-medium bg-surface-secondary p-2"
-              placeholder="name, e.g. telegram.token"
+              placeholder={localize('com_mindstone_secret_name_placeholder')}
               value={secretName}
               onChange={(e) => setSecretName(e.target.value)}
-              aria-label="Secret name"
+              aria-label={localize('com_mindstone_secret_name')}
             />
             <input
               className="flex-1 rounded border border-border-medium bg-surface-secondary p-2"
               type="password"
-              placeholder="value"
+              placeholder={localize('com_mindstone_secret_value_placeholder')}
               value={secretValue}
               onChange={(e) => setSecretValue(e.target.value)}
-              aria-label="Secret value"
+              aria-label={localize('com_mindstone_secret_value')}
               autoComplete="off"
             />
             <button
@@ -251,7 +289,7 @@ export default function MindStoneSettingsView() {
               disabled={!secretName || !secretValue}
               onClick={() => void storeSecret()}
             >
-              Store
+              {localize('com_mindstone_store')}
             </button>
           </div>
           {secretResult && (
@@ -264,37 +302,49 @@ export default function MindStoneSettingsView() {
         {permissions && (
           <section className={card} aria-labelledby="ms-advanced">
             <h2 id="ms-advanced" className="mb-2 text-lg font-medium">
-              Advanced settings
+              {localize('com_mindstone_advanced_settings')}
             </h2>
             <p className="mb-2 text-sm text-text-secondary">
-              Most settings can only be changed while this is on. That covers file paths, URLs, environment variables, Pi's built-in tools,
-              the workspace, packs and skills, and anything that lets someone new reach the agent: a new or re-enabled connector, a new
-              sender or chat, or who counts as the owner. Turning it on lasts one hour. Gateway sign-in can only be changed on the gateway
-              host.
+              {localize('com_mindstone_advanced_hint')}
             </p>
             {permissions.advancedSettings ? (
               <div className="flex items-center gap-3">
                 <span data-testid="ms-advanced-state">
-                  On
+                  {localize('com_mindstone_advanced_on')}
                   {permissions.grantedBy
-                    ? `, granted by ${permissions.grantedBy === user?.id ? 'you' : 'another admin'}`
+                    ? localize(
+                        permissions.grantedBy === user?.id
+                          ? 'com_mindstone_granted_by_you'
+                          : 'com_mindstone_granted_by_other',
+                      )
                     : ''}
-                  {permissions.expiresAt ? `, until ${new Date(permissions.expiresAt).toLocaleTimeString()}` : ''}.
+                  {permissions.expiresAt
+                    ? localize('com_mindstone_until', {
+                        0: new Date(permissions.expiresAt).toLocaleTimeString(),
+                      })
+                    : ''}
+                  {'.'}
                 </span>
-                <button type="button" className="rounded border border-border-medium px-3 py-1" onClick={() => void setAdvanced(false)}>
-                  Turn off
+                <button
+                  type="button"
+                  className="rounded border border-border-medium px-3 py-1"
+                  onClick={() => void setAdvanced(false)}
+                >
+                  {localize('com_mindstone_turn_off')}
                 </button>
               </div>
             ) : (
               <div className="flex flex-wrap items-center gap-2">
-                <span data-testid="ms-advanced-state">Off.</span>
+                <span data-testid="ms-advanced-state">
+                  {localize('com_mindstone_advanced_off')}
+                </span>
                 <label className="flex items-center gap-2 text-sm">
-                  Type <code>{CONFIRMATION}</code> to turn on:
+                  {localize('com_mindstone_type_to_turn_on', { 0: CONFIRMATION })}
                   <input
                     className="rounded border border-border-medium bg-surface-secondary p-1"
                     value={confirmText}
                     onChange={(e) => setConfirmText(e.target.value)}
-                    aria-label="Confirmation"
+                    aria-label={localize('com_mindstone_confirmation')}
                   />
                 </label>
                 <button
@@ -303,7 +353,7 @@ export default function MindStoneSettingsView() {
                   disabled={confirmText !== CONFIRMATION}
                   onClick={() => void setAdvanced(true)}
                 >
-                  Turn on
+                  {localize('com_mindstone_turn_on')}
                 </button>
               </div>
             )}

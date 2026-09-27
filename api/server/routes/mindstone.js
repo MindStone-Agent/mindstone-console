@@ -61,7 +61,8 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
   if (!base || !token || !adminToken) {
     return res.status(503).json({
       ok: false,
-      error: 'MINDSTONE_GATEWAY_URL, MINDSTONE_GATEWAY_TOKEN and MINDSTONE_ADMIN_TOKEN must be set on the Console server',
+      error:
+        'MINDSTONE_GATEWAY_URL, MINDSTONE_GATEWAY_TOKEN and MINDSTONE_ADMIN_TOKEN must be set on the Console server',
     });
   }
   const userId = req.user?.id ?? req.user?._id;
@@ -80,7 +81,9 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
     // A present but malformed etag is refused rather than dropped, so a save
     // never silently loses its stale-write guard.
     if (typeof ifMatch !== 'string' || ifMatch.length > 100 || !/^"[0-9a-f]+"$/.test(ifMatch)) {
-      return res.status(400).json({ ok: false, error: 'ifMatch must be the etag the settings page read' });
+      return res
+        .status(400)
+        .json({ ok: false, error: 'ifMatch must be the etag the settings page read' });
     }
     headers['if-match'] = ifMatch;
   }
@@ -101,8 +104,26 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
       logger.error('[mindstone] the gateway refused the Console credentials (401)');
       return res.status(502).json({
         ok: false,
-        error: "the MindStone gateway refused the Console's credentials; check MINDSTONE_GATEWAY_TOKEN and MINDSTONE_ADMIN_TOKEN",
+        error:
+          "the MindStone gateway refused the Console's credentials; check MINDSTONE_GATEWAY_TOKEN and MINDSTONE_ADMIN_TOKEN",
       });
+    }
+    // Only the gateway's own JSON answers pass through. A 5xx, or a body that
+    // isn't JSON (a proxy's HTML error page), can carry host paths or other
+    // internals, so it is logged here and the browser gets a generic 502.
+    let isJson = true;
+    try {
+      JSON.parse(text);
+    } catch {
+      isJson = false;
+    }
+    if (response.status >= 500 || !isJson) {
+      logger.error(
+        `[mindstone] the gateway answered ${response.status}${isJson ? '' : ' with a body that is not JSON'}`,
+      );
+      return res
+        .status(502)
+        .json({ ok: false, error: "the MindStone gateway couldn't handle the request" });
     }
     const etag = response.headers.get('etag');
     if (etag) {
