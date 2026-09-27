@@ -7,10 +7,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
+import SystemStatus, { type SystemStatusData } from './SystemStatus';
 import { useAuthContext, useLocalize } from '~/hooks';
 
 type Step = { done: boolean; detail: string };
-type Status = { onboarded: boolean; steps: Record<string, Step> };
+type Status = { onboarded: boolean; steps: Record<string, Step>; system?: SystemStatusData };
 type Permissions = {
   advancedSettings: boolean;
   grantedBy?: string;
@@ -79,7 +80,13 @@ export default function MindStoneSettingsView() {
       setPermissions(p.permissions);
       setLoadError(null);
     } catch (error) {
-      setLoadError(errorBody(error).error ?? localize('com_mindstone_gateway_unreachable'));
+      // The proxy refuses non-admins (403) before the gateway is ever asked.
+      const forbidden = (error as { response?: { status?: number } })?.response?.status === 403;
+      setLoadError(
+        forbidden
+          ? localize('com_mindstone_admin_only')
+          : (errorBody(error).error ?? localize('com_mindstone_gateway_unreachable')),
+      );
     }
   }, [localize]);
 
@@ -185,6 +192,12 @@ export default function MindStoneSettingsView() {
           </div>
         )}
 
+        {!status && !loadError && (
+          <p role="status" className="text-text-secondary">
+            {localize('com_mindstone_loading')}
+          </p>
+        )}
+
         {status && (
           <section className={card} aria-labelledby="ms-onboarding">
             <h2 id="ms-onboarding" className="mb-2 text-lg font-medium">
@@ -210,6 +223,15 @@ export default function MindStoneSettingsView() {
             >
               {localize(status.onboarded ? 'com_mindstone_onb_rerun' : 'com_mindstone_onb_start')}
             </Link>
+          </section>
+        )}
+
+        {status && (
+          <section className={card} aria-labelledby="ms-system">
+            <h2 id="ms-system" className="mb-2 text-lg font-medium">
+              {localize('com_mindstone_system_status')}
+            </h2>
+            <SystemStatus system={status.system} />
           </section>
         )}
 

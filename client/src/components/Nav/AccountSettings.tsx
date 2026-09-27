@@ -1,6 +1,8 @@
 import { useState, memo, useRef } from 'react';
 import { useSetRecoilState } from 'recoil';
 import * as Menu from '@ariakit/react/menu';
+import { useNavigate } from 'react-router-dom';
+import { SystemRoles } from 'librechat-data-provider';
 import { GearIcon, DropdownMenuSeparator, Avatar } from '@librechat/client';
 import {
   Archive,
@@ -9,6 +11,7 @@ import {
   Keyboard,
   LifeBuoy,
   LogOut,
+  Gem,
   Scale,
   ShieldCheck,
 } from 'lucide-react';
@@ -101,6 +104,7 @@ function AccountSettings({ collapsed = false }: { collapsed?: boolean }) {
   const setShowShortcutsDialog = useSetRecoilState(store.showShortcutsDialog);
   const [showArchived, setShowArchived] = useState(false);
   const accountSettingsButtonRef = useRef<HTMLButtonElement>(null);
+  const navigate = useNavigate();
 
   return (
     <Menu.MenuProvider placement={collapsed ? 'right-end' : undefined}>
@@ -169,6 +173,17 @@ function AccountSettings({ collapsed = false }: { collapsed?: boolean }) {
           <GearIcon className="icon-md" aria-hidden="true" />
           {localize('com_nav_settings')}
         </Menu.MenuItem>
+        {/* The page's API is admin-only on the server; the link is only shown to admins. */}
+        {user?.role === SystemRoles.ADMIN && (
+          <Menu.MenuItem
+            onClick={() => navigate('/mindstone')}
+            className="select-item text-sm"
+            data-testid="nav-mindstone"
+          >
+            <Gem className="icon-md" aria-hidden="true" />
+            {localize('com_mindstone_nav')}
+          </Menu.MenuItem>
+        )}
         <DropdownMenuSeparator />
         <Menu.MenuItem onClick={() => logout()} className="select-item text-sm">
           <LogOut className="icon-md" aria-hidden="true" />
