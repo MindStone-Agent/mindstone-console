@@ -36,6 +36,11 @@ const ALLOWED = [
   { method: 'POST', path: /^permissions\/advanced$/ },
   { method: 'GET', path: /^doctor$/ },
   { method: 'GET', path: /^logs$/ },
+  { method: 'GET', path: /^approvals$/ },
+  { method: 'GET', path: /^approvals\/[0-9a-f-]{8,36}$/ },
+  { method: 'POST', path: /^approvals\/[0-9a-f-]{8,36}\/(approve|reject)$/ },
+  { method: 'GET', path: /^secrets$/ },
+  { method: 'DELETE', path: /^secrets\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/ },
 ];
 
 /** Gateway base URL: MINDSTONE_GATEWAY_URL is the OpenAI base (…/v1); the admin API sits at the root. */
@@ -91,10 +96,11 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
     }
     headers['if-match'] = ifMatch;
   }
-  // The log tail takes one query, lines (1 to 500 digits-only; the gateway
-  // checks the range); nothing else from the browser's query string reaches
-  // the gateway.
-  let query = '';
+  // Two queries reach the gateway, each on one path only: all=1 on the
+  // approvals list (decided actions too) and lines on the log tail; nothing
+  // else from the browser's query string does.
+  let query = path === 'approvals' && req.query?.all === '1' ? '?all=1' : '';
+  // lines: digits only here; the gateway checks the 1 to 500 range.
   if (path === 'logs' && req.query?.lines !== undefined) {
     const lines = req.query.lines;
     if (typeof lines !== 'string' || !/^[0-9]{1,3}$/.test(lines)) {

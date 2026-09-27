@@ -66,6 +66,13 @@ const ENDPOINTS = [
   { method: 'post', path: 'providers/ollama-cloud', write: true },
   { method: 'get', path: 'doctor', write: false },
   { method: 'get', path: 'logs', write: false },
+  { method: 'get', path: 'approvals', write: false },
+  { method: 'get', path: 'approvals/0b5e7c1a-1111-4222-8333-444455556666', write: false },
+  { method: 'get', path: 'approvals/0b5e7c1a', write: false },
+  { method: 'post', path: 'approvals/0b5e7c1a-1111-4222-8333-444455556666/approve', write: true },
+  { method: 'post', path: 'approvals/0b5e7c1a/reject', write: true },
+  { method: 'get', path: 'secrets', write: false },
+  { method: 'delete', path: 'secrets/telegram-token', write: true },
 ];
 
 /** What each caller should get from an allowlisted endpoint. */
@@ -205,6 +212,7 @@ describe('MindStone admin proxy', () => {
       ['post', 'providers/-'],
       ['post', 'providers/ollama%00'],
       ['post', 'providers/ollama%0A'],
+      ['post', 'providers/ol.lama'],
       ['post', 'x/providers/ollama'],
       ['get', 'x/models'],
       // Diagnostics: GET doctor and logs only.
@@ -217,6 +225,41 @@ describe('MindStone admin proxy', () => {
       ['post', 'doctor'],
       ['post', 'logs'],
       ['patch', 'logs'],
+      // Approvals: lowercase ids of 8 to 36 characters, approve or reject, nothing else.
+      ['get', 'approvalsx'],
+      ['get', 'approvals/'],
+      ['get', 'approvals/0b5e7c1'],
+      ['get', 'approvals/0B5E7C1A'],
+      ['get', 'approvals/0b5e7c1a-1111-4222-8333-4444555566667'],
+      ['get', 'approvals/0b5e7c1a/approve'],
+      ['get', 'approvals/..%2Fconfig'],
+      ['get', 'approvals/0b5e7c1a%2F..'],
+      ['post', 'approvals'],
+      ['post', 'approvals/0b5e7c1a'],
+      ['post', 'approvals/0b5e7c1a/approvex'],
+      ['post', 'approvals/0b5e7c1a/delete'],
+      ['post', 'approvals/0b5e7c1a/approve/x'],
+      ['post', 'approvals/0b5e7c1g/approve'],
+      ['post', 'approvals/0B5E7C1A/approve'],
+      ['post', 'approvals/0b5e.7c1a/approve'],
+      ['post', 'x/approvals/0b5e7c1a/approve'],
+      ['patch', 'approvals/0b5e7c1a/approve'],
+      // Stored secrets: list, and delete one by a plain name.
+      ['get', 'secretsx'],
+      ['get', 'secrets/'],
+      ['get', 'secrets/telegram-token'],
+      ['get', 'x/secrets'],
+      ['delete', 'secrets'],
+      ['delete', 'secrets/'],
+      ['delete', 'secrets/..'],
+      ['delete', 'secrets/.env'],
+      ['delete', 'secrets/..%2Fconfig.json'],
+      ['delete', 'secrets/a%2F..%2F..%2Fconfig.json'],
+      ['delete', 'secrets/a/b'],
+      ['delete', 'x/secrets/a'],
+      ['delete', `secrets/${'a'.repeat(65)}`],
+      ['delete', 'config/memory'],
+      ['delete', 'permissions/advanced'],
       ['patch', 'config/mem.ory'],
     ];
     for (const [method, path] of outside) {
@@ -248,6 +291,22 @@ describe('MindStone admin proxy', () => {
     });
   });
 
+  it('forwards only all=1, and only on the approvals list', async () => {
+    const cases = [
+      ['approvals?all=1', 'http://gateway.test:19790/admin/approvals?all=1'],
+      ['approvals?all=1&x=2', 'http://gateway.test:19790/admin/approvals?all=1'],
+      ['approvals?all=true', 'http://gateway.test:19790/admin/approvals'],
+      ['approvals?x=1', 'http://gateway.test:19790/admin/approvals'],
+      ['status?all=1', 'http://gateway.test:19790/admin/status'],
+      ['approvals/0b5e7c1a?all=1', 'http://gateway.test:19790/admin/approvals/0b5e7c1a'],
+    ];
+    for (const [path, expected] of cases) {
+      fetchMock.mockClear();
+      await request(app).get(`/api/mindstone/admin/${path}`).set('x-test-caller', 'manage');
+      expect([path, fetchMock.mock.calls[0]?.[0]]).toEqual([path, expected]);
+    }
+  });
+
   it('forwards only a digits-only lines, and only on logs', async () => {
     const cases = [
       ['logs', 'http://gateway.test:19790/admin/logs'],
@@ -256,6 +315,8 @@ describe('MindStone admin proxy', () => {
       ['logs?x=1', 'http://gateway.test:19790/admin/logs'],
       ['doctor?lines=5', 'http://gateway.test:19790/admin/doctor'],
       ['status?lines=5', 'http://gateway.test:19790/admin/status'],
+      ['approvals?lines=5', 'http://gateway.test:19790/admin/approvals'],
+      ['logs?all=1', 'http://gateway.test:19790/admin/logs'],
     ];
     for (const [path, expected] of cases) {
       fetchMock.mockClear();

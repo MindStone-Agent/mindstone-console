@@ -11,7 +11,9 @@ import {
 import MindStoneDiagnosticsView from '~/components/MindStone/DiagnosticsView';
 import { MarketplaceProvider } from '~/components/Agents/MarketplaceContext';
 import MindStoneOnboardingView from '~/components/MindStone/OnboardingView';
+import MindStoneApprovalsView from '~/components/MindStone/ApprovalsView';
 import MindStoneSettingsView from '~/components/MindStone/SettingsView';
+import MindStoneSecretsView from '~/components/MindStone/SecretsView';
 import AgentMarketplace from '~/components/Agents/Marketplace';
 import { OAuthSuccess, OAuthError } from '~/components/OAuth';
 import { AuthContextProvider } from '~/hooks/AuthContext';
@@ -156,6 +158,16 @@ export const router = createBrowserRouter(
               /** MindStone doctor and gateway logs (MindStone-Agent #86). The server route enforces admin. */
               path: 'mindstone/diagnostics',
               element: <MindStoneDiagnosticsView />,
+            },
+            {
+              /** MindStone approvals (MindStone-Agent #84). The server route enforces admin. */
+              path: 'mindstone/approvals',
+              element: <MindStoneApprovalsView />,
+            },
+            {
+              /** MindStone stored secrets (MindStone-Agent #88). The server route enforces admin. */
+              path: 'mindstone/secrets',
+              element: <MindStoneSecretsView />,
             },
             {
               path: 'prompts',
