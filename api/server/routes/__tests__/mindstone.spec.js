@@ -69,6 +69,8 @@ const ENDPOINTS = [
   { method: 'get', path: 'approvals/0b5e7c1a', write: false },
   { method: 'post', path: 'approvals/0b5e7c1a-1111-4222-8333-444455556666/approve', write: true },
   { method: 'post', path: 'approvals/0b5e7c1a/reject', write: true },
+  { method: 'get', path: 'secrets', write: false },
+  { method: 'delete', path: 'secrets/telegram-token', write: true },
 ];
 
 /** What each caller should get from an allowlisted endpoint. */
@@ -208,6 +210,7 @@ describe('MindStone admin proxy', () => {
       ['post', 'providers/-'],
       ['post', 'providers/ollama%00'],
       ['post', 'providers/ollama%0A'],
+      ['post', 'providers/ol.lama'],
       ['post', 'x/providers/ollama'],
       ['get', 'x/models'],
       // Approvals: lowercase ids of 8 to 36 characters, approve or reject, nothing else.
@@ -229,6 +232,22 @@ describe('MindStone admin proxy', () => {
       ['post', 'approvals/0b5e.7c1a/approve'],
       ['post', 'x/approvals/0b5e7c1a/approve'],
       ['patch', 'approvals/0b5e7c1a/approve'],
+      // Stored secrets: list, and delete one by a plain name.
+      ['get', 'secretsx'],
+      ['get', 'secrets/'],
+      ['get', 'secrets/telegram-token'],
+      ['get', 'x/secrets'],
+      ['delete', 'secrets'],
+      ['delete', 'secrets/'],
+      ['delete', 'secrets/..'],
+      ['delete', 'secrets/.env'],
+      ['delete', 'secrets/..%2Fconfig.json'],
+      ['delete', 'secrets/a%2F..%2F..%2Fconfig.json'],
+      ['delete', 'secrets/a/b'],
+      ['delete', 'x/secrets/a'],
+      ['delete', `secrets/${'a'.repeat(65)}`],
+      ['delete', 'config/memory'],
+      ['delete', 'permissions/advanced'],
       ['patch', 'config/mem.ory'],
     ];
     for (const [method, path] of outside) {

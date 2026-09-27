@@ -250,9 +250,14 @@ export default function MindStoneOnboardingView() {
     }
   };
 
-  /** Onboarding is done: advanced settings go off before the first chat. */
+  /**
+   * Onboarding is done: advanced settings go off before the first chat,
+   * whatever this page last saw (a grant made in another tab counts too).
+   * If that fails while the page saw them on, it stays here with the error;
+   * a read-only admin, who can't change them, still gets to the chat.
+   */
   const startChat = async () => {
-    if (permissions?.advancedSettings && !(await turnOffAccess())) return;
+    if (!(await turnOffAccess()) && permissions?.advancedSettings !== false) return;
     navigate('/c/new');
   };
 
