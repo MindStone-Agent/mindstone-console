@@ -1,0 +1,39 @@
+# MindStone Console, local: the Console (built from this repo) + MongoDB, with the
+# MindStone-Agent gateway as its only endpoint. No meilisearch, rag_api or vectordb yet.
+# Run from this directory: `cp .env.example .env`, fill it in, then `docker compose up -d --build`.
+services:
+  console:
+    container_name: mindstone-console
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: mindstone-console:local
+    # Loopback only: the page lets people sign in and reach the agent. Put a
+    # reverse proxy with TLS in front before exposing it to a network.
+    ports:
+      - "127.0.0.1:3080:3080"
+    depends_on:
+      - mongodb
+    user: "${UID:-1000}:${GID:-1000}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file: .env
+    environment:
+      - HOST=0.0.0.0
+      - MONGO_URI=mongodb://mongodb:27017/MindStoneConsole
+      - NO_PROXY=localhost,127.0.0.1,mongodb,host.docker.internal
+    volumes:
+      - ./.env:/app/.env
+      - ./librechat.yaml:/app/librechat.yaml
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+      - console-data:/app/data
+  mongodb:
+    container_name: mindstone-console-mongo
+    image: mongo:8.0.20
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./data-node:/data/db
+    command: mongod --noauth
+volumes:
+  console-data:
