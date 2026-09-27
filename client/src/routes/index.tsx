@@ -1,3 +1,4 @@
+import MindStoneSettingsView from '~/components/MindStone/SettingsView';
 import { createBrowserRouter, Navigate, Outlet } from 'react-router-dom';
 import {
   Login,
@@ -138,6 +139,11 @@ export const router = createBrowserRouter(
             {
               path: 'search',
               element: <Search />,
+            },
+            {
+              /** MindStone settings (MindStone-Agent #38, P2). The server route enforces admin. */
+              path: 'mindstone',
+              element: <MindStoneSettingsView />,
             },
             {
               path: 'prompts',

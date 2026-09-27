@@ -7,6 +7,7 @@ const adminCodeEnvironments = require('./admin/code');
 const codeEnvironments = require('./code-environments');
 const adminLangfuse = require('./admin/langfuse');
 const adminGrants = require('./admin/grants');
+const mindstone = require('./mindstone');
 const adminGroups = require('./admin/groups');
 const adminRoles = require('./admin/roles');
 const adminSkills = require('./admin/skills');
@@ -44,6 +45,7 @@ const rum = require('./rum');
 const insights = require('./insights');
 
 module.exports = {
+  mindstone,
   insights,
   rum,
   mcp,
