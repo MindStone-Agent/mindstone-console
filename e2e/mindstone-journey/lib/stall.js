@@ -11,6 +11,11 @@
  * - fetchInPage runs in node: page.evaluate(inPageFetch) raced against the same
  *   timeout plus a grace, so a page that never returns can't hang the step
  *   either. Throws a StallError "STALL: <method> <path> no response in Ns".
+ * - fetchBefore / pollBefore: the same inside a polling loop with its own
+ *   deadline. A request the deadline cut short (it never had its full
+ *   timeout) is the loop's own limit running out, not a stall: a
+ *   DeadlineError, and the loop ends as timed out.
+ * - nodeFetch: a request from node (the gateway probes), same timeout and label.
  * - gotoOrStall: page.goto with Playwright's own timeout, its timeout labelled
  *   "STALL: navigation to <path> didn't load in Ns".
  */
@@ -34,6 +39,14 @@ class StallError extends Error {
   constructor(message) {
     super(message);
     this.name = 'StallError';
+  }
+}
+
+/** A request its polling loop's deadline cut short: the loop's limit ran out, not a stall. Never recorded as one. */
+class DeadlineError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'DeadlineError';
   }
 }
 
@@ -95,6 +108,60 @@ async function fetchInPage(page, { method, url, headers = {}, body, timeoutMs = 
 }
 
 /**
+ * fetchInPage inside a polling loop: the timeout is cut to the loop's
+ * `deadline` (callTimeoutMs). Without a deadline, or with the full timeout
+ * left, no answer is a StallError; when the deadline cut the timeout short,
+ * a DeadlineError instead.
+ */
+async function fetchBefore(page, request, deadline, cap = apiTimeoutMs()) {
+  const timeoutMs = deadline === undefined ? cap : callTimeoutMs(deadline, Date.now(), cap);
+  try {
+    return await fetchInPage(page, { ...request, timeoutMs });
+  } catch (error) {
+    if (error instanceof StallError && timeoutMs < cap) {
+      throw new DeadlineError(`${request.method} ${pathOf(request.url)} got no answer in the ${seconds(timeoutMs)}s left before the limit`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * A polling loop with its own limit: calls poll(deadline, started) until it
+ * returns something other than undefined, pausing up to pauseMs between
+ * calls, never past the deadline. Returns { value }, or { timedOut: true }
+ * (with `cut`, what the final poll's DeadlineError said, when the limit ran
+ * out during a request). Any other error (a StallError too) ends the loop.
+ */
+async function pollBefore(timeoutMs, poll, pauseMs = 1_500) {
+  const started = Date.now();
+  const deadline = started + timeoutMs;
+  while (Date.now() < deadline) {
+    let value;
+    try {
+      value = await poll(deadline, started);
+    } catch (error) {
+      if (error instanceof DeadlineError) return { timedOut: true, cut: error.message };
+      throw error;
+    }
+    if (value !== undefined) return { value };
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(pauseMs, deadline - Date.now()))));
+  }
+  return { timedOut: true };
+}
+
+/** A request from node: { status, text }, or a StallError when no complete response came within timeoutMs. */
+async function nodeFetch(url, { method = 'GET', headers = {}, timeoutMs = apiTimeoutMs() } = {}) {
+  try {
+    const response = await fetch(url, { method, headers, signal: AbortSignal.timeout(timeoutMs) });
+    const text = await response.text();
+    return { status: response.status, text };
+  } catch (error) {
+    if (error && (error.name === 'TimeoutError' || error.name === 'AbortError')) throw new StallError(apiStallMessage(method, url, timeoutMs));
+    throw error;
+  }
+}
+
+/**
  * page.goto, with Playwright's own timeout (options.timeout, else the
  * navigation timeout the caller passes for the label) named as a stall.
  */
@@ -115,10 +182,14 @@ module.exports = {
   apiTimeoutMs,
   callTimeoutMs,
   StallError,
+  DeadlineError,
   isStall,
   apiStallMessage,
   navStallMessage,
   inPageFetch,
   fetchInPage,
+  fetchBefore,
+  pollBefore,
+  nodeFetch,
   gotoOrStall,
 };

@@ -7,11 +7,14 @@
 //   30 s default, not the step's budget);
 // - a page whose evaluate never returns still stalls, on the node-side guard;
 // - inside a polling loop, the call's timeout is cut to the loop's own
-//   deadline, so the loop's limit fires even when every call stalls;
+//   deadline, so the loop's limit fires even when every call stalls; a call
+//   the deadline cut short ends the loop as its own limit (DeadlineError),
+//   never as a stall, and one with its full timeout is still a stall;
+// - a request from node (the gateway probes) stalls the same way;
 // - a page load that never finishes is labelled "STALL: navigation to <path>".
 // The server listens on 127.0.0.1, on the first free port in UAT_PORT_MIN to
 // UAT_PORT_MAX (default 26900 to 26949). Run by run-journey.sh with X5; needs
-// @playwright/test (NODE_PATH).
+// @playwright/test (NODE_PATH). A watchdog ends it (exit 1) if it hangs itself.
 //
 //   node stall.selftest.mjs
 import http from 'node:http';
@@ -19,7 +22,14 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require('@playwright/test');
-const { DEFAULT_API_TIMEOUT_MS, apiTimeoutMs, callTimeoutMs, isStall, fetchInPage, gotoOrStall } = require('./stall.js');
+const { DEFAULT_API_TIMEOUT_MS, apiTimeoutMs, callTimeoutMs, isStall, DeadlineError, fetchInPage, fetchBefore, pollBefore, nodeFetch, gotoOrStall } =
+  require('./stall.js');
+
+// The self-test must not hang the harness (X5) itself.
+setTimeout(() => {
+  console.log('stall self-test: hung (over 60 s)');
+  process.exit(1);
+}, 60_000).unref();
 
 const PORT_MIN = Number(process.env.UAT_PORT_MIN ?? 26900);
 const PORT_MAX = Math.min(Number(process.env.UAT_PORT_MAX ?? 26949), PORT_MIN + 49);
@@ -35,6 +45,9 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html' }).end('<title>stall self-test</title><p>ok</p>');
   } else if (req.url === '/ok') {
     res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"ok":true}');
+  } else if (req.url === '/slow-empty') {
+    // A poll that answers, just slowly: an empty message list after 1.2 s.
+    setTimeout(() => res.writeHead(200, { 'Content-Type': 'application/json' }).end('[]'), 1_200);
   } else if (req.url === '/hang-body') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.write('{"partial":');
@@ -108,10 +121,37 @@ try {
   const body = await timed(() => fetchInPage(page, { method: 'POST', url: '/hang-body', body: '{}', timeoutMs: 1_500 }));
   expectStall('headers, then a body that never ends', body, 'STALL: POST /hang-body no response in 1.5s', 1_500);
 
-  // A polling loop with 2 s left and the 30 s default cap: the stall comes at its deadline, not 30 s later.
+  // A polling loop with 2 s left and the 30 s default cap: it ends at its deadline, not 30 s later,
+  // and as the loop's own limit (DeadlineError), not a stall.
   const deadline = Date.now() + 2_000;
-  const loop = await timed(() => fetchInPage(page, { method: 'GET', url: '/hang', timeoutMs: callTimeoutMs(deadline, Date.now(), 30_000) }));
-  expectStall("inside a loop, at the loop's deadline", loop, 'STALL: GET /hang no response in', 2_000);
+  const loop = await timed(() => fetchBefore(page, { method: 'GET', url: '/hang' }, deadline, 30_000));
+  check(
+    `inside a loop, a call its deadline cut short ends at the deadline as the loop's limit, not a stall (${loop.ms} ms)`,
+    loop.error instanceof DeadlineError && !isStall(loop.error) && loop.ms >= 1_950 && loop.ms <= 4_000,
+    loop.error ? `${loop.error.name}: ${loop.error.message}` : 'no error',
+  );
+  const full = await timed(() => fetchBefore(page, { method: 'GET', url: '/hang' }, Date.now() + 60_000, 1_500));
+  expectStall('inside a loop, a call with its full timeout left is still a stall', full, 'STALL: GET /hang no response in 1.5s', 1_500);
+
+  // QA repro: every poll answers [] after 1.2 s, with a 3.5 s limit. The last poll starts with less time left
+  // than it takes; the loop must end timed out (the reply limit), not with a STALL.
+  const polls = await timed(() =>
+    pollBefore(3_500, (dl) => fetchBefore(page, { method: 'GET', url: '/slow-empty' }, dl, 30_000).then(() => undefined)),
+  );
+  check(
+    `a reply that never finishes, polled slowly, times out as the reply limit, not a stall (${polls.ms} ms: ${polls.error ? polls.error.message : JSON.stringify(polls.value)})`,
+    !polls.error && polls.value?.timedOut === true && /got no answer in the .* left before the limit/.test(polls.value.cut ?? '') && polls.ms <= 5_500,
+  );
+  const stalledPoll = await timed(() => pollBefore(60_000, (dl) => fetchBefore(page, { method: 'GET', url: '/hang' }, dl, 1_500)));
+  expectStall('a polling loop whose call stalls with its full timeout ends on the stall', stalledPoll, 'STALL: GET /hang no response in 1.5s', 1_500);
+
+  // From node (the gateway probes): same timeout and label, no host in it.
+  const nodeOk = await timed(() => nodeFetch(`${base}/ok`, { timeoutMs: 2_000 }));
+  check(`a node request that answers returns its status and body (${nodeOk.ms} ms)`, !nodeOk.error && nodeOk.value.status === 200 && nodeOk.value.text === '{"ok":true}', nodeOk.error?.message ?? '');
+  const nodeHang = await timed(() => nodeFetch(`${base}/hang`, { timeoutMs: 1_500 }));
+  expectStall('a node request with no response', nodeHang, 'STALL: GET /hang no response in 1.5s', 1_500);
+  const nodeBody = await timed(() => nodeFetch(`${base}/hang-body`, { timeoutMs: 1_500 }));
+  expectStall('a node request whose body never ends', nodeBody, 'STALL: GET /hang-body no response in 1.5s', 1_500);
 
   // A page that never returns from evaluate (its JS thread is busy): the node-side guard still fires.
   const stuck = await browser.newPage();

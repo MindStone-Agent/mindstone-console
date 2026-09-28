@@ -178,10 +178,14 @@ const stall = require('./stall.js') as {
   apiTimeoutMs: () => number;
   callTimeoutMs: (deadline: number) => number;
   isStall: (error: unknown) => boolean;
-  fetchInPage: (
+  fetchBefore: (
     page: Page,
-    request: { method: string; url: string; headers?: Record<string, string>; body?: string; timeoutMs?: number },
+    request: { method: string; url: string; headers?: Record<string, string>; body?: string },
+    deadline: number | undefined,
+    cap: number,
   ) => Promise<{ status: number; text: string }>;
+  pollBefore: <T>(timeoutMs: number, poll: (deadline: number, started: number) => Promise<T | undefined>) => Promise<{ value?: T; timedOut?: true; cut?: string }>;
+  nodeFetch: (url: string, init: { method?: string; headers?: Record<string, string>; timeoutMs?: number }) => Promise<{ status: number; text: string }>;
   gotoOrStall: (page: Page, url: string, options?: Parameters<Page['goto']>[1], defaultTimeoutMs?: number) => ReturnType<Page['goto']>;
 };
 export const isStall = stall.isStall;
@@ -256,16 +260,17 @@ export async function signIn(page: Page): Promise<void> {
 /**
  * One request from inside the page (the Console's own origin and cookies),
  * with a timeout: API_TIMEOUT_MS, or less so as not to pass `deadline` (a
- * polling loop's own limit). No answer in time throws "STALL: <method>
- * <path> no response in Ns", recorded as a stall.
+ * polling loop's own limit). No answer within the full timeout throws
+ * "STALL: <method> <path> no response in Ns", recorded as a stall; no answer
+ * in a timeout the deadline cut short is the loop's limit (a DeadlineError,
+ * not recorded).
  */
 function pageRequest(
   page: Page,
   request: { method: string; url: string; headers: Record<string, string>; body?: string },
   deadline?: number,
 ): Promise<{ status: number; text: string }> {
-  const timeoutMs = deadline === undefined ? API_TIMEOUT_MS : stall.callTimeoutMs(deadline);
-  return stall.fetchInPage(page, { ...request, timeoutMs }).catch(stallRecorded);
+  return stall.fetchBefore(page, request, deadline, API_TIMEOUT_MS).catch(stallRecorded);
 }
 
 /** The Console's own access token (from its refresh cookie), for reading what the UI shows. */
@@ -405,15 +410,14 @@ export type Reply = {
 export async function waitForReplyTo(page: Page, text: string | undefined, timeoutMs = 240_000): Promise<Reply> {
   await page.waitForURL((url) => conversationId(url.toString()) !== undefined, { timeout: 60_000 });
   const convo = conversationId(page.url())!;
-  const started = Date.now();
-  const deadline = started + timeoutMs;
   const turn = text === undefined ? 'the first turn' : `"${text}"`;
   let lastSeen = '';
   let stableSince = 0;
   // What the last poll saw, for the timeout's message: a reply that never finished isn't a missing one.
   let lastState = 'no poll answered';
-  while (Date.now() < deadline) {
-    // Each call is bounded by the loop's own deadline, so a stalled request can't outlive the reply limit.
+  // Each call is bounded by the loop's own deadline, so a stalled request can't outlive the reply limit; one the
+  // deadline cut short ends the loop as the reply limit, not as a stall (lib/stall.js pollBefore).
+  const result = await stall.pollBefore<Reply>(timeoutMs, async (deadline, started) => {
     const { status, json } = await consoleApi<StoredMessage[]>(
       page,
       'GET',
@@ -427,42 +431,42 @@ export async function waitForReplyTo(page: Page, text: string | undefined, timeo
       );
     });
     lastState = `GET /api/messages answered ${status}`;
-    if (status === 200 && Array.isArray(json)) {
-      const users = json.filter((m) => m.isCreatedByUser && (text === undefined || messageText(m) === text));
-      const user = text === undefined ? users[0] : users[users.length - 1];
-      const reply = user && json.find((m) => !m.isCreatedByUser && m.parentMessageId === user.messageId);
-      lastState = !user ? 'the user turn not stored' : !reply ? 'no reply stored' : reply.unfinished ? 'the reply stored but still unfinished' : 'the reply finished, waiting for it to settle';
-      if (user && reply && !reply.unfinished) {
-        const replyText = messageText(reply);
-        const errorText = messageError(reply);
-        const signature = `${errorText}|${replyText}`;
-        if (signature === lastSeen && Date.now() - stableSince > 2_000) {
-          // Stored is not enough: the user must see it. Both turns must be on the screen.
-          const shown =
-            errorText === undefined && replyText
-              ? await expectOnScreen(page, replyText, 'the stored reply', { role: 'assistant', messageId: reply.messageId })
-              : '';
-          await expectOnScreen(page, messageText(user), 'the user turn', { role: 'user' });
-          return {
-            messageId: reply.messageId,
-            shownBy: shown,
-            userText: messageText(user),
-            text: replyText,
-            error: errorText !== undefined,
-            errorText,
-            contentTypes: (reply.content ?? []).map((part) => part?.type ?? '?'),
-            conversationId: convo,
-          };
-        }
-        if (signature !== lastSeen) {
-          lastSeen = signature;
-          stableSince = Date.now();
-        }
-      }
+    if (status !== 200 || !Array.isArray(json)) return undefined;
+    const users = json.filter((m) => m.isCreatedByUser && (text === undefined || messageText(m) === text));
+    const user = text === undefined ? users[0] : users[users.length - 1];
+    const reply = user && json.find((m) => !m.isCreatedByUser && m.parentMessageId === user.messageId);
+    lastState = !user ? 'the user turn not stored' : !reply ? 'no reply stored' : reply.unfinished ? 'the reply stored but still unfinished' : 'the reply finished, waiting for it to settle';
+    if (!user || !reply || reply.unfinished) return undefined;
+    const replyText = messageText(reply);
+    const errorText = messageError(reply);
+    const signature = `${errorText}|${replyText}`;
+    if (signature === lastSeen && Date.now() - stableSince > 2_000) {
+      // Stored is not enough: the user must see it. Both turns must be on the screen.
+      const shown =
+        errorText === undefined && replyText
+          ? await expectOnScreen(page, replyText, 'the stored reply', { role: 'assistant', messageId: reply.messageId })
+          : '';
+      await expectOnScreen(page, messageText(user), 'the user turn', { role: 'user' });
+      return {
+        messageId: reply.messageId,
+        shownBy: shown,
+        userText: messageText(user),
+        text: replyText,
+        error: errorText !== undefined,
+        errorText,
+        contentTypes: (reply.content ?? []).map((part) => part?.type ?? '?'),
+        conversationId: convo,
+      };
     }
-    await page.waitForTimeout(Math.max(0, Math.min(1_500, deadline - Date.now())));
-  }
-  throw new Error(`no finished reply to ${turn} within ${Math.round(timeoutMs / 1000)}s (last poll: ${lastState})`);
+    if (signature !== lastSeen) {
+      lastSeen = signature;
+      stableSince = Date.now();
+    }
+    return undefined;
+  });
+  if (result.value) return result.value;
+  const cut = result.cut ? `; the final poll got no answer before the limit: ${result.cut}` : '';
+  throw new Error(`no finished reply to ${turn} within ${Math.round(timeoutMs / 1000)}s (last poll: ${lastState}${cut})`);
 }
 
 /** Text as it reads on screen: markdown markers and list bullets gone, whitespace collapsed. */
@@ -553,9 +557,15 @@ export async function probeGatewayAdmin(route: string): Promise<{ route: string;
     ['x-mindstone-user-id', 'uat-harness'],
     ['x-mindstone-user-role', 'admin'],
   ]);
-  const response = await fetch(`${base}${route}`, { headers });
-  const body = (await response.json().catch(() => ({}))) as { error?: string };
-  return { route, status: response.status, error: String(body.error ?? '') };
+  // Times out like consoleApi: no answer in API_TIMEOUT_MS is "STALL: GET <route> no response in Ns", recorded.
+  const response = await stall.nodeFetch(`${base}${route}`, { headers, timeoutMs: API_TIMEOUT_MS }).catch(stallRecorded);
+  let body: { error?: string } = {};
+  try {
+    body = JSON.parse(response.text) as { error?: string };
+  } catch {
+    // not JSON: no error text
+  }
+  return { route, status: response.status, error: String(body?.error ?? '') };
 }
 
 type TranscriptLine = {
