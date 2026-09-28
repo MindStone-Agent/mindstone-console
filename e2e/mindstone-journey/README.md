@@ -101,7 +101,7 @@ Then Finish shows "MindStone is set up". After that, `GET /admin/status` (throug
 | J5 | Identity formation | **`102` flow:** the gateway's own record decides, not how the reply reads.<br>- J4's conversation's transcript (session key ending in its conversation id) has an `identity_formation_prompted` event before the first assistant entry, in the same run.<br>- `<dataDir>/identity-formation/default.json`'s `sessionKey` ends with that conversation id.<br>- The checklist's `identity` step is done, via the API and the status panel.<br>- **Secondary:** the first reply asks what to "call you" or for "your name", and it's visible in its assistant row after reopening the conversation.<br><br>Proven with a mutant gateway that claims formation but drops the prompt: J5 FAILs on the transcript check. | PASS (`102`); **PENDING** (`pre-102`) |
 | J6 | Recall in the conversation | Reopen J4's conversation and wait until J4's reply is on screen before typing. Plant a codeword, ask an unrelated question, then ask for the codeword. Every reply must be stored and visible, and the last must contain the codeword. It works today, so a miss is a regression and **FAILs**. | PASS |
 | J7 | Skill Builder | Built from the Console and from chat, approved, installed and used. | **PENDING** (#104). It checks that `/mindstone` and Approvals load. |
-| J8 | Persona drafted by the agent | Proposed in chat, approved on Approvals, active in the next chat, and listed and switchable in the Console. | **PENDING** (#105) |
+| J8 | Persona drafted by the agent | The agent proposes a persona in chat (a real model is asked to use its instructed format; the mock gets the block in the message and is labelled MOCK). It waits on Approvals as a `persona_create` proposal; approving it saves it to the list without activating it (Clint's rule); **Make active** on the Personas page switches to it; the gateway transcript shows the next chat ran with it. PENDING while `GET /api/mindstone/admin/personas` is 404 on the pair. | Real check (#105: MindStone-Agent#112 + mindstone-console#24) |
 
 **How PENDING works.** A PENDING step first asserts today's *exact* state, not a guess from names:
 
@@ -109,8 +109,8 @@ Then Finish shows "MindStone is set up". After that, `GET /admin/status` (throug
 |---|---|
 | J3 (`pre-102`) | The setup steps are exactly `[Access, Model provider, Model, Persona, Finish]`, and the `/admin/status` checklist keys are exactly `{connectors, memory, persona, provider}`. |
 | J5 (`pre-102`) | The same checklist keys, and the agent didn't speak first. |
-| J7 | The status section's own links on `/mindstone` (not the checklist's) are exactly `[Run guided setup again, Diagnostics, Approvals]`. `GET /admin/skills`, `/admin/skills/builder`, `/admin/skills/drafts` and `/admin/skills/build` on the gateway each return 404. |
-| J8 | The same links. `GET /admin/personas`, `/admin/personas/proposals` and `/admin/persona` each return 404. |
+| J7 | The status section's own links on `/mindstone` (not the checklist's, and not the #105 Personas link, which J8 checks) are exactly `[Run guided setup again, Diagnostics, Approvals]`. `GET /admin/skills`, `/admin/skills/builder`, `/admin/skills/drafts` and `/admin/skills/build` on the gateway each return 404. |
+| J8 | Without #105 (MindStone-Agent #112 and console #24): `GET /api/mindstone/admin/personas` returns 404, so J8 is PENDING. |
 
 Only if that state is unchanged does the step call `test.fixme()` with the issue's "done when". **Any change FAILs the step** with "state changed: … review this PENDING test". A landed or half-landed feature therefore can't sit unnoticed as PENDING. Write the real assertions from the "done when" text in the step.
 

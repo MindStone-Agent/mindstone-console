@@ -555,8 +555,38 @@ type SessionEntry = {
   role?: string;
   runId?: string;
   timestamp?: string;
-  metadata?: { event?: string; mode?: string };
+  metadata?: {
+    event?: string;
+    mode?: string;
+    personaContext?: { injected?: boolean; personaId?: string };
+  };
 };
+
+/** A Console conversation's gateway transcript entries (session key ending in its id), in order. */
+function conversationEntries(conversationId: string): SessionEntry[] {
+  const dir = process.env.UAT_TRANSCRIPT_DIR;
+  if (!dir || !fs.existsSync(dir) || !conversationId) return [];
+  const entries: SessionEntry[] = [];
+  const walk = (d: string) => {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.jsonl?$/.test(entry.name)) {
+        for (const line of fs.readFileSync(full, 'utf8').split('\n')) {
+          if (!line.trim()) continue;
+          try {
+            const parsed = JSON.parse(line) as SessionEntry;
+            if (parsed.sessionKey?.endsWith(`:${conversationId}`)) entries.push(parsed);
+          } catch {
+            // not JSON
+          }
+        }
+      }
+    }
+  };
+  walk(dir);
+  return entries;
+}
 
 export type FormationEvidence = {
   sessionKey?: string;
@@ -580,27 +610,7 @@ export type FormationEvidence = {
  * the reply reads.
  */
 export function formationEvidence(conversationId: string): FormationEvidence | undefined {
-  const dir = process.env.UAT_TRANSCRIPT_DIR;
-  if (!dir || !fs.existsSync(dir) || !conversationId) return undefined;
-  const entries: SessionEntry[] = [];
-  const walk = (d: string) => {
-    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-      const full = path.join(d, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (/\.jsonl?$/.test(entry.name)) {
-        for (const line of fs.readFileSync(full, 'utf8').split('\n')) {
-          if (!line.trim()) continue;
-          try {
-            const parsed = JSON.parse(line) as SessionEntry;
-            if (parsed.sessionKey?.endsWith(`:${conversationId}`)) entries.push(parsed);
-          } catch {
-            // not JSON
-          }
-        }
-      }
-    }
-  };
-  walk(dir);
+  const entries = conversationEntries(conversationId);
   if (!entries.length) return undefined;
   const prompted = entries.findIndex((e) => e.role === 'event' && e.metadata?.event === 'identity_formation_prompted');
   const firstAssistant = entries.findIndex((e) => e.role === 'assistant');
@@ -614,6 +624,20 @@ export function formationEvidence(conversationId: string): FormationEvidence | u
     mode: prompted >= 0 ? entries[prompted].metadata?.mode : undefined,
     outline: entries.map((e, i) => `${i} ${e.role}${e.metadata?.event ? ` ${e.metadata.event}` : ''}${e.runId ? ` run ${e.runId}` : ''}`),
   };
+}
+
+/**
+ * The persona that answered a Console conversation's latest turn (#105): the
+ * gateway records the persona it injected on each assistant entry, in
+ * metadata.personaContext (MindStone-Agent #112). Read by conversation, not by
+ * reply text, so an older reply can't stand in for it.
+ */
+export function personaForConversation(conversationId: string): { found: boolean; personaId?: string } {
+  const assistants = conversationEntries(conversationId).filter((e) => e.role === 'assistant');
+  const latest = assistants[assistants.length - 1];
+  if (!latest) return { found: false };
+  const persona = latest.metadata?.personaContext;
+  return { found: true, personaId: persona?.injected ? persona.personaId : undefined };
 }
 
 /** Text that means the Console showed an error, not an answer. */
