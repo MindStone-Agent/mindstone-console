@@ -5,7 +5,7 @@
  * The settings page links straight to a step with ?step=.
  */
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import MindStoneOnboardingView from '../OnboardingView';
 
 const mockGet = jest.fn();
@@ -294,6 +294,19 @@ describe('connectors step', () => {
     steps.memory = DONE;
   });
 
+  /** Open the step (unless already there), pick a connector, and fill its token and owner. */
+  async function fillConnector(id: string, token: string, ownerIds: string, open = true) {
+    if (open) renderAt('connectors');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' });
+    fireEvent.click(screen.getByRole('radio', { name: `com_mindstone_onb_connector_${id}` }));
+    fireEvent.change(screen.getByLabelText('com_mindstone_onb_bot_token'), {
+      target: { value: token },
+    });
+    fireEvent.change(screen.getByLabelText('com_mindstone_onb_owner_ids'), {
+      target: { value: ownerIds },
+    });
+  }
+
   async function openTelegram() {
     renderAt('connectors');
     await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' });
@@ -387,6 +400,35 @@ describe('connectors step', () => {
     expect(button('com_mindstone_onb_save_next')).toBeDisabled();
   });
 
+  it('refuses any id with a wildcard in it, not only a bare *', async () => {
+    await openTelegram();
+    for (const value of ['111, **', '111, a*', ' * ']) {
+      fireEvent.change(screen.getByLabelText('com_mindstone_onb_allowed_ids'), {
+        target: { value },
+      });
+      expect([value, button('com_mindstone_onb_save_next')]).toEqual([
+        value,
+        expect.objectContaining({ disabled: true }),
+      ]);
+    }
+  });
+
+  it('Discord answers direct messages only: its allowed servers are sent empty', async () => {
+    mockPost.mockResolvedValue({ ok: true });
+    await fillConnector('discord', 'FAKE-discord-token', '234567890');
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    expect(mockPatch.mock.calls[0][1]).toEqual({
+      discord: {
+        enabled: true,
+        tokenFile: 'secrets/discord-bot.token',
+        ownerSenders: ['234567890'],
+        allowedSenders: ['234567890'],
+        allowedGuilds: [],
+      },
+    });
+  });
+
   it('says Discord answers direct messages only, for Discord alone', async () => {
     renderAt('connectors');
     await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' });
@@ -396,21 +438,29 @@ describe('connectors step', () => {
     expect(screen.getByText('com_mindstone_onb_discord_dms')).toBeInTheDocument();
   });
 
-  it('keeps the restart reminder until Finish when a connector needs one', async () => {
+  it('keeps a restart reminder naming every connector saved in this setup until Finish', async () => {
     mockPost.mockResolvedValue({ ok: true });
     mockPatch.mockResolvedValue({ ok: true, changed: ['channels'], restartRequired: true });
     await openTelegram();
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    fireEvent.click(button('com_mindstone_onb_back'));
+    await fillConnector('discord', 'FAKE-discord-token', '234567890', false);
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    // Saving Telegram again doesn't list it twice.
+    fireEvent.click(button('com_mindstone_onb_back'));
+    await fillConnector('telegram', '123456:FAKE-token', '111', false);
     fireEvent.click(button('com_mindstone_onb_save_next'));
     await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
     fireEvent.click(button('com_mindstone_onb_save_next'));
     await screen.findByRole('heading', { name: 'com_mindstone_onb_done_title' });
     const reminder = screen.getByTestId('ms-onb-finish-restart');
     expect(reminder).toHaveTextContent(
-      'com_mindstone_onb_finish_restart com_mindstone_onb_connector_telegram',
+      'com_mindstone_onb_finish_restart com_mindstone_onb_connector_telegram, com_mindstone_onb_connector_discord',
     );
-    expect(
-      screen.getByRole('link', { name: 'com_mindstone_onb_finish_restart_link' }),
-    ).toHaveAttribute('href', '/mindstone#ms-restart');
+    // Plain text: Start a chat stays the way on, so advanced settings go off first.
+    expect(within(reminder).queryByRole('link')).toBeNull();
   });
 
   it('shows no restart reminder when the save needed none', async () => {
@@ -569,6 +619,41 @@ describe('about step and finish', () => {
     expect(postsTo('permissions/advanced')).toEqual([
       [`${BASE}/permissions/advanced`, { enabled: false }],
     ]);
+  });
+});
+
+describe('provider step', () => {
+  it('clears a typed API key once the step is left without connecting', async () => {
+    const base = mockGet.getMockImplementation();
+    mockGet.mockImplementation(async (url: string) =>
+      url === `${BASE}/models`
+        ? {
+            presets: [
+              {
+                presetId: 'hosted',
+                providerId: 'hosted',
+                name: 'Hosted models',
+                baseUrl: 'https://models.example.test/v1',
+                needsKey: true,
+              },
+            ],
+            providers: [{ id: 'hosted', name: 'Hosted', configured: true, availableModelCount: 1 }],
+            models: [{ id: 'hosted/m1', provider: 'hosted' }],
+          }
+        : base?.(url),
+    );
+    renderAt();
+    fireEvent.click(await screen.findByRole('button', { name: 'com_mindstone_onb_next' }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'Hosted models' }));
+    const key = () => screen.getByLabelText('com_mindstone_onb_api_key');
+    fireEvent.change(key(), { target: { value: 'sk-FAKE-key' } });
+    fireEvent.click(button('com_mindstone_onb_use_existing'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_model_title' });
+    fireEvent.click(button('com_mindstone_onb_back'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_provider_title' });
+    expect(screen.getByRole('radio', { name: 'Hosted models' })).toBeChecked();
+    expect(key()).toHaveValue('');
+    expect(mockPost).not.toHaveBeenCalled();
   });
 });
 

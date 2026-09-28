@@ -189,8 +189,8 @@ export default function MindStoneOnboardingView() {
   const [owners, setOwners] = useState('');
   const [allowed, setAllowed] = useState('');
   const [allowedEdited, setAllowedEdited] = useState(false);
-  // A connector saved in this setup that starts only after a gateway restart.
-  const [restartFor, setRestartFor] = useState<TranslationKeys | null>(null);
+  // Connectors saved in this setup that start only after a gateway restart.
+  const [restartFor, setRestartFor] = useState<Connector[]>([]);
   // About step.
   const [purpose, setPurpose] = useState('');
   const [userContext, setUserContext] = useState('');
@@ -232,8 +232,9 @@ export default function MindStoneOnboardingView() {
     if (permissions.advancedSettings) setStep(wanted);
   }, [status, permissions, searchParams]);
 
-  // Typed tokens never outlive the connectors step, however it is left.
+  // A typed key or token never outlives its step, however the step is left.
   useEffect(() => {
+    if (step !== 'provider') setKeyValue('');
     if (step === 'connectors') return;
     setBotToken('');
     setAppToken('');
@@ -510,9 +511,13 @@ export default function MindStoneOnboardingView() {
           ...(chosen.app ? { appTokenFile: `secrets/${chosen.app}` } : {}),
           ownerSenders: senderIds(owners),
           allowedSenders: allowedWithOwners(allowed, owners),
+          // Sent even when empty: a missing list lets every Discord server in.
+          ...(chosen.id === 'discord' ? { allowedGuilds: [] } : {}),
         },
       });
-      if (result?.restartRequired) setRestartFor(chosen.label);
+      if (result?.restartRequired) {
+        setRestartFor((saved) => (saved.includes(chosen.id) ? saved : [...saved, chosen.id]));
+      }
       await load();
       goTo('about');
       setMessage({
@@ -1202,12 +1207,13 @@ export default function MindStoneOnboardingView() {
               )}
             </h2>
             <p className="mb-2 text-sm">{localize('com_mindstone_onb_say_hello')}</p>
-            {restartFor && (
+            {restartFor.length > 0 && (
               <p className="mb-2 text-sm" data-testid="ms-onb-finish-restart">
-                {localize('com_mindstone_onb_finish_restart', { 0: localize(restartFor) })}{' '}
-                <Link to="/mindstone#ms-restart" className="underline">
-                  {localize('com_mindstone_onb_finish_restart_link')}
-                </Link>
+                {localize('com_mindstone_onb_finish_restart', {
+                  0: CONNECTORS.filter((candidate) => restartFor.includes(candidate.id))
+                    .map((candidate) => localize(candidate.label))
+                    .join(', '),
+                })}
               </p>
             )}
             <p className="mb-3 text-sm text-text-secondary">
