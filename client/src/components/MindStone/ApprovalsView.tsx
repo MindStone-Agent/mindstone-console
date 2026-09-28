@@ -1,7 +1,8 @@
 /**
  * MindStone approvals (MindStone-Agent #84): the Console side of
  * `mindstone approvals`. Lists proposed actions (a connector send, a
- * connector mutation, a memory write or a persona the agent drafted, held for
+ * connector mutation, a memory write, a persona the agent drafted or a skill it
+ * proposed in chat, held for
  * a decision), shows the full draft, and approves or rejects it through the
  * gateway admin API, which applies the same guards as the CLI. The draft text
  * is only held in this page's state; nothing here writes it to browser storage
@@ -14,13 +15,18 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
 import type { TranslationKeys } from '~/hooks';
-import { useLocalize } from '~/hooks';
 import { visibleText } from './visibleText';
+import { useLocalize } from '~/hooks';
 
 type Summary = {
   id: string;
   status: 'pending' | 'approved' | 'rejected';
-  kind: 'connector_send' | 'connector_mutation' | 'memory_write' | 'persona_create';
+  kind:
+    | 'connector_send'
+    | 'connector_mutation'
+    | 'memory_write'
+    | 'persona_create'
+    | 'skill_install';
   connectorId: string;
   summary: string;
   createdAt?: string;
@@ -32,6 +38,16 @@ type Detail = Summary & {
   send?: { text?: string; chatId?: string };
   memory?: { path: string; content: string };
   mutation?: { operation: string; resource: string; connectorId: string; data: unknown };
+  skill?: {
+    id: string;
+    label: string;
+    description: string;
+    goal?: string;
+    whenToUse?: string[];
+    outputs?: string[];
+    safetyNotes?: string[];
+    instructions?: string;
+  };
   persona?: Persona;
 };
 /** A persona the agent proposed (the gateway's PersonaProposalPayload). */
@@ -51,6 +67,7 @@ const BASE = '/api/mindstone/admin';
 const CONFIRM_APPROVE: Partial<Record<Summary['kind'], TranslationKeys>> = {
   memory_write: 'com_mindstone_appr_confirm_memory',
   persona_create: 'com_mindstone_appr_persona_effect',
+  skill_install: 'com_mindstone_appr_confirm_skill',
 };
 
 function errorBody(error: unknown): { error?: string; code?: string } {
@@ -70,9 +87,90 @@ function payloadText(detail: Detail): string {
   return '';
 }
 
-/** A persona approval's summary carries the proposed name, so it is shown the same way. */
+/** A persona's or a skill's summary carries text the agent wrote, so it is shown the same way. */
 function summaryText(action: Summary): string {
-  return action.kind === 'persona_create' ? visibleText(action.summary) : action.summary;
+  return action.kind === 'persona_create' || action.kind === 'skill_install'
+    ? visibleText(action.summary)
+    : action.summary;
+}
+
+/** More than two blank lines in a row are shown as a marker, so text can't hide below them. */
+export function collapseBlankRuns(text: string, marker: (count: number) => string): string {
+  return text.replace(/\n(?:[ \t]*\n){3,}/g, (run) => {
+    const blank = run.split('\n').length - 2;
+    return `\n\n${marker(blank)}\n\n`;
+  });
+}
+
+/**
+ * The proposed skill, field by field (MindStone-Agent #104), so a field can't
+ * pose as another: React renders every value as text, non-printing characters
+ * are shown, long runs of blank lines are marked, and nothing is pushed out of
+ * view sideways.
+ */
+function SkillFields({ skill }: { skill: NonNullable<Detail['skill']> }) {
+  const localize = useLocalize();
+  const cell = 'overflow-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-sm';
+  const shown = (value: string) =>
+    collapseBlankRuns(visibleText(value), (count) =>
+      localize('com_mindstone_appr_skill_blank_lines', { 0: String(count) }),
+    );
+  const row = (label: TranslationKeys, value: string | undefined) =>
+    value ? (
+      <div>
+        <dt className="text-xs font-medium text-text-secondary">{localize(label)}</dt>
+        <dd className={cell}>{shown(value)}</dd>
+      </div>
+    ) : null;
+  const list = (label: TranslationKeys, items?: string[]) =>
+    items?.length ? (
+      <div>
+        <dt className="text-xs font-medium text-text-secondary">{localize(label)}</dt>
+        <dd className="overflow-hidden break-words [overflow-wrap:anywhere]">
+          <ul className="list-disc pl-5 text-sm">
+            {items.map((item, index) => (
+              <li key={index} className="whitespace-pre-wrap">
+                {shown(item)}
+              </li>
+            ))}
+          </ul>
+        </dd>
+      </div>
+    ) : null;
+  const instructions = skill.instructions ?? '';
+  return (
+    <dl
+      className="flex flex-col gap-2 rounded bg-surface-secondary p-2"
+      data-testid="ms-appr-skill"
+    >
+      {row('com_mindstone_skill_field_label', skill.label)}
+      {row('com_mindstone_skill_field_id', skill.id)}
+      {row('com_mindstone_skill_field_description', skill.description)}
+      {row('com_mindstone_skill_field_goal', skill.goal)}
+      {list('com_mindstone_skill_field_when', skill.whenToUse)}
+      {list('com_mindstone_skill_field_outputs', skill.outputs)}
+      {list('com_mindstone_skill_field_safety', skill.safetyNotes)}
+      {instructions ? (
+        <div>
+          <dt className="text-xs font-medium text-text-secondary">
+            {localize('com_mindstone_skill_field_instructions')}{' '}
+            <span data-testid="ms-appr-skill-size">
+              {localize('com_mindstone_appr_skill_size', {
+                0: String(instructions.length),
+                1: String(instructions.split('\n').length),
+              })}
+            </span>
+          </dt>
+          <dd
+            className={`${cell} max-h-80 overflow-y-auto font-mono`}
+            data-testid="ms-appr-skill-instructions"
+          >
+            {shown(instructions)}
+          </dd>
+        </div>
+      ) : null}
+    </dl>
+  );
 }
 
 /** The proposed persona, field by field. React renders every value as text. */
@@ -194,8 +292,10 @@ export default function MindStoneApprovalsView() {
       await load();
     } catch (error) {
       const { error: text, code } = errorBody(error);
-      // An existing memory file is only overwritten on a second, explicit click.
-      setNeedsForce(decision === 'approve' && code === 'memory_exists');
+      // An existing memory file or installed skill is only replaced on a second, explicit click.
+      setNeedsForce(
+        decision === 'approve' && (code === 'memory_exists' || code === 'skill_exists'),
+      );
       // A persona id that exists (persona_exists) is never overwritten, and
       // one the config already uses (persona_referenced) is never saved: the
       // gateway's text says to ask for a new name or reject.
@@ -310,8 +410,10 @@ export default function MindStoneApprovalsView() {
                   </>
                 )}
               </>
-            ) : (
-              <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded bg-surface-secondary p-2 text-sm">
+            ) : null}
+            {detail.skill && <SkillFields skill={detail.skill} />}
+            {!detail.persona && !detail.skill && (
+              <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-secondary p-2 text-sm">
                 {payloadText(detail)}
               </pre>
             )}
@@ -346,7 +448,11 @@ export default function MindStoneApprovalsView() {
                       disabled={busy}
                       onClick={() => void decide('approve', true)}
                     >
-                      {localize('com_mindstone_appr_overwrite')}
+                      {localize(
+                        detail.kind === 'skill_install'
+                          ? 'com_mindstone_appr_skill_replace'
+                          : 'com_mindstone_appr_overwrite',
+                      )}
                     </button>
                   )}
                   <button

@@ -7,10 +7,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
-import { CONFIRMATION, confirmationMatches, normalizeConfirmation } from './confirmation';
-import SystemStatus, { type SystemStatusData } from './SystemStatus';
 import type { TranslationKeys } from '~/hooks';
 import type { StatusSteps } from './steps';
+import { CONFIRMATION, confirmationMatches, normalizeConfirmation } from './confirmation';
+import SystemStatus, { type SystemStatusData } from './SystemStatus';
 import { useAuthContext, useLocalize } from '~/hooks';
 import RestartGateway from './RestartGateway';
 import { linkableStep } from './steps';
@@ -269,6 +269,9 @@ export default function MindStoneSettingsView() {
             </Link>{' '}
             <Link to="/mindstone/approvals" className="ml-3 mt-2 inline-block text-sm underline">
               {localize('com_mindstone_appr_title')}
+            </Link>{' '}
+            <Link to="/mindstone/skills" className="ml-3 mt-2 inline-block text-sm underline">
+              {localize('com_mindstone_skill_manage')}
             </Link>{' '}
             <Link to="/mindstone/personas" className="ml-3 mt-2 inline-block text-sm underline">
               {localize('com_mindstone_per_title')}

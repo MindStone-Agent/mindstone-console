@@ -9,4 +9,8 @@ describe('visibleText', () => {
     expect(visibleText('a\u{E0101}b')).toBe('a\\u{E0101}b');
     expect(visibleText('line one\n\tline two, ça va')).toBe('line one\n\tline two, ça va');
   });
+
+  it('shows every space but the plain one, so a run of them cannot push text out of view', () => {
+    expect(visibleText('a b c d　e f')).toBe('a\\u{00A0}b\\u{202F}c\\u{2007}d\\u{3000}e f');
+  });
 });

@@ -63,7 +63,7 @@ const ISSUES = {
 const TYPED_PHRASE = 'Enable advanced settings ';
 
 /** The links in /mindstone's status section today (the setup link reads "Run guided setup again" once set up). */
-const TODAY_STATUS_LINKS = ['Run guided setup again', 'Diagnostics', 'Approvals'];
+const TODAY_STATUS_LINKS = ['Run guided setup again', 'Diagnostics', 'Approvals', 'Skills'];
 
 /**
  * Left out of the comparison: links inside the #102 checklist items (a step's
@@ -73,9 +73,6 @@ const IGNORED_STATUS_LINKS = ['Set up memory', 'Tell the agent about you', 'Pers
 
 /** Steps that judge the state after setup: when J2 failed they report "blocked by J2", not "state changed". */
 const NEEDS_SETUP = /^J[78] /;
-
-/** Gateway admin routes #104 is likely to add; all 404 today. GET only: a probe never changes anything. */
-const SKILL_ROUTES = ['/admin/skills', '/admin/skills/builder', '/admin/skills/drafts', '/admin/skills/build'];
 
 /** What the About you step tells the agent (#102 flow). Not secret. */
 const ABOUT_PURPOSE = 'Get the MindStone demo ready.';
@@ -676,26 +673,183 @@ test('J6 memory recall within the conversation', async ({}, testInfo) => {
 });
 
 test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => {
+  testInfo.setTimeout(15 * 60_000);
+  if (PROVIDER === 'mock')
+    testInfo.annotations.push({ type: 'mock', description: 'mock provider' });
   await ensureSignedIn(page);
-  await page.goto('/mindstone');
-  await expect(page.getByRole('heading', { name: 'MindStone settings' })).toBeVisible();
-  const links = await statusLinks(page);
-  await shot(page, testInfo, 'settings');
-  // What's there today: the Approvals page, which the chat half will use.
-  await page.goto('/mindstone/approvals');
-  await expect(page.getByRole('heading', { name: 'Approvals' }).first()).toBeVisible();
-  await shot(page, testInfo, 'approvals');
-  const probes = await probeAll(testInfo, SKILL_ROUTES);
-  note(testInfo, `links: ${links.join(', ')}; gateway: ${probes.join(', ')}`);
-  requireUnchanged('the links on /mindstone', links, TODAY_STATUS_LINKS);
-  requireUnchanged('the gateway skill routes', probes, SKILL_ROUTES.map((r) => `${r}:404`));
-  test.fixme(
-    true,
-    `PENDING ${ISSUES.skills}: no Skill Builder in the Console, no admin API route and no chat tool for it (CLI only today). ` +
-      'Done when: an admin builds a skill in the Console (from a built-in or from scratch: id, label, description, goal), ' +
-      'reviews the draft and installs it, and skill status shows it active; and the agent, asked in chat, drafts a skill and ' +
-      'proposes it for install, the admin approves it on Approvals, and it is used.',
-  );
+  const tag = `${1000 + (Date.now() % 9000)}`;
+  const consoleSkill = `journey-console-${tag}`;
+  const chatSkill = `journey-chat-${tag}`;
+  const consoleWord = `${['amber', 'cobalt', 'violet', 'saffron'][Date.now() % 4]}-kestrel-${tag}`;
+  const chatWord = `${['teal', 'coral', 'umber', 'jade'][Date.now() % 4]}-plover-${tag}`;
+  const skills = page.getByRole('heading', { name: 'Skills', exact: true });
+
+  await test.step('advanced settings, turned on from the settings page', async () => {
+    // "Start a chat" (J4) turned them off; installing a skill needs them.
+    await page.goto('/mindstone');
+    const state = page.getByTestId('ms-advanced-state');
+    await expect(state).toBeVisible();
+    if ((await state.textContent())?.trim() === 'Off.') {
+      await page.goto('/mindstone/skills');
+      await expect(page.getByText('Installing a skill needs advanced settings')).toBeVisible();
+      await page.goto('/mindstone');
+      await page.getByLabel('Confirmation').fill(TYPED_PHRASE);
+      await page.getByRole('button', { name: 'Turn on' }).click();
+    }
+    await expect(state).toHaveText(/^On\b/);
+    note(testInfo, 'advanced settings on');
+  });
+
+  await test.step('the Skills page, from the settings page', async () => {
+    await page.goto('/mindstone');
+    await expect(page.getByRole('heading', { name: 'MindStone settings' })).toBeVisible();
+    const links = await statusLinks(page);
+    note(testInfo, `links: ${links.join(', ')}`);
+    expect(links, 'the links on /mindstone').toEqual(TODAY_STATUS_LINKS);
+    await page
+      .locator('section[aria-labelledby="ms-onboarding"]')
+      .getByRole('link', { name: 'Skills' })
+      .click();
+    await expect(page).toHaveURL(/\/mindstone\/skills$/);
+    await expect(skills).toBeVisible();
+    await expect(page.getByTestId('ms-skill-builtin-integration-builder')).toBeVisible();
+    await shot(page, testInfo, 'skills');
+  });
+
+  await test.step('from a built-in: draft, review, discard', async () => {
+    const builtin = page.getByTestId('ms-skill-builtin-integration-builder');
+    await builtin.getByRole('button', { name: 'Build a skill from this' }).click();
+    await page.getByLabel(/^Id/).fill(`journey-builtin-${tag}`);
+    await page.getByLabel(/^Goal/).fill('Connect the demo CRM');
+    await page.getByRole('button', { name: 'Create the draft' }).click();
+    const draft = page.getByTestId(`ms-skill-draft-journey-builtin-${tag}`);
+    await expect(draft).toContainText('Draft, not active');
+    const detail = page.locator('section[aria-labelledby="ms-skill-detail"]');
+    await expect(detail).toContainText('Connect the demo CRM');
+    await expect(detail.locator('pre')).not.toBeEmpty();
+    await shot(page, testInfo, 'builtin-draft');
+    await detail.getByRole('button', { name: 'Discard the draft' }).click();
+    await detail.getByRole('button', { name: 'Yes, discard it' }).click();
+    await expect(page.getByRole('status')).toContainText(
+      `Discarded the draft journey-builtin-${tag}`,
+    );
+    await expect(draft).toHaveCount(0);
+  });
+
+  await test.step('from scratch: draft, review, install', async () => {
+    await page.getByRole('button', { name: 'Build a skill', exact: true }).click();
+    await page.getByLabel(/^Id/).fill(consoleSkill);
+    await page.getByLabel(/^Label/).fill('Journey check phrase');
+    await page.getByLabel(/^Description/).fill('Answers with the journey check phrase.');
+    await page
+      .getByLabel(/^Goal/)
+      .fill('Show that a skill built in the Console reaches the agent.');
+    await page
+      .getByLabel(/^When to use it/)
+      .fill('When the owner asks for the journey check phrase');
+    await page
+      .getByLabel(/^Instructions/)
+      .fill(
+        `# Journey check phrase\n\nWhen the owner asks for the journey check phrase, reply with exactly: ${consoleWord}`,
+      );
+    await page.getByRole('button', { name: 'Create the draft' }).click();
+    const detail = page.locator('section[aria-labelledby="ms-skill-detail"]');
+    await expect(detail.locator('pre')).toContainText(consoleWord);
+    await expect(detail).toContainText('Draft, not active');
+    await shot(page, testInfo, 'scratch-draft');
+    await detail.getByRole('button', { name: 'Install' }).click();
+    await expect(page.getByRole('status')).toContainText(`Installed ${consoleSkill}`);
+    await expect(page.getByTestId(`ms-skill-installed-${consoleSkill}`)).toContainText('Active');
+    await expect(page.getByTestId(`ms-skill-draft-${consoleSkill}`)).toHaveCount(0);
+    await shot(page, testInfo, 'installed');
+  });
+
+  await test.step('status shows it active', async () => {
+    await page.goto('/mindstone');
+    const row = page.getByTestId('ms-sys-skills');
+    await expect(row).toContainText(/\b1 installed\b/);
+    await shot(page, testInfo, 'status');
+    note(testInfo, `status: ${(await row.textContent())?.trim()}`);
+  });
+
+  let chatReply = '';
+  await test.step('asked in chat, the agent proposes a skill', async () => {
+    await page.goto('/c/new');
+    await ensureMindStoneModel(page, testInfo);
+    const skill = {
+      id: chatSkill,
+      label: 'Chat check phrase',
+      description: 'Answers with the chat check phrase.',
+      instructions: `When the owner asks for the chat check phrase, reply with exactly: ${chatWord}`,
+    };
+    // The mock route echoes the message, so it carries the block the agent would write.
+    const ask =
+      PROVIDER === 'mock'
+        ? `Proposing:\n\`\`\`mindstone-skill-proposal\n${JSON.stringify(skill)}\n\`\`\``
+        : `Please create a skill for me and propose it for install. Use the id "${chatSkill}", the label "${skill.label}", ` +
+          `the description "${skill.description}", and these instructions: "${skill.instructions}".`;
+    const reply = await sendAndWaitForReply(page, ask);
+    chatReply = reply.text;
+    await attachText(testInfo, 'chat-proposal.txt', `> ${ask}\n\n${reply.text}\n`);
+    await gatewayExcerpt(testInfo, 40);
+    expect(reply.error, `the reply is not an error: ${(reply.errorText ?? '').slice(0, 200)}`).toBe(
+      false,
+    );
+    expect(reply.text, 'the proposal block is not shown in the chat').not.toContain(
+      'mindstone-skill-proposal',
+    );
+    note(testInfo, `proposal reply: "${reply.text.slice(0, 160)}"`);
+  });
+
+  await test.step('approved on Approvals, it is installed and active', async () => {
+    await page.goto('/mindstone/approvals');
+    const item = page.getByRole('button', { name: new RegExp(`install skill ${chatSkill}`) });
+    const proposed = await appears(item, 10_000);
+    await shot(page, testInfo, 'approvals');
+    expect(
+      proposed,
+      `a pending skill_install for ${chatSkill} on Approvals (reply: "${chatReply.slice(0, 200)}")`,
+    ).toBe(true);
+    await item.click();
+    const detail = page.locator('section[aria-labelledby="ms-appr-detail"]');
+    await expect(detail.getByTestId('ms-appr-skill-instructions')).toContainText(chatWord);
+    await detail.getByRole('button', { name: 'Approve' }).click();
+    await expect(detail).toContainText('Approving installs this skill');
+    await detail.getByRole('button', { name: 'Yes, approve' }).click();
+    await expect(page.getByRole('status')).toContainText('Approved.');
+    await page.goto('/mindstone/skills');
+    await expect(skills).toBeVisible();
+    await expect(page.getByTestId(`ms-skill-installed-${chatSkill}`)).toContainText('Active');
+    await shot(page, testInfo, 'chat-skill-installed');
+  });
+
+  await test.step('the agent uses both skills', async () => {
+    if (PROVIDER === 'mock') {
+      // The mock route echoes; whether the agent follows a skill can't be judged. MOCK counts as not passed.
+      testInfo.annotations.push({ type: 'label', description: 'MOCK' });
+      return;
+    }
+    const answers: string[] = [];
+    for (const [ask, word] of [
+      ['What is the journey check phrase? Answer with just the phrase.', consoleWord],
+      ['What is the chat check phrase? Answer with just the phrase.', chatWord],
+    ]) {
+      await page.goto('/c/new');
+      await ensureMindStoneModel(page, testInfo);
+      const reply = await sendAndWaitForReply(page, ask);
+      answers.push(`> ${ask}\n${reply.text}`);
+      expect(
+        reply.error,
+        `the reply is not an error: ${(reply.errorText ?? '').slice(0, 200)}`,
+      ).toBe(false);
+      expect(
+        reply.text.toLowerCase(),
+        `a fresh chat follows the installed skill (${word})`,
+      ).toContain(word.toLowerCase());
+    }
+    await attachText(testInfo, 'skills-used.txt', answers.join('\n\n'));
+    await shot(page, testInfo, 'skill-used');
+  });
 });
 
 test('J8 the agent drafts its persona; approved in the Console', async ({}, testInfo) => {
