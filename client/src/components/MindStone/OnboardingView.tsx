@@ -541,7 +541,9 @@ export default function MindStoneOnboardingView() {
         [chosen.id]: {
           enabled: true,
           tokenFile: `secrets/${chosen.bot}`,
-          ...(chosen.app ? { appTokenFile: `secrets/${chosen.app}` } : {}),
+          // A host env var would win over the token typed here, so its name is cleared.
+          tokenEnv: null,
+          ...(chosen.app ? { appTokenFile: `secrets/${chosen.app}`, appTokenEnv: null } : {}),
           ownerSenders: senderIds(owners),
           allowedSenders: allowedWithOwners(allowed, owners),
           // Sent even when empty: a missing list lets every Discord server in.

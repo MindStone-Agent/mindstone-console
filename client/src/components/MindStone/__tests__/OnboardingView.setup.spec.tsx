@@ -349,6 +349,7 @@ describe('connectors step', () => {
       telegram: {
         enabled: true,
         tokenFile: 'secrets/telegram-bot.token',
+        tokenEnv: null,
         ownerSenders: ['111', '222'],
         allowedSenders: ['222', '333', '111'],
       },
@@ -429,6 +430,7 @@ describe('connectors step', () => {
       discord: {
         enabled: true,
         tokenFile: 'secrets/discord-bot.token',
+        tokenEnv: null,
         ownerSenders: ['234567890'],
         allowedSenders: ['234567890'],
         allowedGuilds: [],
@@ -536,7 +538,9 @@ describe('connectors step', () => {
       slack: {
         enabled: true,
         tokenFile: 'secrets/slack-bot.token',
+        tokenEnv: null,
         appTokenFile: 'secrets/slack-app.token',
+        appTokenEnv: null,
         ownerSenders: ['U012FAKE'],
         allowedSenders: ['U012FAKE'],
       },
