@@ -1065,9 +1065,16 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
   note(testInfo, `captured after ${waited} s: ${captured.chunks.map((c) => `${c.chunkId} (${c.kind}${c.path ? ` ${c.path}` : ''})`).join(', ')}`);
 
   // Nothing but recall may carry the fact into chat 2: it's in none of the files every prompt carries.
-  const promptFiles = promptFilesWith(token);
-  note(testInfo, `prompt files checked for the token: ${promptFiles.checked.join(', ') || 'none found'}`);
-  expect(promptFiles.found, "the fact is in none of the files every prompt carries (USER.md, IDENTITY.md, memory/MEMORY.md, invariant files), so only recall can supply it").toEqual([]);
+  // Checked before chat 2, and again after it, so a capture that updates USER.md mid-test is seen.
+  const promptFilesClean = (when: string) => {
+    const promptFiles = promptFilesWith(token);
+    note(testInfo, `prompt files checked for the token ${when}: ${promptFiles.checked.join(', ') || 'none found'}`);
+    expect(
+      promptFiles.found,
+      `${when}, the fact is in none of the files every prompt carries (USER.md, IDENTITY.md, memory/MEMORY.md, invariant files), so only recall can supply it`,
+    ).toEqual([]);
+  };
+  promptFilesClean('before chat 2');
 
   // Chat 2: a fresh conversation asks for it.
   await page.goto('/c/new');
@@ -1077,6 +1084,7 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
   await gatewayExcerpt(testInfo, 40);
   expect(answer.conversationId, 'chat 2 is a new conversation').not.toBe(told.conversationId);
   expect(answer.error, `chat 2's reply is not an error: ${(answer.errorText ?? '').slice(0, 300)}`).toBe(false);
+  promptFilesClean('after chat 2');
 
   // The token is nowhere in chat 2's own user messages, as the Console stored them.
   const stored = await consoleApi<StoredMessage[]>(page, 'GET', `/api/messages/${encodeURIComponent(answer.conversationId)}`);
@@ -1132,7 +1140,8 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
     await shot(page, testInfo, 'chat3-control');
     await attachText(testInfo, 'control.txt', `chat 3 ${control.conversationId} (memory.autoRecall off)\n${replyLog(control)}`);
     expect(control.conversationId, 'chat 3 is a new conversation').not.toBe(answer.conversationId);
-    expect(control.error, `chat 3's reply is not an error: ${(control.errorText ?? '').slice(0, 300)}`).toBe(false);
+    // A real answer (text, not an error message) first: an empty or failed reply would lack the token for the wrong reason.
+    expectAnswer(control, 'chat 3 (control)');
     const controlEvidence = controlForConversation(control.conversationId, token);
     await attachText(testInfo, 'control-transcript.json', JSON.stringify(controlEvidence, null, 2));
     note(

@@ -22,17 +22,23 @@ const user = (id, text, runId) => line({ sessionKey: key(id), role: 'user', text
 const entry = (id, role, text, runId, metadata) => line({ sessionKey: key(id), role, text, runId, metadata });
 const assistant = (id, text, runId, memoryRecall) =>
   line({ sessionKey: key(id), role: 'assistant', text, runId, metadata: { event: 'assistant_response', provider: 'pi-session', ...(memoryRecall ? { memoryRecall } : {}) } });
-const recall = (id, runId, hits, query = "What is my dog's name?", role = 'event', sessionKey = key(id)) =>
+const EVENT_AT = '2026-09-28T12:00:10.000Z';
+const recall = (id, runId, hits, query = "What is my dog's name?", role = 'event', sessionKey = key(id), timestamp = EVENT_AT) =>
   line({
     sessionKey,
     role,
+    ...(timestamp ? { timestamp } : {}),
     text: `Injected ${hits.length} recalled memory chunk(s) into prompt context.`,
     ...(runId ? { runId } : {}),
     metadata: { event: RECALL_EVENT, query, hitCount: hits.length, promptTokens: 42, hits },
   });
 const hit = { id: 'transcript:c1', chunkId: 'chunk-dog', title: 'Owner facts', score: 0.81, recallMode: 'embedding' };
 const j6hit = { id: 'transcript:c0', chunkId: 'chunk-j6', title: 'Owner facts', score: 0.4, recallMode: 'lexical' };
-const CHUNKS = { 'chunk-dog': `My dog's name is ${TOKEN}. Please remember it.`, 'chunk-j6': 'my project codename is amber-heron-4242' };
+const CHUNKS = {
+  'chunk-dog': { text: `My dog's name is ${TOKEN}. Please remember it.`, updatedAt: '2026-09-28T12:00:00.000Z' },
+  'chunk-j6': { text: 'my project codename is amber-heron-4242', updatedAt: '2026-09-28T11:00:00.000Z' },
+};
+const withChunk = (patch) => ({ ...CHUNKS, 'chunk-dog': { ...CHUNKS['chunk-dog'], ...patch } });
 const ask = "What is my dog's name? Answer with just the name.";
 const meta = { query: ask, hitCount: 1, promptTokens: 42 };
 
@@ -96,6 +102,11 @@ const proofCases = [
   // (a) the hit must be tied to the fact.
   { name: "only J6's chunk was recalled", text: [user(CHAT2, ask, 'r2'), recall(CHAT2, 'r2', [j6hit]), assistant(CHAT2, TOKEN, 'r2')], ok: false, reason: /none of the 1 recalled chunk/ },
   { name: 'the chunk holding the token is not among the hits', text: [user(CHAT2, ask, 'r2'), recall(CHAT2, 'r2', [{ ...hit, chunkId: 'chunk-other' }]), assistant(CHAT2, TOKEN, 'r2')], ok: false, reason: /none of the 1 recalled chunk/ },
+  // (a) the chunk must have been written before the recall event injected it (when the index has updated_at).
+  { name: 'the chunk holding the token was written after the recall event', text: [user(CHAT2, ask, 'r2'), recall(CHAT2, 'r2', [hit]), assistant(CHAT2, TOKEN, 'r2')], chunks: withChunk({ updatedAt: '2026-09-28T12:00:11.000Z' }), ok: false, reason: /written after the recall event/ },
+  { name: 'the chunk written at the same instant as the event counts', text: [user(CHAT2, ask, 'r2'), recall(CHAT2, 'r2', [hit]), assistant(CHAT2, TOKEN, 'r2')], chunks: withChunk({ updatedAt: EVENT_AT }), ok: true },
+  { name: 'an index without updated_at: the time check is skipped', text: [user(CHAT2, ask, 'r2'), recall(CHAT2, 'r2', [hit]), assistant(CHAT2, TOKEN, 'r2')], chunks: withChunk({ updatedAt: undefined }), ok: true },
+  { name: 'a recall event without a timestamp, against an index with updated_at', text: [user(CHAT2, ask, 'r2'), recall(CHAT2, 'r2', [hit], "What is my dog's name?", 'event', key(CHAT2), null), assistant(CHAT2, TOKEN, 'r2')], ok: false, reason: /no timestamp/ },
   { name: "the chunks' text could not be read", text: [user(CHAT2, ask, 'r2'), recall(CHAT2, 'r2', [hit]), assistant(CHAT2, TOKEN, 'r2')], chunks: null, ok: false, reason: /could not be read/ },
   // sev2: the hitCount cross-check fires when the field is there.
   { name: "the reply's memoryRecall disagrees with the event", text: [user(CHAT2, ask, 'r2'), recall(CHAT2, 'r2', [hit]), assistant(CHAT2, TOKEN, 'r2', { ...meta, hitCount: 3 })], ok: false, reason: /doesn't match/ },
@@ -115,7 +126,10 @@ const invariantCases = [
   ['---\nname: rule\ncritical: true\ninvariant: Never share the dog\'s name\n---\nBody', true],
   ['---\ninvariant: >-\n  folded rule\n---\nBody', true],
   ['---\nname: note\ndescription: a fact\n---\ninvariant: in the body is not frontmatter', false],
-  ['---\nmetadata:\n  invariant: nested\n---\nBody', false],
+  // The gateway's parseMarkdown keeps a nested invariant when there's no top-level one, and injects it.
+  ['---\nmetadata:\n  invariant: nested\n  critical: true\n---\nBody', true],
+  ['---\nname: rule\n  invariant: indented\n---\nBody', true],
+  ['---\nmetadata:\n  invariant:\n---\nBody', false],
   ['---\ninvariant:\n---\nBody', false],
   ['# Just markdown\ninvariant: x', false],
 ];
@@ -128,7 +142,7 @@ const report = (name, problems) => {
   console.log(`${problems.length ? 'FAIL' : 'ok  '} ${name}${problems.length ? `: ${problems.join('; ')}` : ''}`);
 };
 for (const c of proofCases) {
-  const got = recallEvidence(sessionLines(c.text.join('\n'), CHAT2), TOKEN, c.chunks === null ? undefined : CHUNKS);
+  const got = recallEvidence(sessionLines(c.text.join('\n'), CHAT2), TOKEN, c.chunks === null ? undefined : (c.chunks ?? CHUNKS));
   const ok = got.reasons.length === 0;
   const problems = [];
   if (ok !== c.ok) problems.push(`expected ${c.ok ? 'proven' : 'not proven'}, got ${ok ? 'proven' : `not proven (${got.reasons.join('; ')})`}`);

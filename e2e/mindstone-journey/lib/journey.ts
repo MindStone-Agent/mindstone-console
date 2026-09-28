@@ -571,7 +571,7 @@ type SessionEntry = {
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { sessionLines, recallEvidence, controlEvidence, isInvariantMarkdown } = require('./recall-evidence.js') as {
   sessionLines: (text: string, conversationId: string) => SessionEntry[];
-  recallEvidence: (entries: SessionEntry[], token: string, chunkTexts?: Record<string, string>) => RecallEvidence;
+  recallEvidence: (entries: SessionEntry[], token: string, chunks?: Record<string, { text: string; updatedAt?: string }>) => RecallEvidence;
   controlEvidence: (entries: SessionEntry[], token: string) => ControlEvidence;
   isInvariantMarkdown: (text: string) => boolean;
 };
@@ -744,7 +744,8 @@ export async function waitForEmbeddedChunk(
  * Whether the gateway's recall supplied `token` to a Console conversation's
  * latest turn (J9): its transcript's `memory_recall_injected` event for the
  * reply's own run, with hits, one of whose chunks (read from the recall
- * index by chunk_id) holds the token; and the token in no other entry
+ * index by chunk_id) holds the token and was written no later than the
+ * event (by updated_at, when the index has it); and the token in no other entry
  * (lib/recall-evidence.js). Read by conversation, so another chat's recall
  * can't stand in.
  */
@@ -754,23 +755,25 @@ export function recallForConversation(conversationId: string, token: string): Re
     .filter((e) => e.role === 'event' && e.metadata?.event === 'memory_recall_injected')
     .flatMap((e) => ((e.metadata as { hits?: { chunkId?: unknown }[] }).hits ?? []).map((h) => h?.chunkId))
     .filter((id): id is string => typeof id === 'string');
-  let chunkTexts: Record<string, string> | undefined;
+  let chunks: Record<string, { text: string; updatedAt?: string }> | undefined;
   let indexError: string | undefined;
   try {
-    chunkTexts = chunkIds.length
-      ? readRecallIndex((db) =>
-          Object.fromEntries(
+    chunks = chunkIds.length
+      ? readRecallIndex((db) => {
+          // updated_at, when the index has the column: a chunk written after the recall event can't be what it injected.
+          const hasUpdatedAt = db.prepare('PRAGMA table_info(memory_chunks)').all().some((c) => c.name === 'updated_at');
+          return Object.fromEntries(
             db
-              .prepare(`SELECT chunk_id, text FROM memory_chunks WHERE chunk_id IN (${chunkIds.map(() => '?').join(', ')})`)
+              .prepare(`SELECT chunk_id, text${hasUpdatedAt ? ', updated_at' : ''} FROM memory_chunks WHERE chunk_id IN (${chunkIds.map(() => '?').join(', ')})`)
               .all(...chunkIds)
-              .map((r) => [String(r.chunk_id), String(r.text)]),
-          ),
-        )
+              .map((r) => [String(r.chunk_id), { text: String(r.text), ...(hasUpdatedAt ? { updatedAt: String(r.updated_at) } : {}) }]),
+          );
+        })
       : {};
   } catch (error) {
     indexError = error instanceof Error ? error.message : String(error);
   }
-  const evidence = recallEvidence(entries, token, chunkTexts);
+  const evidence = recallEvidence(entries, token, chunks);
   return indexError ? { ...evidence, indexError } : evidence;
 }
 

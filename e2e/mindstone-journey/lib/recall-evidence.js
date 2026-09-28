@@ -10,8 +10,9 @@
  * for a turn, a `role: "event"` entry with `metadata.event:
  * "memory_recall_injected"`, the turn's `runId`, and `metadata.query`,
  * `hitCount`, `promptTokens` and `hits` (id, chunkId, title, score,
- * recallMode; no text). The hit's chunkId is the recall index's
- * `memory_chunks.chunk_id`, so J9 reads the chunk text from there.
+ * recallMode; no text), and the entry's `timestamp`. The hit's chunkId is
+ * the recall index's `memory_chunks.chunk_id`, so J9 reads the chunk's text
+ * and `updated_at` from there.
  * `memoryRecall` ({ query, hitCount, promptTokens }) goes only into the HTTP
  * response (index.ts:1415-1421), NOT onto the assistant transcript entry
  * (index.ts:1370-1381); Cairn is asked to add it there. Until then the
@@ -57,15 +58,16 @@ const outlineOf = (list) => list.map((e, i) => `${i} ${e?.role}${e?.metadata?.ev
  * its latest turn: did recall supply `token` to that turn?
  * - the reply's own turn has a memory_recall_injected event: before the
  *   reply, both carrying a run id, the same one;
- * - it lists hits, and at least one hit's chunk (`chunkTexts`: chunk_id ->
- *   text, read from the recall index) holds the token;
+ * - it lists hits, and at least one hit's chunk (`chunks`: chunk_id ->
+ *   { text, updatedAt? }, read from the recall index) holds the token and,
+ *   when the index has updated_at, was written no later than the event;
  * - the token is in no other entry of the conversation, whatever its role
  *   (only the reply may carry it; the recall event's hit list is exempt);
  * - the reply's metadata.memoryRecall.hitCount matches, when the entry
  *   carries it (a missing field is reported in `notes`, never passed silently).
  * Returns the evidence (no message text) and `reasons`, empty when proven.
  */
-function recallEvidence(entries, token, chunkTexts) {
+function recallEvidence(entries, token, chunkRows) {
   const list = Array.isArray(entries) ? entries : [];
   const want = lower(token);
   const reasons = [];
@@ -81,8 +83,12 @@ function recallEvidence(entries, token, chunkTexts) {
   const hitCount = typeof event?.metadata?.hitCount === 'number' ? event.metadata.hitCount : hits.length;
   const replyRecall = assistant?.metadata?.memoryRecall;
   const otherEntriesWithToken = want ? list.map((e, i) => (i !== assistantAt && entryText(e).includes(want) ? i : -1)).filter((i) => i >= 0) : [];
-  const chunks = chunkTexts && typeof chunkTexts === 'object' ? chunkTexts : undefined;
-  const hitChunksWithToken = chunks ? hits.filter((h) => typeof h?.chunkId === 'string' && lower(chunks[h.chunkId]).includes(want)).length : 0;
+  const chunks = chunkRows && typeof chunkRows === 'object' ? chunkRows : undefined;
+  const tokenChunks = chunks ? hits.map((h) => (typeof h?.chunkId === 'string' ? chunks[h.chunkId] : undefined)).filter((c) => c && lower(c.text).includes(want)) : [];
+  const eventTime = Date.parse(event?.timestamp ?? '');
+  // A chunk written after the recall event can't be what it injected (checked when the index has updated_at).
+  const writtenBefore = (c) => c.updatedAt === undefined || c.updatedAt === null || (Number.isFinite(eventTime) && Date.parse(c.updatedAt) <= eventTime);
+  const hitChunksWithToken = tokenChunks.filter(writtenBefore).length;
 
   if (!list.length) reasons.push('the gateway transcript has no entries for this conversation');
   else if (!assistant) reasons.push("the gateway transcript has no assistant entry for this conversation's reply");
@@ -103,7 +109,14 @@ function recallEvidence(entries, token, chunkTexts) {
   if (event && !(hitCount > 0)) reasons.push(`the ${RECALL_EVENT} event lists no hits (hitCount ${hitCount})`);
   if (event && hitCount > 0) {
     if (!chunks) reasons.push("the recalled chunks' text could not be read from the recall index, so no hit is tied to the fact");
-    else if (!hitChunksWithToken) reasons.push(`none of the ${hits.length} recalled chunk(s) holds the token: recall didn't supply it`);
+    else if (!tokenChunks.length) reasons.push(`none of the ${hits.length} recalled chunk(s) holds the token: recall didn't supply it`);
+    else if (!hitChunksWithToken) {
+      reasons.push(
+        Number.isFinite(eventTime)
+          ? `the recalled chunk holding the token was written after the recall event (updated_at ${tokenChunks.map((c) => c.updatedAt).join(', ')}, event ${event.timestamp}), so it isn't what recall injected`
+          : "the recall event has no timestamp, so the recalled chunk's updated_at can't be checked against it",
+      );
+    }
   }
   if (event && replyRecall && typeof replyRecall.hitCount === 'number' && replyRecall.hitCount !== hitCount) {
     reasons.push(`the reply's metadata.memoryRecall.hitCount (${replyRecall.hitCount}) doesn't match the event's (${hitCount})`);
@@ -158,9 +171,11 @@ function controlEvidence(entries, token) {
 
 /**
  * Whether a markdown memory file is an invariant (the gateway injects it on
- * every turn, with no recall): top-level frontmatter with a non-empty
- * `invariant:`. Deliberately wider than the gateway's rule (which also needs
- * `critical: true`), so no always-injected file is missed.
+ * every turn, with no recall): a non-empty `invariant:` anywhere in the
+ * frontmatter, indented or nested included (the gateway's parseMarkdown
+ * keeps a nested one when there's no top-level one). Deliberately wider than
+ * the gateway's rule (which also needs `critical: true`), so no
+ * always-injected file is missed.
  */
 function isInvariantMarkdown(text) {
   const normalized = String(text).replace(/\r\n/g, '\n');
@@ -170,7 +185,7 @@ function isInvariantMarkdown(text) {
   return normalized
     .slice(4, end)
     .split('\n')
-    .some((line) => /^invariant:\s*\S/.test(line));
+    .some((line) => /^\s*invariant:\s*\S/.test(line));
 }
 
 module.exports = { RECALL_EVENT, sessionLines, recallEvidence, controlEvidence, isInvariantMarkdown };
