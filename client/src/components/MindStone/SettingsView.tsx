@@ -275,6 +275,9 @@ export default function MindStoneSettingsView() {
             </Link>{' '}
             <Link to="/mindstone/personas" className="ml-3 mt-2 inline-block text-sm underline">
               {localize('com_mindstone_per_title')}
+            </Link>{' '}
+            <Link to="/mindstone/providers" className="ml-3 mt-2 inline-block text-sm underline">
+              {localize('com_mindstone_prov_title')}
             </Link>
           </section>
         )}

@@ -10,8 +10,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { request } from 'librechat-data-provider';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import type { EnterpriseKind, EnterpriseRegistered, ProviderTest } from './EnterpriseEndpointForm';
 import type { TranslationKeys } from '~/hooks';
 import type { StatusSteps } from './steps';
+import EnterpriseEndpointForm, { TestResult, testProvider } from './EnterpriseEndpointForm';
 import { CONFIRMATION, confirmationMatches, normalizeConfirmation } from './confirmation';
 import { linkableStep } from './steps';
 import { useLocalize } from '~/hooks';
@@ -25,7 +27,16 @@ type Preset = {
 };
 type PiProvider = { id: string; name: string; configured: boolean; availableModelCount: number };
 type PiModel = { id: string; provider: string; name?: string };
-type ModelsInfo = { presets: Preset[]; providers: PiProvider[]; models: PiModel[]; error?: string };
+type ModelsInfo = {
+  presets: Preset[];
+  providers: PiProvider[];
+  models: PiModel[];
+  /** Enterprise endpoints (MindStone-Agent #126): Azure OpenAI, Bedrock, Vertex AI, an enterprise gateway. */
+  enterprise?: EnterpriseKind[];
+  error?: string;
+};
+/** The provider step's choice for an enterprise endpoint: `enterprise:<kind>`. */
+const ENTERPRISE_PREFIX = 'enterprise:';
 type Profile = { id: string; label: string; description: string };
 type Status = { onboarded: boolean; profiles?: Profile[]; steps?: StatusSteps };
 type Permissions = { advancedSettings: boolean; expiresAt?: string };
@@ -174,6 +185,10 @@ export default function MindStoneOnboardingView() {
   const [baseUrl, setBaseUrl] = useState('');
   const [manualModel, setManualModel] = useState('');
   const [listFailed, setListFailed] = useState(false);
+  // An enterprise endpoint registered in this step, and its live test.
+  const [enterpriseDone, setEnterpriseDone] = useState<EnterpriseRegistered | null>(null);
+  const [enterpriseTest, setEnterpriseTest] = useState<ProviderTest | null>(null);
+  const [testing, setTesting] = useState(false);
   // Model and persona steps.
   const [model, setModel] = useState('');
   const [profileId, setProfileId] = useState('');
@@ -274,6 +289,16 @@ export default function MindStoneOnboardingView() {
   };
 
   const preset = info?.presets.find((candidate) => candidate.presetId === presetId);
+  const enterpriseKind = presetId.startsWith(ENTERPRISE_PREFIX)
+    ? info?.enterprise?.find(
+        (candidate) => candidate.kind === presetId.slice(ENTERPRISE_PREFIX.length),
+      )
+    : undefined;
+  // A registration shown for one choice doesn't stay up under another.
+  useEffect(() => {
+    setEnterpriseDone(null);
+    setEnterpriseTest(null);
+  }, [presetId]);
   // A key entered for one preset never carries over to another.
   useEffect(() => {
     setBaseUrl(preset?.baseUrl ?? '');
@@ -398,6 +423,30 @@ export default function MindStoneOnboardingView() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const enterpriseRegistered = async (result: EnterpriseRegistered) => {
+    setEnterpriseDone(result);
+    setEnterpriseTest(null);
+    await load();
+    if (result.models?.length) setModel(result.models[0]);
+    setMessage({
+      ok: true,
+      text: localize('com_mindstone_ent_registered', {
+        0: result.providerId,
+        1: String(result.models?.length ?? 0),
+        2: result.host,
+      }),
+    });
+  };
+
+  const testEnterprise = async () => {
+    if (!enterpriseDone) return;
+    setTesting(true);
+    // The chosen model when it is this provider's; otherwise the gateway tests its first model.
+    const own = model.startsWith(`${enterpriseDone.providerId}/`) ? model : undefined;
+    setEnterpriseTest(await testProvider(enterpriseDone.providerId, own));
+    setTesting(false);
   };
 
   const saveModel = async () => {
@@ -762,7 +811,60 @@ export default function MindStoneOnboardingView() {
                   {candidate.name}
                 </label>
               ))}
+              {(info.enterprise?.length ?? 0) > 0 && (
+                <span className="mt-2 text-sm text-text-secondary">
+                  {localize('com_mindstone_ent_title')}
+                </span>
+              )}
+              {info.enterprise?.map((candidate) => (
+                <label key={candidate.kind} className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="ms-onb-preset"
+                    value={`${ENTERPRISE_PREFIX}${candidate.kind}`}
+                    checked={presetId === `${ENTERPRISE_PREFIX}${candidate.kind}`}
+                    onChange={() => setPresetId(`${ENTERPRISE_PREFIX}${candidate.kind}`)}
+                  />
+                  {candidate.name}
+                </label>
+              ))}
             </fieldset>
+            {enterpriseKind && !enterpriseDone && (
+              <EnterpriseEndpointForm
+                kind={enterpriseKind}
+                disabled={busy}
+                onRegistered={enterpriseRegistered}
+                onError={showWriteError}
+              />
+            )}
+            {enterpriseKind && enterpriseDone && (
+              <div className="flex flex-col gap-2" data-testid="ms-onb-enterprise-done">
+                <p className="text-sm text-text-secondary">
+                  {localize('com_mindstone_ent_test_hint')}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className={secondary}
+                    disabled={testing}
+                    onClick={() => void testEnterprise()}
+                  >
+                    {localize(testing ? 'com_mindstone_ent_testing' : 'com_mindstone_ent_test')}
+                  </button>
+                  <button type="button" className={primary} onClick={() => goTo('model')}>
+                    {localize('com_mindstone_onb_save_next')}
+                  </button>
+                  <button
+                    type="button"
+                    className={secondary}
+                    onClick={() => setEnterpriseDone(null)}
+                  >
+                    {localize('com_mindstone_ent_change')}
+                  </button>
+                </div>
+                {enterpriseTest && <TestResult result={enterpriseTest} />}
+              </div>
+            )}
             {preset && (
               <div className="flex flex-col gap-2">
                 {preset.needsKey && (

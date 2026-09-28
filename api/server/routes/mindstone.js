@@ -33,6 +33,10 @@ const ALLOWED = [
   { method: 'GET', path: /^permissions$/ },
   { method: 'GET', path: /^models$/ },
   { method: 'POST', path: /^providers\/[a-z][a-z-]{0,39}$/ },
+  // Enterprise model endpoints (MindStone-Agent #126): register, test, remove.
+  { method: 'POST', path: /^providers\/enterprise\/[a-z][a-z-]{0,39}$/ },
+  { method: 'POST', path: /^providers\/[a-z0-9][a-z0-9-]{0,59}\/test$/ },
+  { method: 'DELETE', path: /^providers\/enterprise-[a-z]{1,20}$/ },
   { method: 'POST', path: /^permissions\/advanced$/ },
   { method: 'POST', path: /^restart$/ },
   { method: 'GET', path: /^doctor$/ },
