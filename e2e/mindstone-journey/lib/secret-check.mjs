@@ -11,6 +11,7 @@
 //   across lines or coloured by a terminal is still found;
 // - containers: zips (anywhere in the file, not only at byte 0), gzip
 //   streams (anywhere), and base64 runs, decoded and scanned recursively.
+// - zlib streams (anywhere), and base64 wrapped across lines.
 // Prints the files and the kind of match, never a value. Exit 0: clean;
 // 1: a secret was found; 2: no secrets to look for (the check can't vouch).
 import fs from 'node:fs';
@@ -81,6 +82,21 @@ function gzipStreams(buffer) {
   return out;
 }
 
+/** zlib streams (a 0x78 header with a valid check byte), anywhere in the buffer. */
+function zlibStreams(buffer) {
+  const out = [];
+  for (let at = buffer.indexOf(0x78); at !== -1 && at < buffer.length - 2; at = buffer.indexOf(0x78, at + 1)) {
+    if (((0x78 << 8) | buffer[at + 1]) % 31 !== 0) continue;
+    try {
+      const data = zlib.inflateSync(buffer.subarray(at), LENIENT);
+      if (data.length) out.push({ at, data });
+    } catch {
+      // not a zlib stream
+    }
+  }
+  return out;
+}
+
 function base64Runs(text) {
   const out = [];
   for (const m of text.matchAll(/[A-Za-z0-9+/_-]{24,}={0,2}/g)) {
@@ -110,8 +126,12 @@ export function scan(dir, secrets) {
     if (depth >= MAX_DEPTH) return;
     for (const entry of zipEntries(buffer)) scanBuffer(entry.data, `${where}!${entry.name}`, depth + 1);
     for (const gz of gzipStreams(buffer)) scanBuffer(gz.data, `${where}#gzip@${gz.at}`, depth + 1);
+    for (const z of zlibStreams(buffer)) scanBuffer(z.data, `${where}#zlib@${z.at}`, depth + 1);
     const text = buffer.toString('latin1');
     for (const b64 of base64Runs(text)) scanBuffer(b64.data, `${where}#base64@${b64.at}`, depth + 1);
+    // base64 wrapped across lines (MIME/PEM style), read with the line breaks removed.
+    const flat = flatten(text);
+    if (flat !== text) for (const b64 of base64Runs(flat)) scanBuffer(b64.data, `${where}#wrapped-base64@${b64.at}`, depth + 1);
   };
 
   const walk = (d) => {
@@ -142,7 +162,7 @@ function main() {
     for (const hit of hits) console.log(`  ${hit}`);
     process.exit(1);
   }
-  console.log(`secret-check: clean (${secrets.length} secrets, ${scanned} files/entries scanned, decoded: zip, gzip, base64, hex, utf-16, escapes, split lines, ANSI)`);
+  console.log(`secret-check: clean (${secrets.length} secrets, ${scanned} files/entries scanned, decoded: zip, gzip, zlib, base64 (also wrapped), hex, utf-16, escapes, split lines, ANSI)`);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) main();

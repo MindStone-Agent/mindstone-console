@@ -52,7 +52,9 @@ INSTALL_STATUS_TMP="/tmp/mindstone-agent-install-status.txt" # older install.sh'
 STEPS_TSV="${EVIDENCE}/harness-steps.tsv"
 LOG_DIR="${EVIDENCE}/logs"
 # Every row the gate needs, each exactly once and each PASS.
-REQUIRED_STEPS="S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 X1 X2 X3 X4"
+REQUIRED_STEPS="S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 X1 X2 X3 X4 X5"
+# The demo subset: everything but the features still being built (J7 Skill Builder, J8 persona drafting).
+DEMO_STEPS="${REQUIRED_STEPS/ J7 J8/}"
 T0=$(date +%s)
 GW_PORT=""
 CONSOLE_PORT=""
@@ -121,6 +123,11 @@ case "${SCRATCH}" in
   "${HOME}"/Projects/*|"${HOME}/.mindstone"*|"${HOME}/.openclaw"*|"${HOME}/.pi"*) die "refusing scratch dir ${SCRATCH}" ;;
 esac
 [[ -e "${SCRATCH}" ]] && die "scratch dir already exists: ${SCRATCH} (set UAT_RUN_ID to something new)"
+# NODE_OPTIONS can preload code into every node process the harness starts (the spec, the
+# checks, the gateway): a run with it set proves nothing. Recorded in provenance as empty.
+if [[ -n "${NODE_OPTIONS:-}" ]]; then
+  die "NODE_OPTIONS is set; unset it (the harness refuses to run with preloaded code)"
+fi
 # Each run gets its own, empty evidence dir: stale results must never count.
 if [[ -e "${EVIDENCE}" ]] && [[ -n "$(ls -A "${EVIDENCE}" 2>/dev/null)" ]]; then
   die "evidence dir is not empty: ${EVIDENCE} (use a new UAT_RUN_ID or UAT_EVIDENCE_DIR)"
@@ -268,7 +275,10 @@ teardown() {
     local pidfile="${MSA_DIR}/.runtime/mindstone/gateway/gateway.pid" pid
     if [[ -f "${pidfile}" ]]; then
       pid=$(cat "${pidfile}" 2>/dev/null)
-      [[ "${pid}" =~ ^[0-9]+$ ]] && kill "${pid}" 2>/dev/null
+      # Only if that PID is still our gateway: a stale file's PID may belong to anything by now.
+      if [[ "${pid}" =~ ^[0-9]+$ ]] && ps -o command= -p "${pid}" 2>/dev/null | grep -qF "${MSA_DIR}"; then
+        kill "${pid}" 2>/dev/null
+      fi
     fi
   fi
   # Any gateway still on our port that runs out of our scratch dir (a Console restart can respawn it).
@@ -365,7 +375,7 @@ summary() {
   echo
   printf '  %-7s %-4s %s\n' STATUS ID STEP
   if [[ -f "${STEPS_TSV}" ]]; then
-    while IFS=$'\t' read -r id status title ev note; do
+    while IFS=$'\t' read -r id status title ev note || [[ -n "${id}" ]]; do
       printf '  %s%-7s%s %-4s %s\n' "$(colour_for "$status")" "$status" "${c_reset}" "$id" "$title"
       [[ -n "$note" ]] && printf '               %s%s%s\n' "${c_dim}" "$note" "${c_reset}"
       [[ -n "$ev" ]] && printf '               %s%s%s\n' "${c_dim}" "$ev" "${c_reset}"
@@ -373,20 +383,26 @@ summary() {
   fi
   # The gate: every required row exactly once and PASS; no unknown rows; Playwright exit 0; run exit 0;
   # an unmodified harness (or an explicit, flagged override); no self-test sabotage.
-  for id in ${REQUIRED_STEPS}; do
-    count=$(awk -F'\t' -v id="$id" '$1==id' "${STEPS_TSV}" 2>/dev/null | wc -l | tr -d ' ')
-    row_status=$(awk -F'\t' -v id="$id" '$1==id{print $2; exit}' "${STEPS_TSV}" 2>/dev/null)
-    if [[ "${count}" == 0 ]]; then reasons+=("${id} MISSING")
-    elif [[ "${count}" != 1 ]]; then reasons+=("${id} x${count}")
-    elif [[ "${row_status}" != PASS ]]; then reasons+=("${id} ${row_status}")
-    fi
-  done
-  while IFS=$'\t' read -r id _; do
-    [[ " ${REQUIRED_STEPS} " == *" ${id} "* ]] || reasons+=("unknown row ${id}")
+  # row_reasons <steps...>: why those rows don't all pass (missing, duplicated, or not PASS).
+  row_reasons() {
+    local rid cnt st
+    for rid in "$@"; do
+      cnt=$(awk -F'\t' -v id="$rid" '$1==id' "${STEPS_TSV}" 2>/dev/null | wc -l | tr -d ' ')
+      st=$(awk -F'\t' -v id="$rid" '$1==id{print $2; exit}' "${STEPS_TSV}" 2>/dev/null)
+      if [[ "${cnt}" == 0 ]]; then printf '%s\n' "${rid} MISSING"
+      elif [[ "${cnt}" != 1 ]]; then printf '%s\n' "${rid} x${cnt}"
+      elif [[ "${st}" != PASS ]]; then printf '%s\n' "${rid} ${st}"
+      fi
+    done
+  }
+  local common=() line
+  while IFS=$'\t' read -r id _ || [[ -n "${id}" ]]; do
+    [[ -z "${id}" ]] && continue
+    [[ " ${REQUIRED_STEPS} " == *" ${id} "* ]] || common+=("unknown row ${id}")
   done <"${STEPS_TSV}"
-  [[ "${PW_RC}" == 0 ]] || reasons+=("playwright exit ${PW_RC}")
-  [[ "${rc}" == 0 ]] || reasons+=("harness exit ${rc}${FATAL:+ (${FATAL})}")
-  [[ "${UAT_SELFTEST_BLANK_MESSAGES:-0}" == 1 ]] && reasons+=("self-test sabotage on (UAT_SELFTEST_BLANK_MESSAGES=1)")
+  [[ "${PW_RC}" == 0 ]] || common+=("playwright exit ${PW_RC}")
+  [[ "${rc}" == 0 ]] || common+=("harness exit ${rc}${FATAL:+ (${FATAL})}")
+  [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" != 0 ]] && common+=("self-test sabotage on (UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES})")
 
   # Provenance, checked again at the end: the harness must not change during the run either.
   local hash_end status_end
@@ -395,8 +411,12 @@ summary() {
   [[ -n "${status_end}" ]] && HARNESS_DIRTY=1
   [[ "${hash_end}" == "${HARNESS_HASH_START}" ]] || { HARNESS_DIRTY=1; status_end="${status_end}${status_end:+$'\n'}(harness files changed during the run)"; }
   if [[ "${HARNESS_DIRTY}" == 1 && "${UAT_ALLOW_DIRTY_HARNESS:-0}" != 1 ]]; then
-    reasons+=("harness tree dirty (set UAT_ALLOW_DIRTY_HARNESS=1 to override, flagged in SUMMARY)")
+    common+=("harness tree dirty (set UAT_ALLOW_DIRTY_HARNESS=1 to override, flagged in SUMMARY)")
   fi
+  local demo_reasons=()
+  while IFS= read -r line; do [[ -n "${line}" ]] && reasons+=("${line}"); done < <(row_reasons ${REQUIRED_STEPS})
+  while IFS= read -r line; do [[ -n "${line}" ]] && demo_reasons+=("${line}"); done < <(row_reasons ${DEMO_STEPS})
+  if [[ ${#common[@]} -gt 0 ]]; then reasons+=("${common[@]}"); demo_reasons+=("${common[@]}"); fi
 
   if [[ -f "${EVIDENCE}/findings.md" ]]; then
     echo; log "README findings (followed literally):"; sed 's/^/  /' "${EVIDENCE}/findings.md"
@@ -409,13 +429,22 @@ summary() {
   log "setup flow: $(cut -f2 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo 'not detected')"
   log "harness: $(git -C "${CONSOLE_HARNESS_ROOT}" rev-parse --short HEAD 2>/dev/null) sha256 ${hash_end:0:16}… $([[ "${HARNESS_DIRTY}" == 1 ]] && echo DIRTY || echo clean)"
   log "evidence: ${EVIDENCE}"
-  local gate
+  local gate demo override=""
+  [[ "${HARNESS_DIRTY}" == 1 && "${UAT_ALLOW_DIRTY_HARNESS:-0}" == 1 ]] && override=" (DIRTY HARNESS OVERRIDE)"
   if [[ ${#reasons[@]} -eq 0 ]]; then
-    gate="PASS"
-    log "${c_green}GATE: PASS${c_reset} (all ${REQUIRED_STEPS// /, } passed)"
+    gate="PASS${override}"
+    log "${c_green}GATE: PASS${override}${c_reset} (all ${REQUIRED_STEPS// /, } passed)"
   else
-    gate="NOT PASSED: ${reasons[*]}"
-    log "${c_red}GATE: NOT PASSED${c_reset} (${reasons[*]})"
+    gate="NOT PASSED${override}: ${reasons[*]}"
+    log "${c_red}GATE: NOT PASSED${override}${c_reset} (${reasons[*]})"
+  fi
+  # The demo subset, on its own line: a J3/J5 regression can't hide behind the always-PENDING J7/J8.
+  if [[ ${#demo_reasons[@]} -eq 0 ]]; then
+    demo="PASS${override}"
+    log "${c_green}DEMO SUBSET (J1–J6 + S/C/X): PASS${override}${c_reset}"
+  else
+    demo="NOT PASSED${override}: ${demo_reasons[*]}"
+    log "${c_red}DEMO SUBSET (J1–J6 + S/C/X): NOT PASSED${override}${c_reset} (${demo_reasons[*]})"
   fi
   local ran_by="${UAT_RAN_BY:-unnamed (set UAT_RAN_BY)}"
   local fingerprint
@@ -427,19 +456,26 @@ summary() {
     echo
     echo "**GATE: ${gate}**"
     echo
+    echo "**DEMO SUBSET (J1–J6 + S/C/X): ${demo}**"
+    echo
     echo "Setup flow driven: **$(cut -f2 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo 'not detected (J2 did not get that far)')** (\`$(cut -f1 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo none)\`)."
     if [[ "${HARNESS_DIRTY}" == 1 && "${UAT_ALLOW_DIRTY_HARNESS:-0}" == 1 ]]; then
       echo
       echo "**UAT_ALLOW_DIRTY_HARNESS=1: this run used a MODIFIED harness (see Provenance). Its result is not evidence for #106.**"
     fi
-    if [[ "${UAT_SELFTEST_BLANK_MESSAGES:-0}" == 1 ]]; then
+    if [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" != 0 ]]; then
       echo
-      echo "**UAT_SELFTEST_BLANK_MESSAGES=1: harness self-test run; the message list was blanked on purpose.**"
+      echo "**UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES}: harness self-test run; message bodies were blanked on purpose.**"
     fi
     echo
     echo "## Provenance"
     echo
     echo "- harness commit: \`$(git -C "${CONSOLE_HARNESS_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)\`"
+    echo "- NODE_OPTIONS: empty (the harness refuses to run with it set)"
+    [[ -n "${UAT_EXPECT_FLOW:-}" ]] && echo "- expected setup flow: \`${UAT_EXPECT_FLOW}\` (UAT_EXPECT_FLOW; J2 fails on a mismatch)"
+    [[ "${MSA_REPO}" != "${MSA_REPO_DEFAULT}" ]] && echo "- **MindStone-Agent repo overridden:** \`${MSA_REPO}\` (install.sh from \`${MSA_RAW}\`)"
+    [[ "${MSA_RAW}" != "https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent" && "${MSA_REPO}" == "${MSA_REPO_DEFAULT}" ]] && echo "- **install.sh source overridden:** \`${MSA_RAW}\`"
+    [[ "${CONSOLE_REPO}" != "https://github.com/MindStone-Agent/mindstone-console.git" ]] && echo "- **mindstone-console repo overridden:** \`${CONSOLE_REPO}\`"
     echo "- harness sha256 (${HARNESS_REL}): \`${HARNESS_HASH_START}\` at start, \`${hash_end}\` at end"
     if [[ "${HARNESS_DIRTY}" == 1 ]]; then
       echo "- harness tree: **DIRTY**. \`git status --porcelain -- ${HARNESS_REL}\`:"
@@ -502,6 +538,8 @@ CONSOLE_URL="http://localhost:${CONSOLE_PORT}"
   echo "harness_commit=$(git -C "${CONSOLE_HARNESS_ROOT}" rev-parse HEAD 2>/dev/null)"
   echo "harness_sha256=${HARNESS_HASH_START}"
   echo "harness_dirty=${HARNESS_DIRTY}"
+  echo "node_options=${NODE_OPTIONS:-}"
+  echo "expect_flow=${UAT_EXPECT_FLOW:-}"
   echo "node=$(node --version)"; echo "docker=$(docker --version 2>/dev/null)"; echo "os=$(uname -sm)"
   echo "started=$(date -u +%FT%TZ)"
 } >"${EVIDENCE}/run.env"
@@ -510,9 +548,9 @@ log "journey UAT ${RUN_ID}: MindStone-Agent@${MSA_REF}, mindstone-console@${CONS
 log "gateway port ${GW_PORT}, Console port ${CONSOLE_PORT}, compose project ${PROJECT}"
 log "scratch ${SCRATCH}"
 log "evidence ${EVIDENCE}"
-if [[ "${UAT_SELFTEST_BLANK_MESSAGES:-0}" == 1 ]]; then
-  log "${c_red}${c_bold}SELF-TEST: the message list will be blanked on purpose (UAT_SELFTEST_BLANK_MESSAGES=1); J4 must FAIL${c_reset}"
-  deviation "SELF-TEST: \`UAT_SELFTEST_BLANK_MESSAGES=1\` hides every rendered message body, to prove J4/J6's on-screen checks fire. This run can't pass."
+if [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" != 0 ]]; then
+  log "${c_red}${c_bold}SELF-TEST: message bodies will be blanked on purpose (UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES}); J4 must FAIL${c_reset}"
+  deviation "SELF-TEST: \`UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES}\` hides $([[ "${UAT_SELFTEST_BLANK_MESSAGES}" == assistant ]] && echo "the agent's rendered replies (the user's bubbles stay)" || echo 'every rendered message body'), to prove J4/J6's on-screen checks fire. This run can't pass."
 fi
 deviation "Ports: the gateway listens on ${GW_PORT} (\`MINDSTONE_AGENT_GATEWAY_PORT\` in its environment, plus \`gateway.port\` **and \`gateway.host\` (${GW_HOST})** written to config.json so the CLI's health checks agree) and the Console on ${CONSOLE_PORT} (a compose override with its own container names and image tag), not 19789/3080; \`MINDSTONE_GATEWAY_URL\` in the Console's \`.env\` points at ${GW_PORT}."
 deviation "HOME is a scratch dir for every MindStone-Agent command, so the README's \`\$HOME/.mindstone-admin-credential\` lands in scratch; inherited MINDSTONE_*/PI_* variables are dropped."
@@ -829,6 +867,12 @@ services:
     container_name: ${PROJECT}-mongo
 YAML
 cp "${OVERRIDE_FILE}" "${EVIDENCE}/compose.uat-override.yml"
+# The compose file comes from the ref under test, and teardown's `compose down -v` removes what it
+# names: refuse anything that isn't this project's before bringing it up.
+if ! compose config --format json 2>"${LOG_DIR}/compose-config.err" | node "${HERE}/lib/compose-guard.mjs" "${PROJECT}" "${CONSOLE_DIR}" >"${LOG_DIR}/compose-guard.log" 2>&1; then
+  record C3 FAIL "Console step 3: the compose project isn't safe to run and tear down" "${LOG_DIR}/compose-guard.log" "$(grep -v '^compose-guard' "${LOG_DIR}/compose-guard.log" | head -3 | tr '\n' ' ')"
+  die "compose-guard refused the compose file"
+fi
 log "  docker compose up -d --build (the first build takes several minutes)"
 t=$(date +%s)
 (cd "${COMPOSE_DIR}" && mkdir -p data-node uploads logs)
@@ -847,7 +891,7 @@ done
 compose ps >"${LOG_DIR}/compose-ps.txt" 2>&1
 running=$(compose ps --status running --services 2>/dev/null | sort | tr '\n' ' ')
 if [[ "${ok}" == 1 && "${running}" == *console* && "${running}" == *mongodb* ]]; then
-  record C3 PASS "Console step 3: docker compose up -d --build; both services running; / answers 200" "${LOG_DIR}/compose-ps.txt" "build+start ${build_time}"
+  record C3 PASS "Console step 3: docker compose up -d --build; both services running; / answers 200" "${LOG_DIR}/compose-ps.txt" "build+start ${build_time}; $(tail -n 1 "${LOG_DIR}/compose-guard.log")"
 else
   compose logs --no-color console 2>&1 | tail -n 80 >"${LOG_DIR}/console.tail.log"
   record C3 FAIL "Console step 3: running services [${running}], / 200: ${ok}" "${LOG_DIR}/console.tail.log"
@@ -918,6 +962,15 @@ fi
 interruptible env NODE_PATH="${PW_NODE_PATH}" "${PW_BIN}" "${PW_INSTALL_ARGS[@]}" >>"${LOG_DIR}/playwright-install.log" 2>&1 \
   || die "playwright ${PW_INSTALL_ARGS[*]} failed (${LOG_DIR}/playwright-install.log)"
 
+# X5: the on-screen check's own controls, in a real Chromium page (no Console needed).
+CURRENT_STEP=X5
+if NODE_PATH="${PW_NODE_PATH}" node "${HERE}/lib/screen-check.selftest.mjs" >"${LOG_DIR}/screen-check-selftest.log" 2>&1; then
+  record X5 PASS "the on-screen check's self-test (a reply only in the user's bubble, or hidden, is not found)" "${LOG_DIR}/screen-check-selftest.log" "$(tail -n 1 "${LOG_DIR}/screen-check-selftest.log")"
+else
+  record X5 FAIL "the on-screen check failed its self-test" "${LOG_DIR}/screen-check-selftest.log" "$(tail -n 1 "${LOG_DIR}/screen-check-selftest.log")"
+fi
+CURRENT_STEP=J
+
 provider_key_file=""
 [[ "${PROVIDER}" == ollama-cloud ]] && provider_key_file="${UAT_PROVIDER_KEY_FILE}"
 rm -f "${EVIDENCE}/journey-results.tsv" "${EVIDENCE}/journey-state.json" "${EVIDENCE}/journey-flow.txt"
@@ -944,6 +997,7 @@ PW_RC=${PIPESTATUS[0]}
 set -e
 if [[ -f "${EVIDENCE}/journey-results.tsv" ]]; then
   cat "${EVIDENCE}/journey-results.tsv" >>"${STEPS_TSV}"
+  [[ -z "$(tail -c 1 "${STEPS_TSV}")" ]] || echo >>"${STEPS_TSV}" # an unterminated last row stays a row
 else
   record J FAIL "Playwright journey produced no results" "${LOG_DIR}/playwright.log" "exit ${PW_RC}"
 fi

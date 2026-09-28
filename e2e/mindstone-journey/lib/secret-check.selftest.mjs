@@ -77,6 +77,8 @@ const positives = {
   'deflated zip with a data descriptor, not at byte 0': deflatedZipWithDescriptor('trace.json', Buffer.from(`{"x":"${secret}"}`)),
   'base64 of a zip in HTML': `<script>d="data:application/zip;base64,${zip('r.json', Buffer.from(secret)).toString('base64')}"</script>`,
   'zip inside gzip': zlib.gzipSync(zip('n.txt', Buffer.from(secret))),
+  'zlib stream after a prefix': Buffer.concat([Buffer.from('binary header '), zlib.deflateSync(Buffer.from(`k=${secret}`))]),
+  'base64 wrapped at 20 columns': (Buffer.from(`wrapped ${secret} wrapped`).toString('base64').match(/.{1,20}/g) ?? []).join('\n'),
 };
 
 for (const [name, content] of Object.entries(positives)) {

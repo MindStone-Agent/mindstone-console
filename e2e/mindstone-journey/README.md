@@ -13,7 +13,7 @@ e2e/mindstone-journey/run-journey.sh main main
 Every step prints **PASS**, **FAIL**, **PENDING** or **MOCK**, with an evidence path.
 
 **The gate** passes, and the script exits 0, only when all of these hold:
-- every required row (S0, S1, S2, S3, S5, C0 to C4, J1 to J8, X1 to X4) appears exactly once, and each one is PASS;
+- every required row (S0, S1, S2, S3, S5, C0 to C4, J1 to J8, X1 to X5) appears exactly once, and each one is PASS;
 - there are no unknown rows;
 - Playwright exited 0;
 - the harness itself didn't fail;
@@ -21,6 +21,10 @@ Every step prints **PASS**, **FAIL**, **PENDING** or **MOCK**, with an evidence 
 - no self-test sabotage flag is set.
 
 PENDING, MOCK, SKIPPED and missing rows all count as *not passed*. The summary names every reason. An interrupted run (Ctrl-C) exits 130.
+
+Next to the gate line, **`DEMO SUBSET (J1–J6 + S/C/X): PASS/NOT PASSED`** applies the same rules without J7 and J8, the features still being built. A J3 or J5 regression therefore can't hide behind their standing PENDING.
+
+With `UAT_EXPECT_FLOW=102`, J2 FAILs unless the Console has the #102 setup flow. Use it for demo gate runs.
 
 ## Provenance
 
@@ -30,7 +34,9 @@ PENDING, MOCK, SKIPPED and missing rows all count as *not passed*. The summary n
 - a sha256 over the harness files (`lib/harness-hash.mjs`: every file git would track there), taken at the start and again at the end;
 - who ran it: `UAT_RAN_BY` (for example `UAT_RAN_BY=Cairn`), plus a sha256 fingerprint of `user@host`. The user and host names themselves are redacted.
 
-**A dirty harness can't pass.** That means a status line, an untracked file, or a hash that changed during the run. Set `UAT_ALLOW_DIRTY_HARNESS=1` to run anyway, for example while developing the harness. SUMMARY then says in bold that the run used a modified harness and is not evidence for #106.
+**A dirty harness can't pass.** That means a status line, an untracked file, or a hash that changed during the run. Set `UAT_ALLOW_DIRTY_HARNESS=1` to run anyway, for example while developing the harness. The gate line then carries "(DIRTY HARNESS OVERRIDE)", and SUMMARY says in bold that the run used a modified harness and is not evidence for #106.
+
+**`NODE_OPTIONS` must be empty.** It could preload code into every node process the harness starts, so the harness refuses to run with it set, and provenance records it as empty. SUMMARY also names any overridden repo (`UAT_MSA_REPO`, `UAT_MSA_RAW`, `UAT_CONSOLE_REPO`).
 
 Needs: git, Node 22.19 or newer, npm, Docker with Compose v2, curl, openssl, and a C/C++ toolchain for MindStone-Agent's native modules. It runs without a TTY.
 
@@ -64,12 +70,13 @@ Needs: git, Node 22.19 or newer, npm, Docker with Compose v2, curl, openssl, and
 | C0 | Console 0: requirements | the gateway check prints 200 |
 | C1 | Console 1: `git clone --branch <console-ref>` | only `mindstone/` is used |
 | C2 | Console 2: `.env` from `.env.example`, secrets generated, gateway values from files, `UID`/`GID` | the README's grep prints 6 |
-| C3 | Console 3: `docker compose up -d --build` | both services are running, and `/` returns 200 |
+| C3 | Console 3: `docker compose up -d --build` | Before `up`, `lib/compose-guard.mjs` reads `docker compose config --format json`, because the compose file comes from the ref under test and `down -v` removes what it names. It refuses:<br>- a container name, or a *built* image tag, that isn't prefixed with the project;<br>- a volume or network that isn't the project's, or is `external`;<br>- a bind mount from outside the Console checkout.<br><br>Then both services must be running, and `/` must return 200. |
 | C4 | Console 4: the non-interactive `create-user` line (`-T`, `--`, `--email-verified=true`, password on stdin) | the user is created. The admin credential file is then deleted, as the README says. |
 | X2 | (harness) the image | A throwaway container from the built image (no network, labelled with the project) shows that `/app/mindstone` is absent, `/app/.env` is empty or absent, and there are no non-empty `.env*` files under `/app`. |
-| X1 | (harness) the evidence | First, `lib/secret-check.selftest.mjs` plants a synthetic secret in every form the checker decodes, and each one must be found: plain text, base64 and base64url at every alignment, hex, UTF-16LE/BE, `\u` escapes, a secret split by a newline, an escaped `\n` or ANSI codes, gzip (also after a prefix), base64 of gzip, zips at and not at byte 0 (stored, and deflated with a data descriptor), a base64 zip in HTML, and a zip inside gzip. A clean dir and a near miss must stay clean, and `secrets.mjs` must read `export KEY=`, quoted values, subfolders and header files. Then no generated secret may appear anywhere in the evidence, in any of those forms. This is checked before the scrub, so a leak shows as a FAIL instead of being hidden. |
+| X1 | (harness) the evidence | First, `lib/secret-check.selftest.mjs` plants a synthetic secret in every form the checker decodes, and each one must be found: plain text, base64 and base64url at every alignment, base64 wrapped across lines, hex, UTF-16LE/BE, `\u` escapes, a secret split by a newline, an escaped `\n` or ANSI codes, gzip (also after a prefix), a zlib stream, base64 of gzip, zips at and not at byte 0 (stored, and deflated with a data descriptor), a base64 zip in HTML, and a zip inside gzip. A clean dir and a near miss must stay clean, and `secrets.mjs` must read `export KEY=`, quoted values, subfolders and header files. Then no generated secret may appear anywhere in the evidence, in any of those forms. This is checked before the scrub, so a leak shows as a FAIL instead of being hidden. |
+| X5 | (harness) the on-screen check | `lib/screen-check.selftest.mjs` runs the same in-page matcher J4 and J6 use (`lib/screen-match.js`) in a real Chromium page. A reply in its assistant row must be found. It must NOT be found when the text is only in the user's own bubble (J6's codeword and "Noted." are there), when the assistant body is hidden, or when it's in a different message's row. |
 | X4 | (harness) cleanup | Nothing is left: no containers or volumes with the project label, no image (unless `UAT_KEEP_IMAGE=1`), no scratch dir (unless `UAT_KEEP_SCRATCH=1`), and nothing listening on the gateway port. |
-| X3 | (harness) host details | Paths (home, scratch, the checkout, `$TMPDIR`), the user name and the host name are redacted from every text file in the evidence (`lib/redact-host.mjs`), and a rescan finds none left. |
+| X3 | (harness) host details | Paths (home, scratch, the checkout, `$TMPDIR`), the user name and the host name are redacted from every text file in the evidence (`lib/redact-host.mjs`) as **plain substrings**, so a name inside a mangled path like `-Users-<name>-` is caught too. A plain-substring rescan must find none left. `node lib/redact-host.mjs --check <dir> <pairs>` audits an evidence dir without changing it. |
 
 ### The journey: UI only (steps `J*`, `journey.spec.ts`)
 
@@ -90,8 +97,8 @@ Needs: git, Node 22.19 or newer, npm, Docker with Compose v2, curl, openssl, and
 
 Then Finish shows "MindStone is set up". After that, `GET /admin/status` (through the Console) reports `onboarded: true`. In a new tab, first the composer must be visible and the banner's own status call must say onboarded; only then must no banner show. | PASS |
 | J3 | Memory in setup | **`102` flow:**<br>- the Memory step exists, and its live Test embedded text (N > 0 dimensions);<br>- the config saved `memory.vectorStore: sqlite-vec` and `memory.embeddingProvider: ollama:<model>`;<br>- `/admin/status` and the status panel mark memory done.<br><br>Writing a test memory and recalling it in a later chat isn't exercised: no Console path writes a memory, and automatic recall is off by default. The step's note says so. An embedding model must already be pulled in Ollama: with none, J3 **FAILs** with "pull nomic-embed-text first". | PASS (`102`); **PENDING** (`pre-102`) |
-| J4 | Start a chat | Listen for chat requests, then click **Start a chat**. The URL may be `/c/new`, `/c/new?prompt=…&submit=true` or already `/c/<id>`. Watch for 15 s: this records whether the agent spoke first. If it did, its first exchange must be stored, finished, not an error, and visible on screen. Send a message. The Console stores a finished reply that isn't an error and has text, and **the same reply and your message are visible in the rendered message list** (not only in `/api/messages`). The saved route is `pi-session` with the chosen model. The gateway transcript's entry for the reply points to its Pi session file, which must record the chosen provider *and* model as the ones called, with no model fallback. | PASS |
-| J5 | Identity formation | **`102` flow:**<br>- Start a chat sent the first turn;<br>- the first reply asks getting-to-know-you questions (a `?`, plus words about who you are or how to work together), and it's visible on screen after reopening the conversation;<br>- the checklist's `identity` step is done, via the API and the status panel;<br>- `<dataDir>/identity-formation/default.json` exists. | PASS (`102`); **PENDING** (`pre-102`) |
+| J4 | Start a chat | Listen for chat requests, then click **Start a chat**. The URL may be `/c/new`, `/c/new?prompt=…&submit=true` or already `/c/<id>`. Watch for 15 s: this records whether the agent spoke first. If it did, its first exchange must be stored, finished, not an error, and visible on screen. Send a message. The Console stores a finished reply that isn't an error and has text, and **the same reply and your message are visible in the rendered message list** (not only in `/api/messages`). The reply must be in the assistant row with the stored reply's `messageId`; the user's own bubble never counts. The saved route is `pi-session` with the chosen model. The gateway transcript's entry for the reply points to its Pi session file, which must record the chosen provider *and* model as the ones called, with no model fallback. | PASS |
+| J5 | Identity formation | **`102` flow:** the gateway's own record decides, not how the reply reads.<br>- J4's conversation's transcript (session key ending in its conversation id) has an `identity_formation_prompted` event before the first assistant entry, in the same run.<br>- `<dataDir>/identity-formation/default.json`'s `sessionKey` ends with that conversation id.<br>- The checklist's `identity` step is done, via the API and the status panel.<br>- **Secondary:** the first reply asks what to "call you" or for "your name", and it's visible in its assistant row after reopening the conversation.<br><br>Proven with a mutant gateway that claims formation but drops the prompt: J5 FAILs on the transcript check. | PASS (`102`); **PENDING** (`pre-102`) |
 | J6 | Recall in the conversation | Reopen J4's conversation and wait until J4's reply is on screen before typing. Plant a codeword, ask an unrelated question, then ask for the codeword. Every reply must be stored and visible, and the last must contain the codeword. It works today, so a miss is a regression and **FAILs**. | PASS |
 | J7 | Skill Builder | Built from the Console and from chat, approved, installed and used. | **PENDING** (#104). It checks that `/mindstone` and Approvals load. |
 | J8 | Persona drafted by the agent | Proposed in chat, approved on Approvals, active in the next chat, and listed and switchable in the Console. | **PENDING** (#105) |
@@ -133,7 +140,8 @@ The route probes are GET-only, sent with the harness's own admin headers. They n
 ## Harness self-tests
 
 - **`node lib/secret-check.selftest.mjs`**: the X1 controls on their own. X1 also runs them on every run.
-- **`UAT_SELFTEST_BLANK_MESSAGES=1`**: hides every rendered message body while the server still stores the replies. This proves that J4's and J6's on-screen checks fire: J4 must FAIL. Such a run can't pass, and SUMMARY says so in bold.
+- **`node lib/screen-check.selftest.mjs`**: the X5 controls on their own. It needs `@playwright/test` on `NODE_PATH` or in the repo.
+- **`UAT_SELFTEST_BLANK_MESSAGES=1`** (or `all`): hides every rendered message body while the server still stores the replies. **`=assistant`** hides only the agent's replies and leaves the user's bubbles. Either way J4 must FAIL, which proves the on-screen checks fire and that a user bubble doesn't count. Such a run can't pass, and SUMMARY says so in bold.
 
 ## Secrets
 
@@ -154,7 +162,8 @@ There is no html report, trace or video, because those record step titles and ar
 | `UAT_OLLAMA_EMBED_MODEL`, `UAT_OLLAMA_ALLOW_PULL` | the pulled `nomic-embed-text`, `0` | the embedding model for the #102 memory step, and whether the harness may pull `nomic-embed-text` |
 | `UAT_RAN_BY` | unset | who ran it, recorded in SUMMARY's provenance |
 | `UAT_ALLOW_DIRTY_HARNESS` | `0` | run a modified harness anyway, flagged in bold. Such a run can't pass unless this is set. |
-| `UAT_SELFTEST_BLANK_MESSAGES` | `0` | the J4/J6 self-test (above) |
+| `UAT_SELFTEST_BLANK_MESSAGES` | `0` | the J4/J6 self-test (above): `1`/`all` or `assistant` |
+| `UAT_EXPECT_FLOW` | unset | `102` or `pre-102`: J2 FAILs if the Console's setup flow differs |
 | `UAT_PERSONA` | the first one | the base persona to pick, matched against its label |
 | `UAT_CHAT_MODEL` | `mindstone/default` | the agent to chat with |
 | `UAT_RUN_ID` | a timestamp and the PID | names the compose project `uat-journey-<id>`, the scratch dir and the evidence dir |

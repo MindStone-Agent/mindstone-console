@@ -36,6 +36,7 @@ import {
   ensureSignedIn,
   expectOnScreen,
   fillSecret,
+  formationEvidence,
   gatewayExcerpt,
   note,
   probeGatewayAdmin,
@@ -77,9 +78,11 @@ const PERSONA_ROUTES = ['/admin/personas', '/admin/personas/proposals', '/admin/
 const ABOUT_PURPOSE = 'Get the MindStone demo ready.';
 const ABOUT_CONTEXT = "I'm running the fresh-install journey test.";
 
-/** Getting-to-know-you: the identity-formation greeting asks who you are and how to work together. */
-const FORMATION_QUESTION =
-  /(your name|call you|who (are )?you|about you|get to know|getting to know|how (do|would|should) (you|we|i)|what (should|would) you like|work(ing)? (with|together|style)|prefer|introduc)/i;
+/**
+ * A secondary check only (the transcript's identity_formation_prompted event is the real one):
+ * the formation greeting asks what to call you. Generic greetings rarely do.
+ */
+const FORMATION_QUESTION = /\b(call you|your name)\b/i;
 
 let context: BrowserContext;
 let page: Page;
@@ -87,15 +90,19 @@ let page: Page;
 test.beforeAll(async ({ browser }) => {
   // A fresh context, like a first-time visitor: no seeded localStorage or UI state.
   context = await browser.newContext();
-  if (process.env.UAT_SELFTEST_BLANK_MESSAGES === '1') {
+  const blank = process.env.UAT_SELFTEST_BLANK_MESSAGES ?? '';
+  if (blank && blank !== '0') {
     // HARNESS SELF-TEST ONLY (run-journey.sh refuses to pass a run with this set): blank what the
     // message list renders, while the server still stores every reply, to prove the on-screen
-    // assertions in J4/J6 fire.
-    await context.addInitScript(() => {
+    // assertions in J4/J6 fire. `assistant` hides only the agent's turns, so the user's own
+    // bubble (which holds J6's codeword) is still there and must not count.
+    const selector =
+      blank === 'assistant' ? '.agent-turn [data-testid="message-body"] *' : '[data-testid="message-body"] *';
+    await context.addInitScript((css) => {
       const style = document.createElement('style');
-      style.textContent = '[data-testid="message-body"] * { display: none !important; }';
+      style.textContent = `${css} { display: none !important; }`;
       document.addEventListener('DOMContentLoaded', () => document.head.appendChild(style));
-    });
+    }, selector);
   }
   page = await context.newPage();
 });
@@ -199,6 +206,8 @@ test('J2 guided setup in the UI: access, provider, model, persona, (memory, conn
   writeState({ setupSteps, flow });
   note(testInfo, `setup steps: ${setupSteps.join(' > ')}`);
   expect(flow, `a known setup flow (${Object.keys(FLOWS).join(', ')}); got ${setupSteps.join(' > ')}`).toBeTruthy();
+  const expectFlow = process.env.UAT_EXPECT_FLOW;
+  if (expectFlow) expect(flow, `UAT_EXPECT_FLOW=${expectFlow}: the Console's setup flow`).toBe(expectFlow);
   testInfo.annotations.push({ type: 'label', description: `flow ${flow}` });
   fs.writeFileSync(path.join(process.env.UAT_EVIDENCE_DIR ?? '.', 'journey-flow.txt'), `${flow}\t${FLOWS[flow!].label}\n`);
 
@@ -499,11 +508,17 @@ test('J4 start a chat; the agent answers', async ({}, testInfo) => {
   if (spoke) {
     // The first exchange Start a chat began: stored, finished, and on screen.
     const first = await waitForReplyTo(page, undefined);
-    writeState({ firstUserText: first.userText, firstReply: first.text.slice(0, 2000), conversationUrl: page.url() });
+    writeState({
+      firstUserText: first.userText,
+      firstReply: first.text.slice(0, 2000),
+      firstReplyId: first.messageId,
+      conversationId: first.conversationId,
+      conversationUrl: page.url(),
+    });
     await attachText(testInfo, 'first-reply.txt', replyLog(first));
     await shot(page, testInfo, 'first-reply');
     expectAnswer(first, 'the first turn');
-    note(testInfo, `first reply: "${first.text.slice(0, 160)}"`);
+    note(testInfo, `first reply (on screen ${first.shownBy}): "${first.text.slice(0, 160)}"`);
   }
   await ensureMindStoneModel(page, testInfo);
   const prompt = 'Please say hello back in one short sentence.';
@@ -511,14 +526,18 @@ test('J4 start a chat; the agent answers', async ({}, testInfo) => {
   const current = readState();
   writeState({
     conversationUrl: page.url(),
+    conversationId: reply.conversationId,
     lastReply: reply.text.slice(0, 2000),
-    ...(current.firstReply ? {} : { firstReply: reply.text.slice(0, 2000), firstUserText: reply.userText }),
+    lastReplyId: reply.messageId,
+    ...(current.firstReply
+      ? {}
+      : { firstReply: reply.text.slice(0, 2000), firstReplyId: reply.messageId, firstUserText: reply.userText }),
   });
   await attachText(testInfo, 'reply.txt', replyLog(reply));
   await shot(page, testInfo, 'reply');
   await gatewayExcerpt(testInfo, 40);
   expectAnswer(reply, 'the hello');
-  note(testInfo, `reply: "${reply.text.slice(0, 160)}"`);
+  note(testInfo, `reply (on screen ${reply.shownBy}): "${reply.text.slice(0, 160)}"`);
 
   // Which model answered: the route the setup saved, and the gateway's transcript metadata.
   const config = await consoleApi<{ config?: { routing?: { mode?: string; defaultModel?: string } } }>(
@@ -570,26 +589,46 @@ test('J5 identity formation on the first chat', async ({}, testInfo) => {
     return;
   }
 
-  // #102 flow: the real test.
+  // #102 flow: the real test. The gateway's own record decides, not how the reply reads:
+  // the identity-formation prompt was injected into THIS conversation's first turn.
   requireSetupDone();
+  expect(state.agentSpokeFirst, 'Start a chat sent the first turn, so the agent answers first').toBe(true);
+  expect(state.conversationId, 'J4 recorded its conversation').toBeTruthy();
+  const conversation = state.conversationId!;
+  const formation = formationEvidence(conversation);
+  await attachText(testInfo, 'formation-transcript.txt', JSON.stringify(formation ?? { found: false }, null, 2));
+  expect(formation, `the gateway transcript has a session for conversation ${conversation}`).toBeTruthy();
+  expect(
+    formation!.promptedAt,
+    'the transcript records identity_formation_prompted for this conversation (the gateway injected the formation prompt)',
+  ).toBeGreaterThanOrEqual(0);
+  expect(formation!.firstAssistantAt, 'the transcript has the first assistant reply').toBeGreaterThanOrEqual(0);
+  expect(formation!.promptedAt, 'identity_formation_prompted comes before the first assistant reply').toBeLessThan(
+    formation!.firstAssistantAt,
+  );
+  if (formation!.promptedRunId && formation!.firstAssistantRunId) {
+    expect(formation!.promptedRunId, 'the formation prompt belongs to the first reply\'s run').toBe(formation!.firstAssistantRunId);
+  }
+  note(testInfo, `transcript: identity_formation_prompted (mode ${formation!.mode ?? '?'}) at entry ${formation!.promptedAt}, first reply at ${formation!.firstAssistantAt}`);
+  // The gateway's per-agent claim is this conversation's.
+  const dataDir = process.env.UAT_DATA_DIR ?? '';
+  const record = path.join(dataDir, 'identity-formation', 'default.json');
+  expect(dataDir && fs.existsSync(record), '<dataDir>/identity-formation/default.json exists').toBeTruthy();
+  const claim = JSON.parse(fs.readFileSync(record, 'utf8')) as { sessionKey?: string };
+  await attachText(testInfo, 'identity-formation.json', JSON.stringify(claim, null, 2));
+  expect(claim.sessionKey?.endsWith(`:${conversation}`), `the formation claim (${claim.sessionKey}) is for J4's conversation`).toBe(true);
+  // The checklist, via the API and the status panel.
   expect(status.stepKeys, 'the checklist has an identity step').toContain('identity');
   const identity = status.steps.identity as { done?: boolean; detail?: string } | undefined;
   expect(identity?.done, `the identity step is done (${identity?.detail ?? ''})`).toBe(true);
   await expect(page.getByTestId('ms-step-identity'), 'the status panel marks identity done').toContainText('✓');
-  expect(state.agentSpokeFirst, 'Start a chat sent the first turn, so the agent answers first').toBe(true);
+  // Secondary: the reply reads like formation, and it's on screen in its assistant row.
   expect(state.firstReply, 'J4 stored the first reply').toBeTruthy();
   const first = state.firstReply!;
-  expect(first, 'the first reply asks getting-to-know-you questions').toContain('?');
-  expect(first, 'the first reply is identity formation (who you are, how to work together)').toMatch(FORMATION_QUESTION);
-  // On screen too: reopen the conversation and find the first reply in the rendered list.
+  expect(first, 'the first reply asks what to call you (secondary check)').toMatch(FORMATION_QUESTION);
   await page.goto(state.conversationUrl!);
-  await expectOnScreen(page, first, 'the identity-formation reply');
+  await expectOnScreen(page, first, 'the identity-formation reply', { role: 'assistant', messageId: state.firstReplyId });
   await shot(page, testInfo, 'formation-on-screen');
-  // The gateway recorded formation for the default agent.
-  const dataDir = process.env.UAT_DATA_DIR ?? '';
-  const record = path.join(dataDir, 'identity-formation', 'default.json');
-  expect(dataDir && fs.existsSync(record), '<dataDir>/identity-formation/default.json exists').toBeTruthy();
-  await attachText(testInfo, 'identity-formation.json', fs.readFileSync(record, 'utf8'));
 });
 
 test('J6 memory recall within the conversation', async ({}, testInfo) => {
@@ -600,7 +639,12 @@ test('J6 memory recall within the conversation', async ({}, testInfo) => {
   await page.goto(state.conversationUrl!);
   // Don't type into a conversation that hasn't loaded: J4's last reply must be on screen first.
   const shown = state.lastReply ?? state.firstReply;
-  if (shown) await expectOnScreen(page, shown, "J4's reply, after reopening the conversation");
+  if (shown) {
+    await expectOnScreen(page, shown, "J4's reply, after reopening the conversation", {
+      role: 'assistant',
+      messageId: state.lastReplyId ?? state.firstReplyId,
+    });
+  }
   await ensureMindStoneModel(page, testInfo);
   const codeword = `${['amber', 'cobalt', 'violet', 'saffron'][Date.now() % 4]}-heron-${1000 + (Date.now() % 9000)}`;
   const plant = `Please remember this for later in our chat: my project codename is ${codeword}. Just reply "Noted."`;

@@ -41,6 +41,10 @@ export type JourneyState = {
   firstUserText?: string;
   /** The reply to J4's own hello (the last exchange J4 checked). */
   lastReply?: string;
+  /** J4's conversation, and the stored ids of its first and last replies (for the scoped screen checks). */
+  conversationId?: string;
+  firstReplyId?: string;
+  lastReplyId?: string;
 };
 
 /**
@@ -301,6 +305,9 @@ export async function sendAndWaitForReply(
 }
 
 export type Reply = {
+  /** The stored reply's id, and how the screen check found it ('by-id' or 'assistant-turn'). */
+  messageId: string;
+  shownBy: string;
   userText: string;
   text: string;
   error: boolean;
@@ -337,9 +344,14 @@ export async function waitForReplyTo(page: Page, text: string | undefined, timeo
         const signature = `${errorText}|${replyText}`;
         if (signature === lastSeen && Date.now() - stableSince > 2_000) {
           // Stored is not enough: the user must see it. Both turns must be on the screen.
-          if (errorText === undefined && replyText) await expectOnScreen(page, replyText, 'the stored reply');
-          await expectOnScreen(page, messageText(user), 'the user turn');
+          const shown =
+            errorText === undefined && replyText
+              ? await expectOnScreen(page, replyText, 'the stored reply', { role: 'assistant', messageId: reply.messageId })
+              : '';
+          await expectOnScreen(page, messageText(user), 'the user turn', { role: 'user' });
           return {
+            messageId: reply.messageId,
+            shownBy: shown,
             userText: messageText(user),
             text: replyText,
             error: errorText !== undefined,
@@ -378,33 +390,42 @@ function screenSnippet(text: string): string {
   return cut.slice(0, Math.max(cut.lastIndexOf(' '), 20)).trim();
 }
 
+type ScreenRole = 'assistant' | 'user';
+// Shared with lib/screen-check.selftest.mjs, so the self-test runs the same in-page code.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { screenMatch } = require('./screen-match.js') as {
+  screenMatch: (arg: { needle: string; role: ScreenRole; messageId?: string }) => string;
+};
+
 /**
  * Asserts the message is visible in the rendered conversation: the text the
  * browser actually renders (innerText of visible message bodies), not the
  * database. Streaming could break while the server still stores the reply;
- * this is what would catch a demo that shows a spinner.
+ * this is what would catch a demo that shows a spinner. A reply must be in
+ * the assistant row with the stored reply's messageId (or, if the row kept a
+ * client-side id, in an assistant turn); a user bubble never counts as the
+ * reply, so a codeword the user typed can't satisfy J6. Returns how it matched.
  */
-export async function expectOnScreen(page: Page, text: string, what: string, timeout = 30_000): Promise<void> {
+export async function expectOnScreen(
+  page: Page,
+  text: string,
+  what: string,
+  opts: { role?: ScreenRole; messageId?: string; timeout?: number } = {},
+): Promise<string> {
   const snippet = screenSnippet(text);
+  const arg = { needle: snippet, role: opts.role ?? 'assistant', messageId: opts.messageId };
+  let how = '';
   await expect
     .poll(
-      async () =>
-        page.evaluate((needle) => {
-          const flat = (s: string) =>
-            s
-              .replace(/[*_`#>|~]/g, '')
-              .replace(/\s+/g, ' ')
-              .trim();
-          const bodies = Array.from(document.querySelectorAll<HTMLElement>('[data-testid="message-body"]')).filter((el) =>
-            el.checkVisibility ? el.checkVisibility() : el.offsetParent !== null,
-          );
-          return bodies.some((el) => flat(el.innerText).includes(needle));
-        }, snippet),
-      { message: `${what} is visible in the message list: "${snippet}"`, timeout },
+      async () => {
+        how = await page.evaluate(screenMatch, arg);
+        return how !== '';
+      },
+      { message: `${what} is visible in the message list (${arg.role} turn${arg.messageId ? ` ${arg.messageId}` : ''}): "${snippet}"`, timeout: opts.timeout ?? 30_000 },
     )
     .toBe(true);
+  return how;
 }
-
 
 /** GET /admin/status through the Console's admin proxy: `onboarded` and the checklist keys. */
 export async function adminStatus(page: Page): Promise<{ onboarded: unknown; stepKeys: string[]; steps: Record<string, unknown> }> {
@@ -527,6 +548,72 @@ export function answeredBy(replyText: string): AnsweredBy | undefined {
     }
   }
   return undefined;
+}
+
+type SessionEntry = {
+  sessionKey?: string;
+  role?: string;
+  runId?: string;
+  timestamp?: string;
+  metadata?: { event?: string; mode?: string };
+};
+
+export type FormationEvidence = {
+  sessionKey?: string;
+  entries: number;
+  /** Index (in the session's transcript order) of the identity_formation_prompted event, and of the first assistant entry. */
+  promptedAt: number;
+  firstAssistantAt: number;
+  promptedRunId?: string;
+  firstAssistantRunId?: string;
+  mode?: string;
+  /** The session's entries as role/event/runId only: no text. */
+  outline: string[];
+};
+
+/**
+ * What the gateway recorded for a Console conversation: its transcript
+ * entries (session key ending in the conversation id), in order. Identity
+ * formation shows as a `role: "event"` entry with `metadata.event:
+ * "identity_formation_prompted"`, written when the prompt was injected into
+ * that turn (MindStone-Agent #111); a turn without it wasn't formation, however
+ * the reply reads.
+ */
+export function formationEvidence(conversationId: string): FormationEvidence | undefined {
+  const dir = process.env.UAT_TRANSCRIPT_DIR;
+  if (!dir || !fs.existsSync(dir) || !conversationId) return undefined;
+  const entries: SessionEntry[] = [];
+  const walk = (d: string) => {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.jsonl?$/.test(entry.name)) {
+        for (const line of fs.readFileSync(full, 'utf8').split('\n')) {
+          if (!line.trim()) continue;
+          try {
+            const parsed = JSON.parse(line) as SessionEntry;
+            if (parsed.sessionKey?.endsWith(`:${conversationId}`)) entries.push(parsed);
+          } catch {
+            // not JSON
+          }
+        }
+      }
+    }
+  };
+  walk(dir);
+  if (!entries.length) return undefined;
+  const prompted = entries.findIndex((e) => e.role === 'event' && e.metadata?.event === 'identity_formation_prompted');
+  const firstAssistant = entries.findIndex((e) => e.role === 'assistant');
+  return {
+    sessionKey: entries[0].sessionKey,
+    entries: entries.length,
+    promptedAt: prompted,
+    firstAssistantAt: firstAssistant,
+    promptedRunId: prompted >= 0 ? entries[prompted].runId : undefined,
+    firstAssistantRunId: firstAssistant >= 0 ? entries[firstAssistant].runId : undefined,
+    mode: prompted >= 0 ? entries[prompted].metadata?.mode : undefined,
+    outline: entries.map((e, i) => `${i} ${e.role}${e.metadata?.event ? ` ${e.metadata.event}` : ''}${e.runId ? ` run ${e.runId}` : ''}`),
+  };
 }
 
 /** Text that means the Console showed an error, not an answer. */
