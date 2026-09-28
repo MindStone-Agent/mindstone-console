@@ -460,11 +460,18 @@ export default function MindStoneOnboardingView() {
             },
       );
     } catch (error) {
-      setMemoryCheck({
-        spec,
-        ok: false,
-        text: errorText(error) ?? localize('com_mindstone_onb_memory_failed'),
-      });
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      if (status === 403 && errorText(error) !== undefined) {
+        // Advanced settings ran out: say so and offer the way back, but keep
+        // a check that already passed for this model.
+        showWriteError(error);
+      } else {
+        setMemoryCheck({
+          spec,
+          ok: false,
+          text: errorText(error) ?? localize('com_mindstone_onb_memory_failed'),
+        });
+      }
     } finally {
       setBusy(false);
     }

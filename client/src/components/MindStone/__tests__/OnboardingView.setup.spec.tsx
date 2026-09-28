@@ -706,6 +706,8 @@ describe('advanced settings running out mid-setup', () => {
     });
     fireEvent.click(button('com_mindstone_turn_on'));
     await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    // The offer is gone once back on the step.
+    expect(screen.queryByRole('button', { name: 'com_mindstone_onb_regrant' })).toBeNull();
     // The passed check is still there: no need to run it again.
     expect(button('com_mindstone_onb_save_next')).toBeEnabled();
     expect(postsTo('memory/check')).toHaveLength(1);
@@ -714,6 +716,45 @@ describe('advanced settings running out mid-setup', () => {
       await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' }),
     ).toBeInTheDocument();
     expect(mockPatch).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers them again when the memory Test is refused, keeping a check that passed', async () => {
+    let checks = 0;
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/memory/check`) {
+        checks += 1;
+        if (checks > 1) throw EXPIRED;
+      }
+      return CHECK_OK;
+    });
+    renderAt('memory');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    await waitFor(() => expect(button('com_mindstone_onb_save_next')).toBeEnabled());
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    expect(
+      await screen.findByRole('button', { name: 'com_mindstone_onb_regrant' }),
+    ).toBeInTheDocument();
+    expect(button('com_mindstone_onb_save_next')).toBeEnabled();
+  });
+
+  it('shows the grant as off on Access even when the status re-read fails', async () => {
+    mockPost.mockImplementation(async () => CHECK_OK);
+    mockPatch.mockImplementationOnce(async () => {
+      advancedSettings = false;
+      throw EXPIRED;
+    });
+    renderAt('memory');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    await waitFor(() => expect(button('com_mindstone_onb_save_next')).toBeEnabled());
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    const regrant = await screen.findByRole('button', { name: 'com_mindstone_onb_regrant' });
+    advancedSettings = true;
+    statusFails = true;
+    fireEvent.click(regrant);
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_access_title' });
+    expect(await screen.findByLabelText('com_mindstone_confirmation')).toBeInTheDocument();
   });
 
   it('resumes the step that was refused, not the one setup was opened at', async () => {
