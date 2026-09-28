@@ -95,6 +95,7 @@ const GATEWAY: EnterpriseKind = {
 
 let advancedSettings: boolean;
 let registered: Array<Record<string, unknown>>;
+let steps: Record<string, { done: boolean; detail: string }>;
 
 beforeEach(() => {
   mockGet.mockReset();
@@ -102,6 +103,7 @@ beforeEach(() => {
   mockPatch.mockReset();
   mockDelete.mockReset();
   advancedSettings = true;
+  steps = {};
   registered = [
     {
       providerId: 'ollama',
@@ -130,7 +132,7 @@ beforeEach(() => {
         enterprise: [AZURE, BEDROCK, GATEWAY],
       };
     }
-    if (url === `${BASE}/status`) return { ok: true, onboarded: false, profiles: [], steps: {} };
+    if (url === `${BASE}/status`) return { ok: true, onboarded: false, profiles: [], steps };
     if (url === `${BASE}/config`) return { config: {}, etag: '"e1"' };
     throw new Error(`unexpected GET ${url}`);
   });
@@ -416,6 +418,56 @@ describe('guided setup', () => {
     fireEvent.click(within(done).getByRole('button', { name: 'com_mindstone_onb_save_next' }));
     expect(
       await screen.findByRole('heading', { name: 'com_mindstone_onb_model_title' }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('memory through an enterprise endpoint', () => {
+  function renderMemory() {
+    steps = { provider: { done: true, detail: '' }, persona: { done: true, detail: '' } };
+    render(
+      <MemoryRouter initialEntries={['/mindstone/onboarding?step=memory']}>
+        <Routes>
+          <Route path="/mindstone/onboarding" element={<MindStoneOnboardingView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it('offers a registered endpoint and checks embeddings through it', async () => {
+    mockPost.mockResolvedValue({
+      ok: true,
+      providerId: 'enterprise-azure',
+      model: 'text-embedding-3-small',
+      dimensions: 1536,
+    });
+    renderMemory();
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    // Only the registered endpoint is offered.
+    expect(
+      screen.queryByRole('radio', { name: 'com_mindstone_onb_embed_enterprise_openai' }),
+    ).toBeNull();
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'com_mindstone_onb_embed_enterprise_azure' }),
+    );
+    expect(screen.getByText('com_mindstone_onb_embed_enterprise_note')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'com_mindstone_onb_memory_test' }));
+    await waitFor(() =>
+      expect(mockPost).toHaveBeenCalledWith(`${BASE}/memory/check`, {
+        embeddingProvider: 'enterprise-azure:text-embedding-3-small',
+      }),
+    );
+  });
+
+  it('offers no enterprise endpoint when none is registered', async () => {
+    registered = [{ providerId: 'ollama', modelCount: 1, auth: 'none' }];
+    renderMemory();
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    expect(
+      screen.queryByRole('radio', { name: 'com_mindstone_onb_embed_enterprise_azure' }),
+    ).toBeNull();
+    expect(
+      screen.getByRole('radio', { name: 'com_mindstone_onb_embed_ollama' }),
     ).toBeInTheDocument();
   });
 });

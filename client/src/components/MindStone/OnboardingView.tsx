@@ -33,6 +33,8 @@ type ModelsInfo = {
   models: PiModel[];
   /** Enterprise endpoints (MindStone-Agent #126): Azure OpenAI, Bedrock, Vertex AI, an enterprise gateway. */
   enterprise?: EnterpriseKind[];
+  /** Providers in the gateway's models.json, by id. */
+  registered?: Array<{ providerId: string }>;
   error?: string;
 };
 /** The provider step's choice for an enterprise endpoint: `enterprise:<kind>`. */
@@ -45,7 +47,9 @@ type Config = {
   onboarding?: { profile?: { id?: string } };
   memory?: { embeddingProvider?: string; autoRecall?: boolean };
 };
-type EmbedKind = 'ollama' | 'openai' | 'openai-compatible';
+type EmbedKind = 'ollama' | 'openai' | 'openai-compatible' | EnterpriseEmbedKind;
+/** Embeddings through an enterprise endpoint registered in the provider step (MindStone-Agent #126). */
+type EnterpriseEmbedKind = 'enterprise-azure' | 'enterprise-openai';
 type Connector = 'telegram' | 'slack' | 'discord';
 type MemoryCheck = { spec: string; ok: boolean; text: string; missingModel?: boolean };
 type MemoryCheckResult = {
@@ -84,13 +88,23 @@ const EMBED_KINDS: Array<{ kind: EmbedKind; label: TranslationKeys }> = [
   { kind: 'openai', label: 'com_mindstone_onb_embed_openai' },
   { kind: 'openai-compatible', label: 'com_mindstone_onb_embed_compatible' },
 ];
+/** Offered when that enterprise endpoint is registered; its own address and key are used. */
+const ENTERPRISE_EMBED_KINDS: Array<{ kind: EnterpriseEmbedKind; label: TranslationKeys }> = [
+  { kind: 'enterprise-azure', label: 'com_mindstone_onb_embed_enterprise_azure' },
+  { kind: 'enterprise-openai', label: 'com_mindstone_onb_embed_enterprise_openai' },
+];
+const isEnterpriseEmbed = (kind: string): kind is EnterpriseEmbedKind =>
+  kind === 'enterprise-azure' || kind === 'enterprise-openai';
 const EMBED_MODELS: Record<EmbedKind, string[]> = {
   ollama: ['nomic-embed-text', 'mxbai-embed-large'],
   openai: ['text-embedding-3-small', 'text-embedding-3-large'],
   'openai-compatible': [],
+  'enterprise-azure': [],
+  'enterprise-openai': [],
 };
 const CUSTOM_MODEL = 'custom';
 const COMPATIBLE_MODEL = 'nomic-embed-text';
+const ENTERPRISE_EMBED_MODEL = 'text-embedding-3-small';
 /** The gateway builds vector recall for sqlite-vec only, so setup always saves it. */
 const VECTOR_STORE = 'sqlite-vec';
 
@@ -120,7 +134,7 @@ function parseEmbedding(
   const [provider, ...rest] = (spec ?? '').split(':');
   const model = rest.join(':').trim();
   if (!model) return undefined;
-  if (provider === 'openai-compatible')
+  if (provider === 'openai-compatible' || isEnterpriseEmbed(provider))
     return { kind: provider, choice: CUSTOM_MODEL, custom: model };
   if (provider !== 'ollama' && provider !== 'openai') return undefined;
   return EMBED_MODELS[provider].includes(model)
@@ -346,7 +360,9 @@ export default function MindStoneOnboardingView() {
     const first = EMBED_MODELS[kind][0];
     setEmbedKind(kind);
     setEmbedChoice(first ?? CUSTOM_MODEL);
-    setEmbedCustom(first ? '' : COMPATIBLE_MODEL);
+    // An enterprise endpoint's embedding deployment is usually OpenAI's model.
+    const suggested = isEnterpriseEmbed(kind) ? ENTERPRISE_EMBED_MODEL : COMPATIBLE_MODEL;
+    setEmbedCustom(first ? '' : suggested);
   };
 
   /** A token typed for one connector never carries over to another. */
@@ -1061,7 +1077,12 @@ export default function MindStoneOnboardingView() {
                 <span id="ms-onb-embed-kind" className="text-sm text-text-secondary">
                   {localize('com_mindstone_onb_embed_provider')}
                 </span>
-                {EMBED_KINDS.map((candidate) => (
+                {[
+                  ...EMBED_KINDS,
+                  ...ENTERPRISE_EMBED_KINDS.filter((candidate) =>
+                    info?.registered?.some((provider) => provider.providerId === candidate.kind),
+                  ),
+                ].map((candidate) => (
                   <label key={candidate.kind} className="flex items-center gap-2">
                     <input
                       type="radio"
@@ -1074,7 +1095,11 @@ export default function MindStoneOnboardingView() {
                 ))}
                 {embedKind !== 'ollama' && (
                   <p className="text-sm text-text-secondary">
-                    {localize('com_mindstone_onb_embed_host_note')}
+                    {localize(
+                      isEnterpriseEmbed(embedKind)
+                        ? 'com_mindstone_onb_embed_enterprise_note'
+                        : 'com_mindstone_onb_embed_host_note',
+                    )}
                   </p>
                 )}
               </div>
