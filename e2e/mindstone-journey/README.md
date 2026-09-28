@@ -13,7 +13,7 @@ e2e/mindstone-journey/run-journey.sh main main
 Every step prints **PASS**, **FAIL**, **PENDING** or **MOCK**, with an evidence path.
 
 **The gate** passes, and the script exits 0, only when all of these hold:
-- every required row (S0, S1, S2, S3, S5, C0 to C4, J1 to J8, X1 to X5) appears exactly once, and each one is PASS;
+- every required row (S0, S1, S2, S3, S5, C0 to C4, J1 to J9, X1 to X5) appears exactly once, and each one is PASS;
 - there are no unknown rows;
 - Playwright exited 0;
 - the harness itself didn't fail;
@@ -22,7 +22,7 @@ Every step prints **PASS**, **FAIL**, **PENDING** or **MOCK**, with an evidence 
 
 PENDING, MOCK, SKIPPED and missing rows all count as *not passed*. The summary names every reason. An interrupted run (Ctrl-C) exits 130.
 
-Next to the gate line, **`DEMO SUBSET (J1–J6 + S/C/X): PASS/NOT PASSED`** applies the same rules without J7 and J8, the features still being built. A J3 or J5 regression therefore can't hide behind their standing PENDING.
+Next to the gate line, **`DEMO SUBSET (J1–J6, J9 + S/C/X): PASS/NOT PASSED`** applies the same rules without J7 and J8, the features still being built. A J3 or J5 regression therefore can't hide behind them. J9 (memory recall across chats) is on the demo path, so it's in the subset: while J9 is PENDING, the subset is NOT PASSED.
 
 With `UAT_EXPECT_FLOW=102`, J2 FAILs unless the Console has the #102 setup flow. Use it for demo gate runs.
 
@@ -96,12 +96,13 @@ Needs: git, Node 22.19 or newer, npm, Docker with Compose v2, curl, openssl, and
 - **About you:** enter the two optional texts.
 
 Then Finish shows "MindStone is set up". After that, `GET /admin/status` (through the Console) reports `onboarded: true`. In a new tab, first the composer must be visible and the banner's own status call must say onboarded; only then must no banner show. | PASS |
-| J3 | Memory in setup | **`102` flow:**<br>- the Memory step exists, and its live Test embedded text (N > 0 dimensions);<br>- the config saved `memory.vectorStore: sqlite-vec` and `memory.embeddingProvider: ollama:<model>`;<br>- `/admin/status` and the status panel mark memory done.<br><br>Writing a test memory and recalling it in a later chat isn't exercised: no Console path writes a memory, and automatic recall is off by default. The step's note says so. An embedding model must already be pulled in Ollama: with none, J3 **FAILs** with "pull nomic-embed-text first". | PASS (`102`); **PENDING** (`pre-102`) |
+| J3 | Memory in setup | **`102` flow:**<br>- the Memory step exists, and its live Test embedded text (N > 0 dimensions);<br>- the config saved `memory.vectorStore: sqlite-vec` and `memory.embeddingProvider: ollama:<model>`;<br>- `/admin/status` and the status panel mark memory done.<br><br>Writing a test memory and recalling it in a later chat isn't exercised here: J9 does that. The step's note says so. An embedding model must already be pulled in Ollama: with none, J3 **FAILs** with "pull nomic-embed-text first". | PASS (`102`); **PENDING** (`pre-102`) |
 | J4 | Start a chat | Listen for chat requests, then click **Start a chat**. The URL may be `/c/new`, `/c/new?prompt=…&submit=true` or already `/c/<id>`. Watch for 15 s: this records whether the agent spoke first. If it did, its first exchange must be stored, finished, not an error, and visible on screen. Send a message. The Console stores a finished reply that isn't an error and has text, and **the same reply and your message are visible in the rendered message list** (not only in `/api/messages`). The reply must be in the assistant row with the stored reply's `messageId`; the user's own bubble never counts. The saved route is `pi-session` with the chosen model. The gateway transcript's entry for the reply points to its Pi session file, which must record the chosen provider *and* model as the ones called, with no model fallback. | PASS |
 | J5 | Identity formation | **`102` flow:** the gateway's own record decides, not how the reply reads.<br>- J4's conversation's transcript (session key ending in its conversation id) has an `identity_formation_prompted` event before the first assistant entry, in the same run.<br>- `<dataDir>/identity-formation/default.json`'s `sessionKey` ends with that conversation id.<br>- The checklist's `identity` step is done, via the API and the status panel.<br>- **Secondary:** the first reply asks what to "call you" or for "your name", and it's visible in its assistant row after reopening the conversation.<br><br>Proven with a mutant gateway that claims formation but drops the prompt: J5 FAILs on the transcript check. | PASS (`102`); **PENDING** (`pre-102`) |
 | J6 | Recall in the conversation | Reopen J4's conversation and wait until J4's reply is on screen before typing. Plant a codeword, ask an unrelated question, then ask for the codeword. Every reply must be stored and visible, and the last must contain the codeword. It works today, so a miss is a regression and **FAILs**. | PASS |
 | J7 | Skill Builder | J4's **Start a chat** turns advanced settings off, so the Skills page must first say installing needs them; then J7 turns them on from the settings page with the typed phrase. The **Skills** link on `/mindstone` (whose own links, less the checklist's and Personas, are exactly `[Run guided setup again, Diagnostics, Approvals, Skills]`) opens the Skills page, which lists the built-in Integration Builder. From the built-in: a draft with a goal, reviewed, then discarded. From scratch: a draft with an id, label, description, goal, when-to-use and instructions naming a codeword, reviewed (its SKILL.md holds the codeword), then installed: it moves to **Active** and the status panel's skills row says `1 installed`. In a new chat, the agent is asked to create a second skill with its own codeword and propose it for install. The reply is not an error and doesn't show the proposal block. Approvals has a pending `install skill <id>` whose detail holds that codeword; approving it installs it, and the Skills page lists it as **Active**. Then a fresh chat for each codeword: the reply must contain it. With the mock provider the message carries the proposal block itself (the mock echoes it), and the last check is MOCK. | PASS once #104 lands |
 | J8 | Persona drafted by the agent | The agent proposes a persona in chat (a real model is asked to use its instructed format; the mock gets the block in the message and is labelled MOCK). It waits on Approvals as a `persona_create` proposal; approving it saves it to the list without activating it (Clint's rule); **Make active** on the Personas page switches to it; the gateway transcript shows the next chat ran with it. PENDING while `GET /api/mindstone/admin/personas` is 404 on the pair. | Real check (#105: MindStone-Agent#112 + mindstone-console#24) |
+| J9 | Memory recall across chats | Automatic recall is on by default (product decision, #106). The real test:<br>- the saved config has `memory.autoRecall: true` after the Console setup, and setup's "Recall memories automatically" was on by default (J2 never touches it); `/admin/status` says `autoRecall on`;<br>- in a new chat (chat 1), the owner says "My project codename is `<word>-osprey-<stamp>`. Please remember it.", a fresh token each run;<br>- the harness polls the gateway's memory stores (`<dataDir>/memory`, `<dataDir>/vectors`) until the token is there, for up to 3 minutes; no blind sleep;<br>- a **fresh** chat (chat 2, a new conversation id) asks "What is my project codename?";<br>- the token is in none of chat 2's own user messages (as stored, and in the gateway transcript);<br>- **the gateway transcript for chat 2 decides**: a `memory_recall_injected` event with hits in the reply's own run, before the reply (`lib/recall-evidence.js`). With no such event, J9 FAILs with "recall is not observable": a reply that names the token is not proof;<br>- the reply contains the token, stored and on screen in the assistant row with its `messageId`. | **PENDING** on main (recall off by default, no live index, nothing writes a memory) |
 
 **How PENDING works.** A PENDING step first asserts today's *exact* state, not a guess from names:
 
@@ -110,10 +111,11 @@ Then Finish shows "MindStone is set up". After that, `GET /admin/status` (throug
 | J3 (`pre-102`) | The setup steps are exactly `[Access, Model provider, Model, Persona, Finish]`, and the `/admin/status` checklist keys are exactly `{connectors, memory, persona, provider}`. |
 | J5 (`pre-102`) | The same checklist keys, and the agent didn't speak first. |
 | J8 | Without #105 (MindStone-Agent #112 and console #24): `GET /api/mindstone/admin/personas` returns 404, so J8 is PENDING. |
+| J9 | While the saved `memory.autoRecall` isn't `true`: it is exactly `false`; setup's recall checkbox was off by default; the `/admin/status` memory detail is exactly `vector store sqlite-vec, embeddings ollama:<model>, autoRecall off`; there's no recall index (`<dataDir>/vectors/memory.sqlite`); and J6's codeword ("please remember this") is in no memory store. With `memory.autoRecall: true`, J9 runs the real test. (`pre-102`: `autoRecall` absent, no index, no codeword stored.) |
 
 Only if that state is unchanged does the step call `test.fixme()` with the issue's "done when". **Any change FAILs the step** with "state changed: … review this PENDING test". A landed or half-landed feature therefore can't sit unnoticed as PENDING. Write the real assertions from the "done when" text in the step.
 
-J7 and J8 need a finished setup. If J2 failed, they FAIL with "blocked by J2" instead of misreporting a changed state. The `102` flow's checklist links ("Set up memory", "Tell the agent about you") aren't part of the comparison.
+J7, J8 and J9 need a finished setup. If J2 failed, they FAIL with "blocked by J2" instead of misreporting a changed state. The `102` flow's checklist links ("Set up memory", "Tell the agent about you") aren't part of the comparison.
 
 The route probes are GET-only, sent with the harness's own admin headers. They never change anything.
 
@@ -140,6 +142,7 @@ The route probes are GET-only, sent with the harness's own admin headers. They n
 
 - **`node lib/secret-check.selftest.mjs`**: the X1 controls on their own. X1 also runs them on every run.
 - **`node lib/screen-check.selftest.mjs`**: the X5 controls on their own. It needs `@playwright/test` on `NODE_PATH` or in the repo.
+- **`node lib/recall-evidence.selftest.mjs`**: J9's transcript check (`lib/recall-evidence.js`) on synthetic gateway transcript lines. Recall is proven only by a `memory_recall_injected` event with hits in the reply's own run; a missing, empty, earlier-run or later event, or a token that came from the chat itself, must not pass. No dependencies.
 - **`UAT_SELFTEST_BLANK_MESSAGES=1`** (or `all`): hides every rendered message body while the server still stores the replies. **`=assistant`** hides only the agent's replies and leaves the user's bubbles. Either way J4 must FAIL, which proves the on-screen checks fire and that a user bubble doesn't count. Such a run can't pass, and SUMMARY says so in bold.
 
 ## Secrets
@@ -220,7 +223,7 @@ In `evidence/<id>/`:
   - `secret-check.log` and `secret-check-selftest.log`;
   - `image-check.log` (X2) and `redact-host.log` (X3);
   - `msa-readme-step2.txt` and `msa-readme-step5.4.txt`: the README text S2 and F-MSA-4 judged;
-  - per-step excerpts: `j4-reply.txt`, `j4-answered-by.json`, `j6-recall.txt`, `j7-gateway-probes.txt`, `jN-gateway-tail.log`;
+  - per-step excerpts: `j4-reply.txt`, `j4-answered-by.json`, `j6-recall.txt`, `j7-gateway-probes.txt`, `j9-memory-state.json`, `j9-recall.txt`, `j9-recall-transcript.json`, `jN-gateway-tail.log`;
   - `playwright.log`;
 - `playwright/results.json`: Playwright's json report;
 - `findings.md` and `deviations.md`: where the READMEs were wrong or incomplete when followed literally, and every place the harness did something the READMEs don't say;

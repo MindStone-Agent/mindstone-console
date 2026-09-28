@@ -52,8 +52,9 @@ INSTALL_STATUS_TMP="/tmp/mindstone-agent-install-status.txt" # older install.sh'
 STEPS_TSV="${EVIDENCE}/harness-steps.tsv"
 LOG_DIR="${EVIDENCE}/logs"
 # Every row the gate needs, each exactly once and each PASS.
-REQUIRED_STEPS="S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 X1 X2 X3 X4 X5"
+REQUIRED_STEPS="S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 J9 X1 X2 X3 X4 X5"
 # The demo subset: everything but the features still being built (J7 Skill Builder, J8 persona drafting).
+# J9 (memory recall across chats) is on the demo path, so it stays in: while it is PENDING, the subset is NOT PASSED.
 DEMO_STEPS="${REQUIRED_STEPS/ J7 J8/}"
 T0=$(date +%s)
 GW_PORT=""
@@ -438,13 +439,13 @@ summary() {
     gate="NOT PASSED${override}: ${reasons[*]}"
     log "${c_red}GATE: NOT PASSED${override}${c_reset} (${reasons[*]})"
   fi
-  # The demo subset, on its own line: a J3/J5 regression can't hide behind the always-PENDING J7/J8.
+  # The demo subset, on its own line: a J3/J5/J9 regression can't hide behind J7/J8.
   if [[ ${#demo_reasons[@]} -eq 0 ]]; then
     demo="PASS${override}"
-    log "${c_green}DEMO SUBSET (J1–J6 + S/C/X): PASS${override}${c_reset}"
+    log "${c_green}DEMO SUBSET (J1–J6, J9 + S/C/X): PASS${override}${c_reset}"
   else
     demo="NOT PASSED${override}: ${demo_reasons[*]}"
-    log "${c_red}DEMO SUBSET (J1–J6 + S/C/X): NOT PASSED${override}${c_reset} (${demo_reasons[*]})"
+    log "${c_red}DEMO SUBSET (J1–J6, J9 + S/C/X): NOT PASSED${override}${c_reset} (${demo_reasons[*]})"
   fi
   local ran_by="${UAT_RAN_BY:-unnamed (set UAT_RAN_BY)}"
   local fingerprint
@@ -456,7 +457,7 @@ summary() {
     echo
     echo "**GATE: ${gate}**"
     echo
-    echo "**DEMO SUBSET (J1–J6 + S/C/X): ${demo}**"
+    echo "**DEMO SUBSET (J1–J6, J9 + S/C/X): ${demo}**"
     echo
     echo "Setup flow driven: **$(cut -f2 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo 'not detected (J2 did not get that far)')** (\`$(cut -f1 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo none)\`)."
     if [[ "${HARNESS_DIRTY}" == 1 && "${UAT_ALLOW_DIRTY_HARNESS:-0}" == 1 ]]; then

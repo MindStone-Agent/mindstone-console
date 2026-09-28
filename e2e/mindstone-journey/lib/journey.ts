@@ -45,6 +45,10 @@ export type JourneyState = {
   conversationId?: string;
   firstReplyId?: string;
   lastReplyId?: string;
+  /** Whether setup's "Recall memories automatically" was on by default (J2 leaves it as it is; J9 judges it). */
+  recallDefaultOn?: boolean;
+  /** The codeword J6 asked the agent to remember in the conversation (J9 checks no memory store holds it yet). */
+  j6Codeword?: string;
 };
 
 /**
@@ -237,7 +241,7 @@ export async function consoleApi<T = unknown>(
   );
 }
 
-type StoredMessage = {
+export type StoredMessage = {
   messageId: string;
   parentMessageId?: string;
   isCreatedByUser?: boolean;
@@ -553,6 +557,7 @@ export function answeredBy(replyText: string): AnsweredBy | undefined {
 type SessionEntry = {
   sessionKey?: string;
   role?: string;
+  text?: string;
   runId?: string;
   timestamp?: string;
   metadata?: {
@@ -560,6 +565,13 @@ type SessionEntry = {
     mode?: string;
     personaContext?: { injected?: boolean; personaId?: string };
   };
+};
+
+// Shared with lib/recall-evidence.selftest.mjs, so the self-test runs the same transcript parsing J9 uses.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { sessionLines, recallEvidence } = require('./recall-evidence.js') as {
+  sessionLines: (text: string, conversationId: string) => SessionEntry[];
+  recallEvidence: (entries: SessionEntry[], token: string) => RecallEvidence;
 };
 
 /** A Console conversation's gateway transcript entries (session key ending in its id), in order. */
@@ -571,17 +583,7 @@ function conversationEntries(conversationId: string): SessionEntry[] {
     for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
       const full = path.join(d, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (/\.jsonl?$/.test(entry.name)) {
-        for (const line of fs.readFileSync(full, 'utf8').split('\n')) {
-          if (!line.trim()) continue;
-          try {
-            const parsed = JSON.parse(line) as SessionEntry;
-            if (parsed.sessionKey?.endsWith(`:${conversationId}`)) entries.push(parsed);
-          } catch {
-            // not JSON
-          }
-        }
-      }
+      else if (/\.jsonl?$/.test(entry.name)) entries.push(...sessionLines(fs.readFileSync(full, 'utf8'), conversationId));
     }
   };
   walk(dir);
@@ -638,6 +640,85 @@ export function personaForConversation(conversationId: string): { found: boolean
   if (!latest) return { found: false };
   const persona = latest.metadata?.personaContext;
   return { found: true, personaId: persona?.injected ? persona.personaId : undefined };
+}
+
+export type RecallEvidence = {
+  entries: number;
+  sessionKey?: string;
+  /** Index of the reply's assistant entry, its run, and the index of the recall event in that turn (-1: none). */
+  assistantAt: number;
+  runId?: string;
+  recallAt: number;
+  recallEvents: number;
+  hitCount: number;
+  hits: { id?: string; chunkId?: string; title?: string; score?: number; recallMode?: string }[];
+  hitsNamingToken: number;
+  replyMemoryRecall?: { hitCount?: number; promptTokens?: number };
+  userTurnsWithToken: number;
+  outline: string[];
+  /** Why the transcript doesn't prove recall; empty when it does. */
+  reasons: string[];
+};
+
+/**
+ * Whether the gateway injected recalled memory into a Console conversation's
+ * latest turn (J9): its transcript's `memory_recall_injected` event for the
+ * reply's own run, with hits (lib/recall-evidence.js says what the gateway
+ * records). Read by conversation, so another chat's recall can't stand in.
+ */
+export function recallForConversation(conversationId: string, token: string): RecallEvidence {
+  return recallEvidence(conversationEntries(conversationId), token);
+}
+
+/** The gateway's data dir (<checkout>/.runtime/mindstone); J5 and J9 read its records. */
+function dataDir(): string {
+  const dir = process.env.UAT_DATA_DIR ?? '';
+  if (!dir || !fs.existsSync(dir)) throw new Error("UAT_DATA_DIR is not set or doesn't exist: the gateway's data dir (run through run-journey.sh)");
+  return dir;
+}
+
+/** The recall index the gateway's sqlite-vec recall reads (MindStone-Agent: <dataDir>/vectors/memory.sqlite). */
+export function recallIndexExists(): boolean {
+  return fs.existsSync(path.join(dataDir(), 'vectors', 'memory.sqlite'));
+}
+
+/**
+ * The files in the gateway's memory stores (<dataDir>/memory and
+ * <dataDir>/vectors, the sqlite index included) whose bytes hold `text`, as
+ * paths relative to the data dir. The transcripts are not a memory store and
+ * aren't searched: they hold every message anyway.
+ */
+export function memoryStoreFilesWith(text: string): string[] {
+  const root = dataDir();
+  const needle = Buffer.from(text, 'utf8');
+  const found: string[] = [];
+  const walk = (d: string) => {
+    if (!fs.existsSync(d)) return;
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && fs.statSync(full).size < 256 * 1024 * 1024 && fs.readFileSync(full).includes(needle)) {
+        found.push(path.relative(root, full));
+      }
+    }
+  };
+  for (const store of ['memory', 'vectors']) walk(path.join(root, store));
+  return found.sort();
+}
+
+/**
+ * Waits (polling, not sleeping blindly) until a memory store holds `text`:
+ * the product's capture and indexing are done. Returns at once when it's
+ * already there; after `timeoutMs`, returns what it found (nothing), and the
+ * recall checks decide.
+ */
+export async function waitForMemoryStore(page: Page, text: string, timeoutMs: number): Promise<{ files: string[]; waitedMs: number }> {
+  const started = Date.now();
+  for (;;) {
+    const files = memoryStoreFilesWith(text);
+    if (files.length || Date.now() - started >= timeoutMs) return { files, waitedMs: Date.now() - started };
+    await page.waitForTimeout(2_000);
+  }
 }
 
 /** Text that means the Console showed an error, not an answer. */
