@@ -47,6 +47,7 @@ import {
   signIn,
   waitForReplyTo,
   writeState,
+  personaForConversation,
 } from './lib/journey';
 import type { FlowName, Reply } from './lib/journey';
 
@@ -70,9 +71,8 @@ const CHECKLIST_LINKS = ['Set up memory', 'Tell the agent about you'];
 /** Steps that judge the state after setup: when J2 failed they report "blocked by J2", not "state changed". */
 const NEEDS_SETUP = /^J[78] /;
 
-/** Gateway admin routes #104 and #105 are likely to add; all 404 today. GET only: a probe never changes anything. */
+/** Gateway admin routes #104 is likely to add; all 404 today. GET only: a probe never changes anything. */
 const SKILL_ROUTES = ['/admin/skills', '/admin/skills/builder', '/admin/skills/drafts', '/admin/skills/build'];
-const PERSONA_ROUTES = ['/admin/personas', '/admin/personas/proposals', '/admin/persona'];
 
 /** What the About you step tells the agent (#102 flow). Not secret. */
 const ABOUT_PURPOSE = 'Get the MindStone demo ready.';
@@ -697,20 +697,104 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
 
 test('J8 the agent drafts its persona; approved in the Console', async ({}, testInfo) => {
   await ensureSignedIn(page);
-  await page.goto('/mindstone');
-  await expect(page.getByRole('heading', { name: 'MindStone settings' })).toBeVisible();
-  const links = await statusLinks(page);
-  await shot(page, testInfo, 'settings');
-  const approvals = await consoleApi<unknown>(page, 'GET', '/api/mindstone/admin/approvals');
-  const probes = await probeAll(testInfo, PERSONA_ROUTES);
-  note(testInfo, `approvals API: HTTP ${approvals.status}; links: ${links.join(', ')}; gateway: ${probes.join(', ')}`);
-  requireUnchanged('the links on /mindstone', links, TODAY_STATUS_LINKS);
-  requireUnchanged('the gateway persona routes', probes, PERSONA_ROUTES.map((r) => `${r}:404`));
-  test.fixme(
-    true,
-    `PENDING ${ISSUES.persona}: nothing can create a persona, and the Console has no persona page. ` +
-      'Done when: in chat the agent proposes a persona overlay (name, voice, working style, boundaries); the admin sees it on ' +
-      'Approvals, approves it, and it becomes the active persona; the next chat uses it; it never overrides IDENTITY.md/USER.md ' +
-      'or safety rules; and the Console lists personas and can switch between them.',
+  // Not built on this pair yet (no personas route through the Console): PENDING, not a pass.
+  const personasRoute = await consoleApi<unknown>(page, 'GET', '/api/mindstone/admin/personas');
+  if (personasRoute.status === 404) {
+    note(testInfo, `GET /api/mindstone/admin/personas: HTTP ${personasRoute.status}`);
+    test.fixme(
+      true,
+      `PENDING ${ISSUES.persona}: this Console/gateway pair has no persona support (MindStone-Agent#112, mindstone-console#24). ` +
+        'Done when: in chat the agent proposes a persona; the admin approves it on Approvals (saved, not active); switches to it ' +
+        'on the Personas page; and the next chat runs with it.',
+    );
+    return;
+  }
+  // A fresh id and a word only this run uses, so the checks can't match an earlier run.
+  const stamp = Date.now().toString(36);
+  const wantedId = `journey-${stamp}`;
+  const voiceWord = `heron${stamp}`;
+  const since = Date.now();
+
+  // 1. In chat, the agent proposes a persona. A real model is asked to use the
+  // format from its standing instructions; the mock model only echoes, so the
+  // block itself goes in the message (labelled MOCK, never a pass).
+  const block =
+    '```mindstone-persona-proposal\n' +
+    JSON.stringify({
+      id: wantedId,
+      name: 'Journey',
+      description: 'A persona drafted during the journey test.',
+      voice: `Warm and direct. Uses the word ${voiceWord}.`,
+      workingStyle: 'Asks before acting.',
+      boundaries: ['Never sends anything without approval.'],
+    }) +
+    '\n```';
+  const ask =
+    PROVIDER === 'mock'
+      ? `Please propose this persona.\n${block}`
+      : `Please propose a working persona for yourself now, using the persona proposal format from your instructions. ` +
+        `Use the id ${wantedId}, the name Journey, and put the word ${voiceWord} in the voice.`;
+  await page.goto('/c/new');
+  await ensureMindStoneModel(page, testInfo);
+  const reply = await sendAndWaitForReply(page, ask);
+  await shot(page, testInfo, 'proposal-reply');
+  expect(reply.error, `the proposal turn answered without an error (${reply.errorText ?? ''})`).toBe(false);
+  expect(reply.text, 'the proposal block is stripped from what the user sees').not.toContain('mindstone-persona-proposal');
+
+  // 2. It waits on Approvals as a persona_create proposal.
+  type Listed = { id: string; kind: string; status: string; summary: string; createdAt?: string };
+  let proposal: Listed | undefined;
+  for (let tries = 0; tries < 20 && !proposal; tries += 1) {
+    const listed = await consoleApi<{ actions?: Listed[] }>(page, 'GET', '/api/mindstone/admin/approvals');
+    proposal = (listed.json?.actions ?? [])
+      .filter((a) => a.kind === 'persona_create' && a.status === 'pending' && (!a.createdAt || Date.parse(a.createdAt) >= since - 5_000))
+      .pop();
+    if (!proposal) await page.waitForTimeout(1_500);
+  }
+  expect(proposal, `a pending persona proposal appears on Approvals (${ISSUES.persona}); the agent replied: ${reply.text.slice(0, 200)}`).toBeTruthy();
+  const detail = await consoleApi<{ action?: { persona?: { id: string; name: string; voice?: string } } }>(
+    page,
+    'GET',
+    `/api/mindstone/admin/approvals/${proposal!.id}`,
   );
+  const persona = detail.json?.action?.persona;
+  expect(persona?.id, 'the proposal carries the persona').toBeTruthy();
+  note(testInfo, `proposed persona ${persona!.id} (${persona!.name}); asked for ${wantedId}`);
+
+  // 3. The admin sees it on the Approvals page and approves it: saved, not active.
+  await page.goto('/mindstone/approvals');
+  await expect(page.getByRole('heading', { name: 'Approvals' }).first()).toBeVisible();
+  await page.getByRole('button', { name: new RegExp(`\\(${persona!.id}\\)`) }).first().click();
+  await expect(page.getByTestId('ms-appr-persona')).toBeVisible();
+  await expect(page.getByTestId('ms-appr-persona')).toContainText(persona!.name);
+  await shot(page, testInfo, 'approval-card');
+  await page.getByRole('button', { name: 'Approve', exact: true }).click();
+  await page.getByRole('button', { name: 'Yes, approve' }).click();
+  await expect(page.getByText('is saved to your personas')).toBeVisible({ timeout: 15_000 });
+  const listedAfter = await consoleApi<{ active?: string | null; personas?: { id: string }[] }>(page, 'GET', '/api/mindstone/admin/personas');
+  expect(listedAfter.json?.personas?.some((p) => p.id === persona!.id), 'the approved persona is on the list').toBe(true);
+  expect(listedAfter.json?.active, 'approving saves the persona but does not make it active').not.toBe(persona!.id);
+
+  // 4. The deliberate switch on the Personas page.
+  await page.goto('/mindstone/personas');
+  const row = page.getByTestId(`ms-persona-${persona!.id}`);
+  await expect(row).toBeVisible();
+  await row.getByRole('button', { name: 'Make active' }).click();
+  await expect(row.getByText('Active', { exact: true })).toBeVisible({ timeout: 15_000 });
+  await shot(page, testInfo, 'personas-active');
+
+  // 5. The next chat uses it: the gateway records the persona it injected.
+  await page.goto('/c/new');
+  await ensureMindStoneModel(page, testInfo);
+  const next = await sendAndWaitForReply(page, 'In one short sentence, how would you describe your working style?');
+  await shot(page, testInfo, 'next-chat');
+  expect(next.error, `the next chat answered without an error (${next.errorText ?? ''})`).toBe(false);
+  expect(next.conversationId, 'the next chat has a conversation id').toBeTruthy();
+  const used = personaForConversation(next.conversationId!);
+  note(testInfo, `next chat: transcript entry ${used.found ? 'found' : 'not found'}, persona ${used.personaId ?? 'none'}`);
+  expect(used.found, 'the gateway transcript has a reply in the next chat (UAT_TRANSCRIPT_DIR)').toBe(true);
+  expect(used.personaId, 'the next chat ran with the approved persona').toBe(persona!.id);
+  if (PROVIDER === 'mock') {
+    testInfo.annotations.push({ type: 'mock', description: 'mock provider' }, { type: 'label', description: 'MOCK' });
+  }
 });
