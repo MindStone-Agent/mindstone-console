@@ -20,4 +20,4 @@ docs
 # token and the admin credential, and data-node/uploads/logs hold live data. Compose mounts
 # what the container needs at runtime, so none of it may be baked into the image.
 mindstone
-**/.env
+**/.env*
