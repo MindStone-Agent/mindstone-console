@@ -60,8 +60,14 @@ const ISSUES = {
 /** The phrase as a phone or autocomplete types it: a capital and a trailing space (#18). */
 const TYPED_PHRASE = 'Enable advanced settings ';
 
-/** The status section's own links on /mindstone (the setup link reads "Run guided setup again" once set up). */
+/** The links in /mindstone's status section today (the setup link reads "Run guided setup again" once set up). */
 const TODAY_STATUS_LINKS = ['Run guided setup again', 'Diagnostics', 'Approvals'];
+
+/** Links inside the #102 checklist items (a step's own "set it up" link), left out of the comparison. */
+const CHECKLIST_LINKS = ['Set up memory', 'Tell the agent about you'];
+
+/** Steps that judge the state after setup: when J2 failed they report "blocked by J2", not "state changed". */
+const NEEDS_SETUP = /^J[78] /;
 
 /** Gateway admin routes #104 and #105 are likely to add; all 404 today. GET only: a probe never changes anything. */
 const SKILL_ROUTES = ['/admin/skills', '/admin/skills/builder', '/admin/skills/drafts', '/admin/skills/build'];
@@ -98,6 +104,10 @@ test.afterAll(async () => {
   await context?.close();
 });
 
+test.beforeEach(async ({}, testInfo) => {
+  if (NEEDS_SETUP.test(testInfo.title)) requireSetupDone();
+});
+
 test.afterEach(async ({}, testInfo) => {
   if (testInfo.status !== testInfo.expectedStatus && testInfo.status !== 'skipped') {
     await shot(page, testInfo, 'failure');
@@ -131,9 +141,9 @@ function requireUnchanged(what: string, actual: unknown, expected: unknown) {
 async function statusLinks(p: Page): Promise<string[]> {
   const section = p.locator('section[aria-labelledby="ms-onboarding"]');
   await expect(section).toBeVisible();
-  // Only the section's own links, not the checklist's (#102 adds "Set up memory" and
-  // "Tell the agent about you" inside the checklist items).
-  return (await section.locator(':scope > a').allTextContents()).map((s) => s.trim());
+  return (await section.getByRole('link').allTextContents())
+    .map((s) => s.trim())
+    .filter((s) => !CHECKLIST_LINKS.includes(s));
 }
 
 async function probeAll(testInfo: TestInfo, routes: string[]) {
@@ -619,7 +629,6 @@ test('J6 memory recall within the conversation', async ({}, testInfo) => {
 });
 
 test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => {
-  requireSetupDone();
   await ensureSignedIn(page);
   await page.goto('/mindstone');
   await expect(page.getByRole('heading', { name: 'MindStone settings' })).toBeVisible();
@@ -643,7 +652,6 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
 });
 
 test('J8 the agent drafts its persona; approved in the Console', async ({}, testInfo) => {
-  requireSetupDone();
   await ensureSignedIn(page);
   await page.goto('/mindstone');
   await expect(page.getByRole('heading', { name: 'MindStone settings' })).toBeVisible();

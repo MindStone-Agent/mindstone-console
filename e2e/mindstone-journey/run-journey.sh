@@ -232,6 +232,9 @@ write_redaction_pairs() {
 teardown() {
   local rc=$?
   set +eu
+  # Back to the terminal: an exit inside a redirected command (interruptible) would otherwise
+  # send teardown's output into that command's log.
+  exec 1>&7 2>&8
   # Nothing interrupts cleanup: a second Ctrl-C (or a closed terminal) is ignored until it's done.
   trap '' INT TERM HUP
   trap - EXIT
@@ -458,6 +461,7 @@ summary() {
 
 # ------------------------------------------------------------------ start ----
 need git; need node; need npm; need docker; need curl; need openssl
+exec 7>&1 8>&2 # the original stdout/stderr, for teardown
 mkdir -p "${EVIDENCE}" "${LOG_DIR}" "${EVIDENCE}/screens"
 : >"${STEPS_TSV}"
 STARTED=1
