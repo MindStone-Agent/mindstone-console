@@ -15,11 +15,13 @@ jest.mock('~/hooks', () => ({
 
 const mockGet = jest.fn();
 const mockPost = jest.fn();
+const mockPatch = jest.fn();
 jest.mock('librechat-data-provider', () => ({
   ...jest.requireActual('librechat-data-provider'),
   request: {
     get: (...args: unknown[]) => mockGet(...args),
     post: (...args: unknown[]) => mockPost(...args),
+    patch: (...args: unknown[]) => mockPatch(...args),
   },
 }));
 
@@ -64,21 +66,23 @@ function serve(detail: Record<string, unknown>) {
   );
 }
 
-async function openDetail(detail: Record<string, unknown>) {
+/** `shown` is the summary as the page shows it, when that differs from what the gateway sent. */
+async function openDetail(detail: Record<string, unknown>, shown = detail.summary as string) {
   serve(detail);
   render(
     <MemoryRouter>
       <ApprovalsView />
     </MemoryRouter>,
   );
-  fireEvent.click(await screen.findByText(detail.summary as string));
-  return screen.findByRole('region', { name: detail.summary as string });
+  fireEvent.click(await screen.findByText(shown));
+  return screen.findByRole('region', { name: shown });
 }
 
 describe('MindStone approvals: a persona proposal (MindStone-Agent #105)', () => {
   afterEach(() => {
     mockGet.mockReset();
     mockPost.mockReset();
+    mockPatch.mockReset();
   });
 
   it('shows every field of the proposal as plain text', async () => {
@@ -115,20 +119,28 @@ describe('MindStone approvals: a persona proposal (MindStone-Agent #105)', () =>
     expect((window as unknown as { pwned?: boolean }).pwned).toBeUndefined();
   });
 
-  it('says approving makes it the active persona, then links to the Personas page', async () => {
+  it('says approving only saves it, then points at the Personas page to make it active', async () => {
     const section = await openDetail(personaAction());
-    mockPost.mockResolvedValue({ ok: true });
+    mockPost.mockResolvedValue({
+      ok: true,
+      result: { outcome: 'approved', kind: 'persona_create', personaId: 'wren' },
+    });
     fireEvent.click(within(section).getByRole('button', { name: 'com_mindstone_appr_approve' }));
-    expect(within(section).getByText('com_mindstone_appr_confirm_persona')).toBeInTheDocument();
+    // The confirmation carries the effect line, shown once.
+    expect(within(section).getAllByText('com_mindstone_appr_persona_effect')).toHaveLength(1);
     fireEvent.click(
       within(section).getByRole('button', { name: 'com_mindstone_appr_confirm_approve' }),
     );
     const status = await screen.findByRole('status');
-    expect(status).toHaveTextContent('com_mindstone_appr_persona_approved:Wren');
+    expect(status).toHaveTextContent('com_mindstone_appr_persona_saved:Wren');
+    expect(status.textContent).not.toMatch(/activ/);
     expect(mockPost).toHaveBeenCalledWith(`/api/mindstone/admin/approvals/${ID}/approve`, {});
     expect(
       within(status).getByRole('link', { name: 'com_mindstone_appr_personas_link' }),
     ).toHaveAttribute('href', '/mindstone/personas');
+    // Approving never switches the active persona: only the Personas page does.
+    expect(mockPatch).not.toHaveBeenCalled();
+    expect(mockGet.mock.calls.map(([url]) => url)).not.toContain('/api/mindstone/admin/config');
   });
 
   it("shows the gateway's text when the persona id is taken, and offers no overwrite", async () => {
@@ -149,57 +161,55 @@ describe('MindStone approvals: a persona proposal (MindStone-Agent #105)', () =>
     expect(within(section).getByTestId('ms-appr-persona')).toBeInTheDocument();
   });
 
-  it('points at the Personas page when the persona was saved but not made active', async () => {
+  it('says on the pending card that a persona route rule still wins for its chats', async () => {
     const section = await openDetail(personaAction());
-    mockPost.mockRejectedValue({
-      response: {
-        status: 409,
-        data: { ok: false, error: 'saved, but not made active', code: 'not_activated' },
-      },
-    });
+    expect(within(section).getByText('com_mindstone_persona_routes_note')).toBeInTheDocument();
+  });
+
+  it('a decided persona approval claims nothing about activation', async () => {
+    const section = await openDetail(
+      personaAction({ status: 'approved', decidedBy: 'console:u1' }),
+    );
+    expect(within(section).getByTestId('ms-appr-persona')).toBeInTheDocument();
+    expect(within(section).queryByText('com_mindstone_appr_persona_effect')).toBeNull();
+    expect(within(section).queryByText('com_mindstone_persona_routes_note')).toBeNull();
+    expect(
+      within(section).queryByRole('button', { name: 'com_mindstone_appr_approve' }),
+    ).toBeNull();
+    expect(section.textContent).not.toMatch(/activ|previous/);
+  });
+
+  it('shows non-printing characters in the proposal as \\u{XXXX}', async () => {
+    const name = 'Wr\u202Een';
+    const section = await openDetail(
+      personaAction({
+        summary: `persona proposal from console: ${name} (wren)`,
+        persona: {
+          id: 'wren',
+          name,
+          voice: 'Line one\n\tindented',
+          boundaries: ['No\u200Bthing hidden.'],
+        },
+      }),
+      'persona proposal from console: Wr\\u{202E}en (wren)',
+    );
+    const fields = within(section).getByTestId('ms-appr-persona');
+    expect(fields.textContent).toContain('Wr\\u{202E}en');
+    expect(fields.textContent).toContain('No\\u{200B}thing hidden.');
+    // Newlines and tabs are text, not hidden characters.
+    expect(fields.textContent).toContain('Line one\n\tindented');
+    expect(within(section).getByRole('heading', { level: 2 })).toHaveTextContent(
+      'persona proposal from console: Wr\\u{202E}en (wren)',
+    );
+    mockPost.mockResolvedValue({ ok: true, result: { kind: 'persona_create', personaId: 'wren' } });
     fireEvent.click(within(section).getByRole('button', { name: 'com_mindstone_appr_approve' }));
     fireEvent.click(
       within(section).getByRole('button', { name: 'com_mindstone_appr_confirm_approve' }),
     );
-    const status = await screen.findByRole('status');
-    expect(status).toHaveTextContent('saved, but not made active');
-    expect(
-      within(status).getByRole('link', { name: 'com_mindstone_appr_personas_link' }),
-    ).toHaveAttribute('href', '/mindstone/personas');
-  });
-
-  it('shows the persona that was active before an approved one', async () => {
-    const section = await openDetail(
-      personaAction({
-        status: 'approved',
-        decidedBy: 'console:u1',
-        previousActivePersona: 'atlas',
-      }),
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'com_mindstone_appr_persona_saved:Wr\\u{202E}en',
     );
-    expect(within(section).getByTestId('ms-appr-previous-persona')).toHaveTextContent(
-      'com_mindstone_appr_persona_previous:atlas',
-    );
-    expect(within(section).queryByText('com_mindstone_appr_persona_effect')).toBeNull();
-    expect(
-      within(section).queryByRole('button', { name: 'com_mindstone_appr_approve' }),
-    ).toBeNull();
-    expect(
-      within(section).getByRole('link', { name: 'com_mindstone_appr_personas_link' }),
-    ).toHaveAttribute('href', '/mindstone/personas');
-  });
-
-  it('says none was active before when the approval recorded none', async () => {
-    const section = await openDetail(
-      personaAction({ status: 'approved', previousActivePersona: null }),
-    );
-    expect(within(section).getByTestId('ms-appr-previous-persona')).toHaveTextContent(
-      'com_mindstone_appr_persona_previous_none',
-    );
-  });
-
-  it('says nothing about a previous persona when none was recorded (a rejected proposal)', async () => {
-    const section = await openDetail(personaAction({ status: 'rejected' }));
-    expect(within(section).queryByTestId('ms-appr-previous-persona')).toBeNull();
+    expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
   });
 
   it('still shows a memory write as its text, with the memory confirmation', async () => {
