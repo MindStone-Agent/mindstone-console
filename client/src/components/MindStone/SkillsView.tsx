@@ -9,7 +9,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
+import type { SkillDraftFields } from './skillDraft';
 import type { TranslationKeys } from '~/hooks';
+import { EMPTY_SKILL_DRAFT, draftBody } from './skillDraft';
+import SkillDraftForm from './SkillDraftForm';
 import { visibleText } from './visibleText';
 import { useLocalize } from '~/hooks';
 
@@ -31,32 +34,8 @@ type Detail = Summary & {
   safetyNotes?: string[];
   skillMarkdown: string;
 };
-type Form = {
-  fromBuiltin: string;
-  id: string;
-  label: string;
-  description: string;
-  goal: string;
-  whenToUse: string;
-  outputs: string;
-  safetyNotes: string;
-  instructions: string;
-};
-
 const BASE = '/api/mindstone/admin';
 const SOURCES: Source[] = ['installed', 'draft', 'builtin'];
-const EMPTY: Form = {
-  fromBuiltin: '',
-  id: '',
-  label: '',
-  description: '',
-  goal: '',
-  whenToUse: '',
-  outputs: '',
-  safetyNotes: '',
-  instructions: '',
-};
-
 function errorBody(error: unknown): { error?: string; code?: string; status?: number } {
   const response = (
     error as { response?: { status?: number; data?: { error?: unknown; code?: unknown } } }
@@ -68,33 +47,7 @@ function errorBody(error: unknown): { error?: string; code?: string; status?: nu
   };
 }
 
-/** One entry per non-empty line. */
-function lines(text: string): string[] {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
-/** The draft request: only what was filled in, so a built-in keeps what isn't overridden. */
-export function draftBody(form: Form, force: boolean): Record<string, unknown> {
-  const body: Record<string, unknown> = {};
-  const text = { id: form.id, label: form.label, description: form.description, goal: form.goal };
-  for (const [key, value] of Object.entries(text)) {
-    if (value.trim()) body[key] = value.trim();
-  }
-  if (form.fromBuiltin) {
-    body.fromBuiltin = form.fromBuiltin;
-  } else {
-    for (const key of ['whenToUse', 'outputs', 'safetyNotes'] as const) {
-      const list = lines(form[key]);
-      if (list.length) body[key] = list;
-    }
-    if (form.instructions.trim()) body.instructions = form.instructions;
-  }
-  if (force) body.force = true;
-  return body;
-}
+export { draftBody } from './skillDraft';
 
 export default function MindStoneSkillsView() {
   const localize = useLocalize();
@@ -102,7 +55,7 @@ export default function MindStoneSkillsView() {
   const [advanced, setAdvanced] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
-  const [form, setForm] = useState<Form>(EMPTY);
+  const [form, setForm] = useState<SkillDraftFields>(EMPTY_SKILL_DRAFT);
   const [formOpen, setFormOpen] = useState(false);
   const [draftExists, setDraftExists] = useState(false);
   const [installExists, setInstallExists] = useState(false);
@@ -153,7 +106,7 @@ export default function MindStoneSkillsView() {
   };
 
   const startFrom = (builtin: string) => {
-    setForm({ ...EMPTY, fromBuiltin: builtin });
+    setForm({ ...EMPTY_SKILL_DRAFT, fromBuiltin: builtin });
     setFormOpen(true);
     setDraftExists(false);
     setMessage(null);
@@ -169,7 +122,7 @@ export default function MindStoneSkillsView() {
         ok: true,
         text: localize('com_mindstone_skill_drafted', { 0: result.skill.id }),
       });
-      setForm(EMPTY);
+      setForm(EMPTY_SKILL_DRAFT);
       setFormOpen(false);
       setDraftExists(false);
       await load();
@@ -230,7 +183,6 @@ export default function MindStoneSkillsView() {
   const primary = 'rounded bg-surface-submit px-4 py-2 text-white disabled:opacity-50';
   const secondary = 'rounded border border-border-medium px-3 py-1 disabled:opacity-50';
   const danger = 'rounded bg-red-600 px-3 py-1 text-white disabled:opacity-50';
-  const input = 'rounded border border-border-medium bg-surface-secondary p-2';
   const builtins = skills?.filter((skill) => skill.source === 'builtin' && !skill.error) ?? [];
   const heading: Record<Source, TranslationKeys> = {
     installed: 'com_mindstone_skill_installed_list',
@@ -243,7 +195,7 @@ export default function MindStoneSkillsView() {
     builtin: 'com_mindstone_skill_state_builtin',
   };
   // A changed form is a different draft: Replace no longer applies to it.
-  const edit = (patch: Partial<Form>) => {
+  const edit = (patch: Partial<SkillDraftFields>) => {
     setForm({ ...form, ...patch });
     setDraftExists(false);
   };
@@ -254,31 +206,6 @@ export default function MindStoneSkillsView() {
       ? 'com_mindstone_skill_state_over_budget'
       : state[skill.source];
   };
-  const field = (
-    key: keyof Form,
-    label: TranslationKeys,
-    rows?: number,
-    hint?: TranslationKeys,
-  ) => (
-    <label className="flex flex-col gap-1 text-sm">
-      {localize(label)}
-      {rows ? (
-        <textarea
-          className={input}
-          rows={rows}
-          value={form[key]}
-          onChange={(event) => edit({ [key]: event.target.value })}
-        />
-      ) : (
-        <input
-          className={input}
-          value={form[key]}
-          onChange={(event) => edit({ [key]: event.target.value })}
-        />
-      )}
-      {hint && <span className="text-xs text-text-secondary">{localize(hint)}</span>}
-    </label>
-  );
   const list = (label: TranslationKeys, items?: string[]) =>
     items && items.length > 0 ? (
       <div className="mb-2 text-sm">
@@ -382,106 +309,18 @@ export default function MindStoneSkillsView() {
             )}
           </div>
           {formOpen && (
-            <form
-              className="mt-3 flex flex-col gap-3"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void createDraft();
+            <SkillDraftForm
+              form={form}
+              builtins={builtins}
+              busy={busy}
+              draftExists={draftExists}
+              onEdit={edit}
+              onSubmit={(force) => void createDraft(force)}
+              onCancel={() => {
+                setFormOpen(false);
+                setDraftExists(false);
               }}
-            >
-              <label className="flex flex-col gap-1 text-sm">
-                {localize('com_mindstone_skill_from')}
-                <select
-                  className={input}
-                  value={form.fromBuiltin}
-                  onChange={(event) => edit({ fromBuiltin: event.target.value })}
-                >
-                  <option value="">{localize('com_mindstone_skill_from_scratch')}</option>
-                  {builtins.map((skill) => (
-                    <option key={skill.id} value={skill.id}>
-                      {localize('com_mindstone_skill_from_builtin', {
-                        0: visibleText(skill.label),
-                      })}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {field(
-                'id',
-                'com_mindstone_skill_field_id',
-                undefined,
-                form.fromBuiltin
-                  ? 'com_mindstone_skill_field_optional'
-                  : 'com_mindstone_skill_field_id_hint',
-              )}
-              {field(
-                'label',
-                'com_mindstone_skill_field_label',
-                undefined,
-                form.fromBuiltin ? 'com_mindstone_skill_field_optional' : undefined,
-              )}
-              {field(
-                'description',
-                'com_mindstone_skill_field_description',
-                2,
-                form.fromBuiltin ? 'com_mindstone_skill_field_optional' : undefined,
-              )}
-              {field('goal', 'com_mindstone_skill_field_goal', 2)}
-              {!form.fromBuiltin && (
-                <>
-                  {field(
-                    'whenToUse',
-                    'com_mindstone_skill_field_when',
-                    3,
-                    'com_mindstone_skill_field_lines',
-                  )}
-                  {field(
-                    'outputs',
-                    'com_mindstone_skill_field_outputs',
-                    3,
-                    'com_mindstone_skill_field_lines',
-                  )}
-                  {field(
-                    'safetyNotes',
-                    'com_mindstone_skill_field_safety',
-                    3,
-                    'com_mindstone_skill_field_lines',
-                  )}
-                  {field(
-                    'instructions',
-                    'com_mindstone_skill_field_instructions',
-                    8,
-                    'com_mindstone_skill_field_instructions_hint',
-                  )}
-                </>
-              )}
-              <div className="flex gap-2">
-                <button type="submit" className={primary} disabled={busy}>
-                  {localize('com_mindstone_skill_create_draft')}
-                </button>
-                {draftExists && (
-                  <button
-                    type="button"
-                    className={secondary}
-                    disabled={busy}
-                    onClick={() => void createDraft(true)}
-                  >
-                    {localize('com_mindstone_skill_replace_draft')}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className={secondary}
-                  disabled={busy}
-                  onClick={() => {
-                    setFormOpen(false);
-                    setDraftExists(false);
-                  }}
-                >
-                  {localize('com_mindstone_skill_cancel')}
-                </button>
-              </div>
-            </form>
+            />
           )}
         </section>
 
