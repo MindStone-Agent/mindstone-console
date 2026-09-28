@@ -42,6 +42,8 @@ jest.mock('../Presentation', () => ({
   default: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }));
 jest.mock('../Header', () => ({ __esModule: true, default: () => <div /> }));
+/** MindStone's setup banner has its own spec (MindStone/__tests__/SetupBanner.spec.tsx). */
+jest.mock('~/components/MindStone/SetupBanner', () => () => null);
 jest.mock('../Footer', () => ({
   __esModule: true,
   default: () => <div />,

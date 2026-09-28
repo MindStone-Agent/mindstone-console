@@ -3038,5 +3038,9 @@
   "com_mindstone_sec_confirm_delete": "Yes, delete it",
   "com_mindstone_sec_cancel": "Cancel",
   "com_mindstone_sec_deleted": "Deleted {{0}}.",
-  "com_mindstone_sec_deleted_used": "Deleted {{0}}. {{1}} no longer have a token until you store one again."
+  "com_mindstone_sec_deleted_used": "Deleted {{0}}. {{1}} no longer have a token until you store one again.",
+  "com_mindstone_confirmation_hint": "Type exactly: {{0}}",
+  "com_mindstone_setup_banner": "MindStone isn't set up yet.",
+  "com_mindstone_setup_banner_action": "Set up MindStone",
+  "com_mindstone_setup_banner_dismiss": "Dismiss"
 }

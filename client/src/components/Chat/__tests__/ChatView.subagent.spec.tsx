@@ -62,6 +62,8 @@ jest.mock('~/data-provider', () => ({
 }));
 
 jest.mock('../Input/ConversationStarters', () => () => null);
+/** MindStone's setup banner has its own spec (MindStone/__tests__/SetupBanner.spec.tsx). */
+jest.mock('~/components/MindStone/SetupBanner', () => () => null);
 jest.mock('../Messages/MessagesView', () => () => <div data-testid="messages" />);
 jest.mock('../Presentation', () => ({ children }: { children: React.ReactNode }) => (
   <>{children}</>

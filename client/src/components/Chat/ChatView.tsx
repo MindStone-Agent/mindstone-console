@@ -18,6 +18,7 @@ import {
   useLocalize,
 } from '~/hooks';
 import { ChatContext, AddedChatContext, ChatFormProvider, useFileMapContext } from '~/Providers';
+import MindStoneSetupBanner from '~/components/MindStone/SetupBanner';
 import ApprovalProvider from './Messages/Content/ApprovalContext';
 import ConversationStarters from './Input/ConversationStarters';
 import { pendingApprovalActionFamily } from './approval/state';
@@ -168,6 +169,7 @@ function ChatView({ index = 0, project }: { index?: number; project?: TChatProje
                     parentConversationId={parentConversationId}
                     readOnly={isSubagentThreadReadOnly}
                   />
+                  <MindStoneSetupBanner />
                   <>
                     <div
                       className={cn(
