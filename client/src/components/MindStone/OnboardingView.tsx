@@ -198,6 +198,8 @@ export default function MindStoneOnboardingView() {
   // About step.
   const [purpose, setPurpose] = useState('');
   const [userContext, setUserContext] = useState('');
+  /** The gateway kept an existing USER.md, so the answers typed on this run were not saved. */
+  const [answersNotSaved, setAnswersNotSaved] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -579,7 +581,10 @@ export default function MindStoneOnboardingView() {
     setBusy(true);
     try {
       // The gateway refuses with a 4xx (409 until a provider and persona are set).
-      await request.post(`${BASE}/onboarding/complete`, body);
+      const result = (await request.post(`${BASE}/onboarding/complete`, body)) as
+        | { user?: string }
+        | undefined;
+      setAnswersNotSaved(result?.user === 'kept' && Object.keys(body).length > 0);
       await load();
       goTo('finish');
     } catch (error) {
@@ -1262,6 +1267,11 @@ export default function MindStoneOnboardingView() {
               )}
             </h2>
             <p className="mb-2 text-sm">{localize('com_mindstone_onb_say_hello')}</p>
+            {answersNotSaved && (
+              <p className="mb-2 text-sm" data-testid="ms-onb-finish-user-kept">
+                {localize('com_mindstone_onb_user_kept')}
+              </p>
+            )}
             {restartFor.length > 0 && (
               <p className="mb-2 text-sm" data-testid="ms-onb-finish-restart">
                 {localize('com_mindstone_onb_finish_restart', {

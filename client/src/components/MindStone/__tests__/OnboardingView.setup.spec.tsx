@@ -5,7 +5,7 @@
  * The settings page links straight to a step with ?step=.
  */
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import MindStoneOnboardingView from '../OnboardingView';
 
 const mockGet = jest.fn();
@@ -615,6 +615,40 @@ describe('about step and finish', () => {
     fireEvent.click(button('com_mindstone_onb_save_next'));
     await screen.findByRole('heading', { name: 'com_mindstone_onb_done_title' });
     expect(postsTo('onboarding/complete')).toEqual([[`${BASE}/onboarding/complete`, {}]]);
+  });
+
+  it('says the answers were not saved when the gateway kept an earlier USER.md', async () => {
+    mockPost.mockResolvedValue({ ok: true, identity: 'kept', user: 'kept' });
+    renderAt('about');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    fireEvent.change(screen.getByLabelText('com_mindstone_onb_purpose'), {
+      target: { value: 'Plan my week' },
+    });
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_done_title' });
+    expect(screen.getByTestId('ms-onb-finish-user-kept')).toHaveTextContent(
+      'com_mindstone_onb_user_kept',
+    );
+  });
+
+  it('says nothing about a kept USER.md when it was created, or nothing was typed', async () => {
+    mockPost.mockResolvedValue({ ok: true, identity: 'created', user: 'created' });
+    renderAt('about');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    fireEvent.change(screen.getByLabelText('com_mindstone_onb_purpose'), {
+      target: { value: 'Plan my week' },
+    });
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_done_title' });
+    expect(screen.queryByTestId('ms-onb-finish-user-kept')).toBeNull();
+    cleanup();
+
+    mockPost.mockResolvedValue({ ok: true, identity: 'kept', user: 'kept' });
+    renderAt('about');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_done_title' });
+    expect(screen.queryByTestId('ms-onb-finish-user-kept')).toBeNull();
   });
 
   it("stays on the step with the gateway's refusal", async () => {
