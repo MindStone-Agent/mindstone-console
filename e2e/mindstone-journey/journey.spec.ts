@@ -42,6 +42,7 @@ import {
   controlForConversation,
   memoryStoreFilesWith,
   messageText,
+  navigate,
   note,
   probeGatewayAdmin,
   readSecretFile,
@@ -183,7 +184,7 @@ function expectAnswer(reply: Reply, what: string) {
 }
 
 test('J1 sign in as admin; the setup banner is visible', async ({}, testInfo) => {
-  await page.goto('/login');
+  await navigate(page, '/login');
   await shot(page, testInfo, 'login');
   await signIn(page);
   const me = await consoleApi<{ role?: string }>(page, 'GET', '/api/user');
@@ -207,7 +208,7 @@ test('J2 guided setup in the UI: access, provider, model, persona, (memory, conn
   } else {
     note(testInfo, 'no setup banner: opened /mindstone/onboarding directly, as the README says');
     writeState({ enteredSetupVia: 'direct-url' });
-    await page.goto('/mindstone/onboarding');
+    await navigate(page, '/mindstone/onboarding');
   }
   await expect(page).toHaveURL(/\/mindstone\/onboarding/);
   await expect(page.getByRole('heading', { name: 'Set up MindStone', level: 1 })).toBeVisible();
@@ -404,7 +405,7 @@ test('J2 guided setup in the UI: access, provider, model, persona, (memory, conn
     const tab = await context.newPage();
     try {
       const statusCall = tab.waitForResponse((r) => r.url().includes('/api/mindstone/admin/status'), { timeout: 30_000 });
-      await tab.goto('/c/new');
+      await navigate(tab, '/c/new');
       // Positive first: the chat page has rendered (the composer is there) and the banner's own
       // status call came back saying "onboarded"; only then does "no banner" mean something.
       await expect(tab.getByRole('textbox', { name: 'Message input' })).toBeVisible({ timeout: 30_000 });
@@ -440,7 +441,7 @@ test('J3 memory in guided setup: vector store, embedding provider and model, liv
   let status: Awaited<ReturnType<typeof adminStatus>>;
   let memoryConfig: { vectorStore?: string; embeddingProvider?: string; autoRecall?: boolean } = {};
   try {
-    await tab.goto('/mindstone');
+    await navigate(tab, '/mindstone');
     await expect(tab.getByRole('heading', { name: 'MindStone settings' })).toBeVisible();
     const memoryRow = tab.getByTestId('ms-step-memory');
     await expect(memoryRow, 'the status panel reports memory').toBeVisible();
@@ -508,7 +509,7 @@ test('J4 start a chat; the agent answers', async ({}, testInfo) => {
   } else {
     note(testInfo, 'not on the Finish page: opened /c/new');
     await ensureSignedIn(page);
-    await page.goto('/c/new');
+    await navigate(page, '/c/new');
   }
   // /c/new (maybe with ?prompt=…&submit=true), or already /c/<id>: the #102 flow's Start a chat
   // sends the first turn itself and redirects. Any of them is fine; the conversation is what counts.
@@ -584,7 +585,7 @@ test('J5 identity formation on the first chat', async ({}, testInfo) => {
   await ensureSignedIn(page);
   const state = readState();
   expect(state.agentSpokeFirst, 'J4 recorded whether the agent spoke first').not.toBeUndefined();
-  await page.goto('/mindstone');
+  await navigate(page, '/mindstone');
   await expect(page.getByRole('heading', { name: 'MindStone settings' })).toBeVisible();
   await shot(page, testInfo, 'status-panel');
   const status = await adminStatus(page);
@@ -641,7 +642,7 @@ test('J5 identity formation on the first chat', async ({}, testInfo) => {
   expect(state.firstReply, 'J4 stored the first reply').toBeTruthy();
   const first = state.firstReply!;
   expect(first, 'the first reply asks what to call you (secondary check)').toMatch(FORMATION_QUESTION);
-  await page.goto(state.conversationUrl!);
+  await navigate(page, state.conversationUrl!);
   await expectOnScreen(page, first, 'the identity-formation reply', { role: 'assistant', messageId: state.firstReplyId });
   await shot(page, testInfo, 'formation-on-screen');
 });
@@ -651,7 +652,7 @@ test('J6 memory recall within the conversation', async ({}, testInfo) => {
   await ensureSignedIn(page);
   const state = readState();
   expect(state.conversationUrl, 'J4 left a conversation to continue').toBeTruthy();
-  await page.goto(state.conversationUrl!);
+  await navigate(page, state.conversationUrl!);
   // Don't type into a conversation that hasn't loaded: J4's last reply must be on screen first.
   const shown = state.lastReply ?? state.firstReply;
   if (shown) {
@@ -702,13 +703,13 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
 
   await test.step('advanced settings, turned on from the settings page', async () => {
     // "Start a chat" (J4) turned them off; installing a skill needs them.
-    await page.goto('/mindstone');
+    await navigate(page, '/mindstone');
     const state = page.getByTestId('ms-advanced-state');
     await expect(state).toBeVisible();
     if ((await state.textContent())?.trim() === 'Off.') {
-      await page.goto('/mindstone/skills');
+      await navigate(page, '/mindstone/skills');
       await expect(page.getByText('Installing a skill needs advanced settings')).toBeVisible();
-      await page.goto('/mindstone');
+      await navigate(page, '/mindstone');
       await page.getByLabel('Confirmation').fill(TYPED_PHRASE);
       await page.getByRole('button', { name: 'Turn on' }).click();
     }
@@ -717,7 +718,7 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
   });
 
   await test.step('the Skills page, from the settings page', async () => {
-    await page.goto('/mindstone');
+    await navigate(page, '/mindstone');
     await expect(page.getByRole('heading', { name: 'MindStone settings' })).toBeVisible();
     const links = await statusLinks(page);
     note(testInfo, `links: ${links.join(', ')}`);
@@ -781,7 +782,7 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
   });
 
   await test.step('status shows it active', async () => {
-    await page.goto('/mindstone');
+    await navigate(page, '/mindstone');
     const row = page.getByTestId('ms-sys-skills');
     await expect(row).toContainText(/\b1 installed\b/);
     await shot(page, testInfo, 'status');
@@ -790,7 +791,7 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
 
   let chatReply = '';
   await test.step('asked in chat, the agent proposes a skill', async () => {
-    await page.goto('/c/new');
+    await navigate(page, '/c/new');
     await ensureMindStoneModel(page, testInfo);
     const skill = {
       id: chatSkill,
@@ -818,7 +819,7 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
   });
 
   await test.step('approved on Approvals, it is installed and active', async () => {
-    await page.goto('/mindstone/approvals');
+    await navigate(page, '/mindstone/approvals');
     const item = page.getByRole('button', { name: new RegExp(`install skill ${chatSkill}`) });
     const proposed = await appears(item, 10_000);
     await shot(page, testInfo, 'approvals');
@@ -833,7 +834,7 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
     await expect(detail).toContainText('Approving installs this skill');
     await detail.getByRole('button', { name: 'Yes, approve' }).click();
     await expect(page.getByRole('status')).toContainText('Approved.');
-    await page.goto('/mindstone/skills');
+    await navigate(page, '/mindstone/skills');
     await expect(skills).toBeVisible();
     await expect(page.getByTestId(`ms-skill-installed-${chatSkill}`)).toContainText('Active');
     await shot(page, testInfo, 'chat-skill-installed');
@@ -850,7 +851,7 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
       ['What is the journey check phrase? Answer with just the phrase.', consoleWord],
       ['What is the chat check phrase? Answer with just the phrase.', chatWord],
     ]) {
-      await page.goto('/c/new');
+      await navigate(page, '/c/new');
       await ensureMindStoneModel(page, testInfo);
       const reply = await sendAndWaitForReply(page, ask);
       answers.push(`> ${ask}\n${reply.text}`);
@@ -907,7 +908,7 @@ test('J8 the agent drafts its persona; approved in the Console', async ({}, test
       ? `Please propose this persona.\n${block}`
       : `Please propose a working persona for yourself now, using the persona proposal format from your instructions. ` +
         `Use the id ${wantedId}, the name Journey, and put the word ${voiceWord} in the voice.`;
-  await page.goto('/c/new');
+  await navigate(page, '/c/new');
   await ensureMindStoneModel(page, testInfo);
   const reply = await sendAndWaitForReply(page, ask);
   await shot(page, testInfo, 'proposal-reply');
@@ -935,7 +936,7 @@ test('J8 the agent drafts its persona; approved in the Console', async ({}, test
   note(testInfo, `proposed persona ${persona!.id} (${persona!.name}); asked for ${wantedId}`);
 
   // 3. The admin sees it on the Approvals page and approves it: saved, not active.
-  await page.goto('/mindstone/approvals');
+  await navigate(page, '/mindstone/approvals');
   await expect(page.getByRole('heading', { name: 'Approvals' }).first()).toBeVisible();
   await page.getByRole('button', { name: new RegExp(`\\(${persona!.id}\\)`) }).first().click();
   await expect(page.getByTestId('ms-appr-persona')).toBeVisible();
@@ -949,7 +950,7 @@ test('J8 the agent drafts its persona; approved in the Console', async ({}, test
   expect(listedAfter.json?.active, 'approving saves the persona but does not make it active').not.toBe(persona!.id);
 
   // 4. The deliberate switch on the Personas page.
-  await page.goto('/mindstone/personas');
+  await navigate(page, '/mindstone/personas');
   const row = page.getByTestId(`ms-persona-${persona!.id}`);
   await expect(row).toBeVisible();
   await row.getByRole('button', { name: 'Make active' }).click();
@@ -957,7 +958,7 @@ test('J8 the agent drafts its persona; approved in the Console', async ({}, test
   await shot(page, testInfo, 'personas-active');
 
   // 5. The next chat uses it: the gateway records the persona it injected.
-  await page.goto('/c/new');
+  await navigate(page, '/c/new');
   await ensureMindStoneModel(page, testInfo);
   const next = await sendAndWaitForReply(page, 'In one short sentence, how would you describe your working style?');
   await shot(page, testInfo, 'next-chat');
@@ -1043,7 +1044,7 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
   const ask = "What is my dog's name? Answer with just the name.";
 
   // Chat 1: the owner tells the agent the fact.
-  await page.goto('/c/new');
+  await navigate(page, '/c/new');
   await ensureMindStoneModel(page, testInfo);
   const told = await sendAndWaitForReply(page, `My dog's name is ${token}. Please remember it.`);
   await shot(page, testInfo, 'chat1');
@@ -1077,7 +1078,7 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
   promptFilesClean('before chat 2');
 
   // Chat 2: a fresh conversation asks for it.
-  await page.goto('/c/new');
+  await navigate(page, '/c/new');
   await ensureMindStoneModel(page, testInfo);
   const answer = await sendAndWaitForReply(page, ask);
   await shot(page, testInfo, 'chat2');
@@ -1134,7 +1135,7 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
     const now = await consoleApi<MemoryConfig>(page, 'GET', '/api/mindstone/admin/config');
     expect(now.json.config?.memory?.autoRecall, 'the saved memory.autoRecall is now off').toBe(false);
     expect(off.json.restartRequired, 'turning recall off needs no gateway restart').not.toBe(true);
-    await page.goto('/c/new');
+    await navigate(page, '/c/new');
     await ensureMindStoneModel(page, testInfo);
     const control = await sendAndWaitForReply(page, ask);
     await shot(page, testInfo, 'chat3-control');

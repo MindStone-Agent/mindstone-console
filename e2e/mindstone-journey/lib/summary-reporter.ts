@@ -5,6 +5,9 @@
  * whose feature hasn't landed; its annotation says what "done" looks like.
  * MOCK is a step that passed against the gateway's mock route (no real model);
  * the gate counts it, like PENDING and SKIPPED, as not passed.
+ * A step with a `stall` annotation (lib/journey.ts recordStall: a request or
+ * page load that never answered) is FAIL whatever else happened, with the
+ * stall in its note: an environment stall is never a pass.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -37,9 +40,15 @@ export default class SummaryReporter implements Reporter {
     else if (result.status === 'skipped' && fixme) status = 'PENDING';
     else if (result.status === 'skipped') status = 'SKIPPED';
     else status = 'FAIL';
+    const stalls = [...new Set(test.annotations.filter((a) => a.type === 'stall').map((a) => oneLine(a.description ?? '')))];
+    const error = result.error?.message ? oneLine(result.error.message) : '';
     const note: string[] = [];
+    if (stalls.length && status !== 'FAIL') note.push(`FAIL on a stall (the step was ${status})`);
+    if (stalls.length) status = 'FAIL';
     if (status === 'PENDING' && fixme?.description) note.push(fixme.description);
-    if (status === 'FAIL' && result.error?.message) note.push(`error: ${oneLine(result.error.message)}`);
+    if (status === 'FAIL' && error) note.push(`error: ${error}`);
+    // Every stall, unless the error already says it.
+    note.push(...stalls.filter((s) => !error.includes(s)));
     note.push(...notes);
     // The copies in evidence/screens and evidence/logs (Playwright's own copies have hashed names).
     const files = [

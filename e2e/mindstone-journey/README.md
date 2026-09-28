@@ -18,11 +18,14 @@ Every step prints **PASS**, **FAIL**, **PENDING** or **MOCK**, with an evidence 
 - Playwright exited 0;
 - the harness itself didn't fail;
 - **the harness is unmodified** (see Provenance);
-- no self-test sabotage flag is set.
+- no self-test sabotage flag is set;
+- there was no stall.
 
 PENDING, MOCK, SKIPPED and missing rows all count as *not passed*. The summary names every reason. An interrupted run (Ctrl-C) exits 130.
 
 Next to the gate line, **`DEMO SUBSET (J1–J6, J9 + S/C/X): PASS/NOT PASSED`** applies the same rules without J7 and J8, the features still being built. A J3 or J5 regression therefore can't hide behind them. J9 (memory recall across chats) is on the demo path, so it's in the subset: while J9 is PENDING, the subset is NOT PASSED.
+
+**Stalls.** Every harness request (`consoleApi` and its token refresh, a `fetch` inside the page, and the gateway probes J7 and J8 send from node) times out after `UAT_API_TIMEOUT_MS` (30 s), and inside a reply-polling loop never later than the loop's own limit (240 s per reply). A poll that the limit cuts short ends as the reply timeout ("no finished reply … (last poll: …; the final poll got no answer before the limit …)"), not as a stall. Every page load (`navigate` in `lib/journey.ts`) keeps Playwright's navigation timeout (60 s). Either one running out is a **STALL**: "STALL: GET /api/messages/… no response in 30s" or "STALL: navigation to /c/new didn't load in 60s", in the step's note. The step is FAIL even if the stall was caught, and the summary's **stalls** line lists every stall of the run (SUMMARY.md too), so an environment stall (console #30: colima's port forwarding) reads differently from a product failure at a glance. A stall never passes: a stall in any step, J7 and J8 included, fails the gate **and the DEMO SUBSET**.
 
 With `UAT_EXPECT_FLOW=102`, J2 FAILs unless the Console has the #102 setup flow. Use it for demo gate runs.
 
@@ -74,7 +77,7 @@ Needs: git, Node 22.19 or newer, npm, Docker with Compose v2, curl, openssl, and
 | C4 | Console 4: the non-interactive `create-user` line (`-T`, `--`, `--email-verified=true`, password on stdin) | the user is created. The admin credential file is then deleted, as the README says. |
 | X2 | (harness) the image | A throwaway container from the built image (no network, labelled with the project) shows that `/app/mindstone` is absent, `/app/.env` is empty or absent, and there are no non-empty `.env*` files under `/app`. |
 | X1 | (harness) the evidence | First, `lib/secret-check.selftest.mjs` plants a synthetic secret in every form the checker decodes, and each one must be found: plain text, base64 and base64url at every alignment, base64 wrapped across lines, hex, UTF-16LE/BE, `\u` escapes, a secret split by a newline, an escaped `\n` or ANSI codes, gzip (also after a prefix), a zlib stream, base64 of gzip, zips at and not at byte 0 (stored, and deflated with a data descriptor), a base64 zip in HTML, and a zip inside gzip. A clean dir and a near miss must stay clean, and `secrets.mjs` must read `export KEY=`, quoted values, subfolders and header files. Then no generated secret may appear anywhere in the evidence, in any of those forms. This is checked before the scrub, so a leak shows as a FAIL instead of being hidden. |
-| X5 | (harness) the on-screen check | `lib/screen-check.selftest.mjs` runs the same in-page matcher J4 and J6 use (`lib/screen-match.js`) in a real Chromium page. A reply in its assistant row must be found. It must NOT be found when the text is only in the user's own bubble (J6's codeword and "Noted." are there), when the assistant body is hidden, or when it's in a different message's row. |
+| X5 | (harness) the on-screen check, and stall detection | `lib/screen-check.selftest.mjs` runs the same in-page matcher J4 and J6 use (`lib/screen-match.js`) in a real Chromium page. A reply in its assistant row must be found. It must NOT be found when the text is only in the user's own bubble (J6's codeword and "Noted." are there), when the assistant body is hidden, or when it's in a different message's row. `lib/stall.selftest.mjs` runs the harness's own request and page-load code (`lib/stall.js`) against a local server that never answers: no response, a body that never ends (from the page and from node), a page stuck in `evaluate`, and a page load that never finishes must each throw a named STALL within their timeout; an answered request must come back. In a polling loop, a call its deadline cut short (every poll slow, the last one out of time) must end as the loop's own limit, never as a stall, and a call with its full timeout left must still stall. A 60 s watchdog stops the self-test if it hangs itself. |
 | X4 | (harness) cleanup | Nothing is left: no containers or volumes with the project label, no image (unless `UAT_KEEP_IMAGE=1`), no scratch dir (unless `UAT_KEEP_SCRATCH=1`), and nothing listening on the gateway port. |
 | X3 | (harness) host details | Paths (home, scratch, the checkout, `$TMPDIR`), the user name and the host name are redacted from every text file in the evidence (`lib/redact-host.mjs`) as **plain substrings**, so a name inside a mangled path like `-Users-<name>-` is caught too. A plain-substring rescan must find none left. `node lib/redact-host.mjs --check <dir> <pairs>` audits an evidence dir without changing it. |
 
@@ -142,6 +145,7 @@ The route probes are GET-only, sent with the harness's own admin headers. They n
 
 - **`node lib/secret-check.selftest.mjs`**: the X1 controls on their own. X1 also runs them on every run.
 - **`node lib/screen-check.selftest.mjs`**: the X5 controls on their own. It needs `@playwright/test` on `NODE_PATH` or in the repo.
+- **`node lib/stall.selftest.mjs`**: X5's stall controls on their own (about 20 s). Its server listens on 127.0.0.1, on the first free port in `UAT_PORT_MIN` to `UAT_PORT_MAX` (default 26900 to 26949). It needs `@playwright/test` like the one above.
 - **`node lib/recall-evidence.selftest.mjs`**: J9's recall checks (`lib/recall-evidence.js`) on synthetic gateway transcript lines and recall-index chunks. Recall is proven only by a `role: "event"` `memory_recall_injected` entry with hits in the reply's own run (both run ids present and equal), a hit whose chunk holds the token, and the token in no other entry. A missing, empty, run-less, earlier-run or later event, a non-event entry with that name, a session key that only contains the conversation id, only J6's chunk recalled, a chunk written after the event, unreadable chunks, and the token in a user, system, tool or event entry or in the query must not pass. It also covers the negative control (chat 3), which memory files count as invariants, and the out-of-process index reader (`lib/recall-index.js`) against a WAL-mode test database whose writer is still open. No dependencies beyond Node's `node:sqlite`.
 - **`UAT_SELFTEST_BLANK_MESSAGES=1`** (or `all`): hides every rendered message body while the server still stores the replies. **`=assistant`** hides only the agent's replies and leaves the user's bubbles. Either way J4 must FAIL, which proves the on-screen checks fire and that a user bubble doesn't count. Such a run can't pass, and SUMMARY says so in bold.
 
@@ -171,6 +175,7 @@ There is no html report, trace or video, because those record step titles and ar
 | `UAT_RUN_ID` | a timestamp and the PID | names the compose project `uat-journey-<id>`, the scratch dir and the evidence dir |
 | `UAT_SCRATCH_ROOT` | `$TMPDIR` | where the scratch dir `uat-journey-<id>/` is created. On colima it must be under `$HOME`. |
 | `UAT_EVIDENCE_DIR` | `e2e/mindstone-journey/evidence/<id>/` | where the evidence goes (gitignored). It must be new or empty: the harness refuses a non-empty one, and the spec refuses one that already holds a journey's state or results. |
+| `UAT_API_TIMEOUT_MS` | `30000` | each harness request's timeout: no answer by then is a STALL (above) |
 | `UAT_PORT_MIN`, `UAT_PORT_MAX` | 26900 to 26999 | the gateway and Console ports. Each is checked free first. Any range that touches 18000 to 18999 is refused. |
 | `UAT_GATEWAY_BRIDGE_HOST` | `172.17.0.1` | **Linux only.** The address the gateway binds, so the Console's container can reach it (MindStone-Agent README 5.5). |
 | `UAT_MSA_REPO`, `UAT_MSA_RAW`, `UAT_CONSOLE_REPO` | the MindStone-Agent GitHub repos | for testing forks |
@@ -214,13 +219,15 @@ Refs are passed to `git clone --branch`, so use branch or tag names, not SHAs.
 
 In `evidence/<id>/`:
 
-- `SUMMARY.md`: the gate result and its reasons, provenance, every step's status, evidence and note, the README findings, the harness's deviations, and cleanup. Paths in it are relative to the evidence dir, and host details are redacted;
+- `SUMMARY.md`: the gate result and its reasons, the stalls line, provenance, every step's status, evidence and note, the README findings, the harness's deviations, and cleanup. Paths in it are relative to the evidence dir, and host details are redacted;
 - `harness-steps.tsv`, `journey-results.tsv` and `journey-results.md`: the same results, machine-readable;
+- `stalls.tsv`: every stall, one `<step>\t<message>` line each (only when there was one);
 - `screens/`: screenshots from each journey step (`j2-access-typed.png`, `j2-banner-gone.png`, `j4-reply.png` and so on), plus `jN-failure.png` when a step fails;
 - `logs/`:
   - the install, build and `create-user` logs;
   - `gateway.log` and `console.log`;
   - `secret-check.log` and `secret-check-selftest.log`;
+  - `screen-check-selftest.log` and `stall-selftest.log` (X5);
   - `image-check.log` (X2) and `redact-host.log` (X3);
   - `msa-readme-step2.txt` and `msa-readme-step5.4.txt`: the README text S2 and F-MSA-4 judged;
   - per-step excerpts: `j4-reply.txt`, `j4-answered-by.json`, `j6-recall.txt`, `j7-gateway-probes.txt`, `j9-memory-state.json`, `j9-recall.txt`, `j9-recall-transcript.json`, `jN-gateway-tail.log`;
