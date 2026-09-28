@@ -310,6 +310,14 @@ describe('MindStone admin proxy', () => {
       ['delete', 'skills/drafts/a/b'],
       ['delete', `skills/drafts/${'a'.repeat(65)}`],
       ['delete', 'skills/weekly-report/install'],
+      // Anchored at the start too: a prefix never reaches a skill route.
+      ['get', 'x/skills/a'],
+      ['post', 'x/skills/drafts'],
+      ['delete', 'x/skills/drafts/a'],
+      ['post', 'x/skills/a/install'],
+      ['get', '..%2Fv1%2Fskills/a'],
+      ['post', '..%2Fv1%2Fskills/a/install'],
+      ['delete', 'v1/skills/drafts/a'],
       // Guided setup (MindStone-Agent #102): POST onboarding/complete, memory/check and memory/pull only.
       ['get', 'onboarding/complete'],
       ['delete', 'onboarding/complete'],

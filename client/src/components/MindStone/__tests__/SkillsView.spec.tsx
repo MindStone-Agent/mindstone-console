@@ -2,10 +2,12 @@ import { MemoryRouter } from 'react-router-dom';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import SkillsView, { draftBody } from '../SkillsView';
 
-jest.mock('~/hooks', () => ({
-  useLocalize: () => (key: string, values?: Record<string, string>) =>
-    values ? `${key} ${Object.values(values).join(' ')}` : key,
-}));
+jest.mock('~/hooks', () => {
+  // One function, as the real hook keeps it: a new one each render would reload the page every render.
+  const localize = (key: string, values?: Record<string, string>) =>
+    values ? `${key} ${Object.values(values).join(' ')}` : key;
+  return { useLocalize: () => localize };
+});
 
 const mockGet = jest.fn();
 const mockPost = jest.fn();
@@ -161,11 +163,34 @@ describe('MindStone Skill Builder page', () => {
     mockPost.mockRejectedValueOnce(
       refusal(403, { error: 'installing a skill needs the advanced-settings permission' }),
     );
+    const readsBefore = mockGet.mock.calls.filter(([url]) => url === `${BASE}/permissions`).length;
     fireEvent.click(screen.getByRole('button', { name: 'com_mindstone_skill_install' }));
     expect(await screen.findByRole('status')).toHaveTextContent('advanced-settings permission');
     expect(
       screen.queryByRole('button', { name: 'com_mindstone_skill_replace_installed' }),
     ).toBeNull();
+    // Advanced settings may have run out: the page reads them again.
+    await waitFor(() =>
+      expect(mockGet.mock.calls.filter(([url]) => url === `${BASE}/permissions`).length).toBe(
+        readsBefore + 1,
+      ),
+    );
+  });
+
+  it('shows hidden characters in a skill the agent wrote, and wraps its SKILL.md', async () => {
+    gateway(true, {
+      ...DRAFT,
+      label: 'Tri‮age',
+      description: 'Sorts​the inbox',
+      skillMarkdown: '# Triage\n\nTRIAGE-SKILL-BODY' + ' '.repeat(50) + 'FAR-RIGHT',
+    });
+    renderPage();
+    fireEvent.click(within(await screen.findByTestId('ms-skill-draft-triage')).getByRole('button'));
+    const body = await screen.findByText(/TRIAGE-SKILL-BODY/);
+    expect(body).toHaveClass('break-words');
+    expect(body.textContent).toContain('\\u{00A0}');
+    expect(screen.getByText('Tri\\u{202E}age')).toBeInTheDocument();
+    expect(screen.getByText('Sorts\\u{200B}the inbox')).toBeInTheDocument();
   });
 
   it('discards a draft only after confirming', async () => {

@@ -6,10 +6,12 @@
  * code points, default-ignorable ones (variation selectors, fillers), line and
  * paragraph separators, and blank-looking letters. The same set the gateway
  * refuses in new proposals; this covers older pending ones and personas
- * written on the host.
+ * written on the host. Every space other than the plain one (no-break,
+ * narrow, figure and the rest of Zs) is shown too: a run of them pushes text
+ * out of view in a box that doesn't wrap (MindStone-Agent #104 review).
  */
 const NON_PRINTING =
-  /[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029\u2800\u3164\uFFA0\u115F\u1160]/gu;
+  /[^\P{C}\n\t]|\p{Default_Ignorable_Code_Point}|[\u2028\u2029\u2800\u3164\uFFA0\u115F\u1160]|[^\P{Zs} ]/gu;
 
 export function visibleText(text: string): string {
   return text.replace(NON_PRINTING, (char) => {

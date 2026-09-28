@@ -15,8 +15,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
 import type { TranslationKeys } from '~/hooks';
-import { useLocalize } from '~/hooks';
 import { visibleText } from './visibleText';
+import { useLocalize } from '~/hooks';
 
 type Summary = {
   id: string;
@@ -79,35 +79,93 @@ function errorBody(error: unknown): { error?: string; code?: string } {
   };
 }
 
-/** A proposed skill as the admin reads it: every field that will be installed. */
-function skillText(skill: NonNullable<Detail['skill']>): string {
-  const list = (title: string, items?: string[]) =>
-    items && items.length ? [`${title}:`, ...items.map((item) => `- ${item}`), ''] : [];
-  return [
-    `${skill.label} (${skill.id})`,
-    skill.description,
-    '',
-    ...(skill.goal ? [`Goal: ${skill.goal}`, ''] : []),
-    ...list('When to use it', skill.whenToUse),
-    ...list('What it produces', skill.outputs),
-    ...list('Safety notes', skill.safetyNotes),
-    ...(skill.instructions ? ['Instructions:', skill.instructions] : []),
-  ].join('\n');
-}
-
 /** What the admin is about to approve or reject, as plain text. */
 function payloadText(detail: Detail): string {
   if (detail.send) return detail.send.text ?? '';
   if (detail.memory) return detail.memory.content;
   if (detail.mutation) return JSON.stringify(detail.mutation, null, 2);
-  // Model-written, so any non-printing character is shown, never hidden (as for personas).
-  if (detail.skill) return visibleText(skillText(detail.skill));
   return '';
 }
 
-/** A persona approval's summary carries the proposed name, so it is shown the same way. */
+/** A persona's or a skill's summary carries text the agent wrote, so it is shown the same way. */
 function summaryText(action: Summary): string {
-  return action.kind === 'persona_create' ? visibleText(action.summary) : action.summary;
+  return action.kind === 'persona_create' || action.kind === 'skill_install'
+    ? visibleText(action.summary)
+    : action.summary;
+}
+
+/** More than two blank lines in a row are shown as a marker, so text can't hide below them. */
+export function collapseBlankRuns(text: string, marker: (count: number) => string): string {
+  return text.replace(/\n(?:[ \t]*\n){3,}/g, (run) => {
+    const blank = run.split('\n').length - 2;
+    return `\n\n${marker(blank)}\n\n`;
+  });
+}
+
+/**
+ * The proposed skill, field by field (MindStone-Agent #104), so a field can't
+ * pose as another: React renders every value as text, non-printing characters
+ * are shown, long runs of blank lines are marked, and nothing is pushed out of
+ * view sideways.
+ */
+function SkillFields({ skill }: { skill: NonNullable<Detail['skill']> }) {
+  const localize = useLocalize();
+  const cell = 'overflow-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-sm';
+  const shown = (value: string) =>
+    collapseBlankRuns(visibleText(value), (count) =>
+      localize('com_mindstone_appr_skill_blank_lines', { 0: String(count) }),
+    );
+  const row = (label: TranslationKeys, value: string | undefined) =>
+    value ? (
+      <div>
+        <dt className="text-xs font-medium text-text-secondary">{localize(label)}</dt>
+        <dd className={cell}>{shown(value)}</dd>
+      </div>
+    ) : null;
+  const list = (label: TranslationKeys, items?: string[]) =>
+    items?.length ? (
+      <div>
+        <dt className="text-xs font-medium text-text-secondary">{localize(label)}</dt>
+        <dd className="overflow-hidden break-words [overflow-wrap:anywhere]">
+          <ul className="list-disc pl-5 text-sm">
+            {items.map((item, index) => (
+              <li key={index} className="whitespace-pre-wrap">
+                {shown(item)}
+              </li>
+            ))}
+          </ul>
+        </dd>
+      </div>
+    ) : null;
+  const instructions = skill.instructions ?? '';
+  return (
+    <dl
+      className="flex flex-col gap-2 rounded bg-surface-secondary p-2"
+      data-testid="ms-appr-skill"
+    >
+      {row('com_mindstone_skill_field_label', skill.label)}
+      {row('com_mindstone_skill_field_id', skill.id)}
+      {row('com_mindstone_skill_field_description', skill.description)}
+      {row('com_mindstone_skill_field_goal', skill.goal)}
+      {list('com_mindstone_skill_field_when', skill.whenToUse)}
+      {list('com_mindstone_skill_field_outputs', skill.outputs)}
+      {list('com_mindstone_skill_field_safety', skill.safetyNotes)}
+      {instructions ? (
+        <div>
+          <dt className="text-xs font-medium text-text-secondary">
+            {localize('com_mindstone_skill_field_instructions')}{' '}
+            <span data-testid="ms-appr-skill-size">
+              {localize('com_mindstone_appr_skill_size', {
+                0: String(instructions.length),
+                1: String(instructions.split('\n').length),
+              })}
+            </span>
+          </dt>
+          <dd className={`${cell} max-h-80 overflow-y-auto font-mono`}>{shown(instructions)}</dd>
+        </div>
+      ) : null}
+    </dl>
+  );
 }
 
 /** The proposed persona, field by field. React renders every value as text. */
@@ -347,8 +405,10 @@ export default function MindStoneApprovalsView() {
                   </>
                 )}
               </>
-            ) : (
-              <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded bg-surface-secondary p-2 text-sm">
+            ) : null}
+            {detail.skill && <SkillFields skill={detail.skill} />}
+            {!detail.persona && !detail.skill && (
+              <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-secondary p-2 text-sm">
                 {payloadText(detail)}
               </pre>
             )}

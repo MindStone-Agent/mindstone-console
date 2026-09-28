@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
 import type { TranslationKeys } from '~/hooks';
+import { visibleText } from './visibleText';
 import { useLocalize } from '~/hooks';
 
 type Source = 'installed' | 'draft' | 'builtin';
@@ -196,9 +197,11 @@ export default function MindStoneSkillsView() {
       await load();
       await open(detail.id, 'installed');
     } catch (error) {
-      const { error: text, code } = errorBody(error);
+      const { error: text, code, status } = errorBody(error);
       setInstallExists(code === 'skill_exists');
       setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') });
+      // Advanced settings may have run out (they last an hour): read them again, so the page says so.
+      if (status === 403) await load();
     } finally {
       setBusy(false);
     }
@@ -282,7 +285,7 @@ export default function MindStoneSkillsView() {
         <span className="font-medium">{localize(label)}</span>
         <ul className="ml-5 list-disc">
           {items.map((item, index) => (
-            <li key={index}>{item}</li>
+            <li key={index}>{visibleText(item)}</li>
           ))}
         </ul>
       </div>
@@ -340,14 +343,14 @@ export default function MindStoneSkillsView() {
                         disabled={Boolean(skill.error)}
                         onClick={() => void open(skill.id, source)}
                       >
-                        <span className="text-sm font-medium">{skill.label}</span>{' '}
+                        <span className="text-sm font-medium">{visibleText(skill.label)}</span>{' '}
                         <span className="font-mono text-xs text-text-secondary">{skill.id}</span>{' '}
                         <span className="text-xs text-text-secondary">
                           · {localize(stateOf(skill))}
                         </span>
                         <br />
                         <span className="text-xs text-text-secondary">
-                          {skill.error ?? skill.description}
+                          {skill.error ?? visibleText(skill.description ?? '')}
                         </span>
                       </button>
                       {source === 'builtin' && !skill.error && (
@@ -396,7 +399,9 @@ export default function MindStoneSkillsView() {
                   <option value="">{localize('com_mindstone_skill_from_scratch')}</option>
                   {builtins.map((skill) => (
                     <option key={skill.id} value={skill.id}>
-                      {localize('com_mindstone_skill_from_builtin', { 0: skill.label })}
+                      {localize('com_mindstone_skill_from_builtin', {
+                        0: visibleText(skill.label),
+                      })}
                     </option>
                   ))}
                 </select>
@@ -483,25 +488,27 @@ export default function MindStoneSkillsView() {
         {detail && (
           <section className={card} aria-labelledby="ms-skill-detail">
             <h2 id="ms-skill-detail" className="mb-1 text-lg font-medium">
-              {detail.label}
+              {visibleText(detail.label)}
             </h2>
             <p className="mb-2 text-xs text-text-secondary">
               <span className="font-mono">{detail.id}</span> · {localize(stateOf(detail))}
               {detail.version ? ` · ${detail.version}` : ''}
             </p>
-            {detail.description && <p className="mb-2 text-sm">{detail.description}</p>}
+            {detail.description && (
+              <p className="mb-2 break-words text-sm">{visibleText(detail.description)}</p>
+            )}
             {detail.goal && (
               <p className="mb-2 text-sm">
                 <span className="font-medium">{localize('com_mindstone_skill_field_goal')}</span>{' '}
-                {detail.goal}
+                {visibleText(detail.goal)}
               </p>
             )}
             {list('com_mindstone_skill_field_when', detail.whenToUse)}
             {list('com_mindstone_skill_field_outputs', detail.outputs)}
             {list('com_mindstone_skill_field_safety', detail.safetyNotes)}
             <p className="mb-1 text-sm font-medium">{localize('com_mindstone_skill_markdown')}</p>
-            <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded bg-surface-secondary p-2 text-sm">
-              {detail.skillMarkdown}
+            <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-secondary p-2 text-sm [overflow-wrap:anywhere]">
+              {visibleText(detail.skillMarkdown)}
             </pre>
             {detail.source === 'draft' && !confirmDiscard && (
               <div className="mt-3 flex gap-2">

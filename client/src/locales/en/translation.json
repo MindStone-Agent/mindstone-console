@@ -3168,6 +3168,8 @@
   "com_mindstone_skill_discarded": "Discarded the draft {{0}}.",
   "com_mindstone_appr_confirm_skill": "Approving installs this skill. It is active from your next message.",
   "com_mindstone_appr_skill_replace": "Replace the installed skill",
+  "com_mindstone_appr_skill_blank_lines": "[{{0}} blank lines]",
+  "com_mindstone_appr_skill_size": "({{0}} characters, {{1}} lines)",
   "com_mindstone_confirmation_hint": "Type: {{0}}",
   "com_mindstone_setup_banner": "MindStone isn't set up yet.",
   "com_mindstone_setup_banner_action": "Set up MindStone",
