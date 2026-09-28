@@ -936,6 +936,84 @@ export function promptFilesWith(text: string): { checked: string[]; found: strin
   };
 }
 
+// J11 (enterprise endpoint, MindStone-Agent #126). Shared with lib/enterprise.selftest.mjs, so the self-test runs the
+// same PENDING decision and the same judging of the stub's request log.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const enterprise = require('./enterprise-evidence.js') as {
+  ENDPOINT_PATH: string;
+  RESPONSES_PATH: string;
+  API_VERSION: string;
+  j11Decision: (arg: { kindOffered: boolean; formPresent: boolean; expectEnterprise: boolean }) => { verdict: 'run' | 'pending' | 'fail'; why: string };
+  readStubLog: (file: string) => { entries: StubEntry[]; unreadable: number; missing: boolean };
+  stubProof: (entries: StubEntry[], opts: { sinceMs?: number; nonce?: string; path?: string; apiVersion?: string }) => { matched?: StubEntry; recent: string[]; reasons: string[] };
+};
+export const { j11Decision } = enterprise;
+
+/** One request the stub Azure endpoint recorded (lib/azure-stub.mjs): no key, no credential values, no body. */
+export type StubEntry = {
+  n: number;
+  at: string;
+  method: string;
+  path: string;
+  apiVersion: string | null;
+  auth: 'ok' | 'wrong' | 'missing';
+  status: number;
+  answered: string;
+  tokenSent: boolean;
+  keyOutsideApiKeyHeader: boolean;
+  forbiddenCredentialSeen: string[];
+  body: { bytes: number; model?: string; stream?: boolean; lastUserText?: string };
+};
+
+/**
+ * The stub Azure OpenAI endpoint run-journey.sh started for J11: its origin, the Endpoint J11 types
+ * (`<origin>/openai/v1`, like a real resource's), the deployment name, the per-run token its replies
+ * carry, the fake key's file and the request log. Undefined when the harness didn't start one.
+ */
+export function enterpriseStub():
+  | { url: string; endpoint: string; deployment: string; token: string; keyFile: string; log: string }
+  | undefined {
+  const url = process.env.UAT_ENT_STUB_URL ?? '';
+  const token = process.env.UAT_ENT_TOKEN ?? '';
+  const keyFile = process.env.UAT_ENT_KEY_FILE ?? '';
+  const log = process.env.UAT_ENT_STUB_LOG ?? '';
+  if (!url || !token || !keyFile || !log) return undefined;
+  return {
+    url,
+    endpoint: `${url}${enterprise.ENDPOINT_PATH}`,
+    deployment: process.env.UAT_ENT_DEPLOYMENT ?? 'uat-gpt-4o',
+    token,
+    keyFile,
+    log,
+  };
+}
+
+/** Whether the stub answers its health route; a stub that doesn't answer is a STALL (recorded), like any harness request. */
+export async function stubHealth(url: string): Promise<number> {
+  const response = await stall.nodeFetch(`${url}/__stub/health`, { timeoutMs: API_TIMEOUT_MS }).catch(stallRecorded);
+  return response.status;
+}
+
+/**
+ * Waits (polling the request log, up to `timeoutMs`) until the stub's log proves the step's call
+ * (lib/enterprise-evidence.js stubProof). The stub logs a request before it answers it, so the proof is
+ * usually there at once. Returns the last judgement either way.
+ */
+export async function waitForStubProof(
+  page: Page,
+  log: string,
+  opts: { sinceMs: number; nonce?: string },
+  timeoutMs = 15_000,
+): Promise<ReturnType<typeof enterprise.stubProof> & { entries: StubEntry[] }> {
+  const started = Date.now();
+  for (;;) {
+    const { entries } = enterprise.readStubLog(log);
+    const proof = enterprise.stubProof(entries, opts);
+    if (!proof.reasons.length || Date.now() - started >= timeoutMs) return { ...proof, entries };
+    await page.waitForTimeout(1_000);
+  }
+}
+
 /** Text that means the Console showed an error, not an answer. */
 export const ERROR_REPLY =
   /(routing_error|no model route|something went wrong|an error occurred|error occurred while|\b(401|403|404|500|501|502|503)\b.*(error|unauthorized|not implemented)|ECONNREFUSED|fetch failed)/i;

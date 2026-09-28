@@ -56,9 +56,20 @@ REQUIRED_STEPS="S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 J9 X1 X2 X
 # The demo subset: everything but the features still being built (J7 Skill Builder, J8 persona drafting).
 # J9 (memory recall across chats) is on the demo path, so it stays in: while it is PENDING, the subset is NOT PASSED.
 DEMO_STEPS="${REQUIRED_STEPS/ J7 J8/}"
+# J11 (an enterprise Azure OpenAI endpoint, MindStone-Agent #126) always runs and always has its row, but it is
+# in the gate only with UAT_EXPECT_ENTERPRISE=1 (like UAT_EXPECT_FLOW for J2), and never in the DEMO SUBSET:
+# a J11 PENDING, FAIL or stall doesn't change either line unless the flag puts it in the gate.
+OPTIONAL_STEPS="J11"
+EXPECT_ENTERPRISE="${UAT_EXPECT_ENTERPRISE:-0}"
+[[ "${EXPECT_ENTERPRISE}" == 1 ]] && REQUIRED_STEPS="${REQUIRED_STEPS} J11"
+# The steps each verdict leaves out, Playwright's exit and stalls included (lib/gate-rows.mjs).
+GATE_UNCOUNTED="$([[ "${EXPECT_ENTERPRISE}" == 1 ]] || echo J11)"
+DEMO_UNCOUNTED="J11"
 T0=$(date +%s)
 GW_PORT=""
 CONSOLE_PORT=""
+ENT_STUB_PORT=""
+ENT_STUB_PID=""
 COMPOSE_STARTED=0
 CURRENT_STEP=""
 FATAL=""
@@ -124,6 +135,7 @@ case "${SCRATCH}" in
   "${HOME}"/Projects/*|"${HOME}/.mindstone"*|"${HOME}/.openclaw"*|"${HOME}/.pi"*) die "refusing scratch dir ${SCRATCH}" ;;
 esac
 [[ -e "${SCRATCH}" ]] && die "scratch dir already exists: ${SCRATCH} (set UAT_RUN_ID to something new)"
+[[ "${EXPECT_ENTERPRISE}" == 0 || "${EXPECT_ENTERPRISE}" == 1 ]] || die "UAT_EXPECT_ENTERPRISE must be 0 or 1, not ${EXPECT_ENTERPRISE}"
 # NODE_OPTIONS can preload code into every node process the harness starts (the spec, the
 # checks, the gateway): a run with it set proves nothing. Recorded in provenance as empty.
 if [[ -n "${NODE_OPTIONS:-}" ]]; then
@@ -141,10 +153,10 @@ port_free() {
   return 0
 }
 
-pick_port() {
+pick_port() { # pick_port [port to skip ...]
   local p
   for ((p = PORT_MIN; p <= PORT_MAX; p++)); do
-    [[ "$p" == "${1:-}" ]] && continue
+    [[ " $* " == *" $p "* ]] && continue
     if port_free "$p"; then printf '%s' "$p"; return 0; fi
   done
   return 1
@@ -172,6 +184,29 @@ msa_env() {
 }
 
 mindstone() { (cd "${MSA_DIR}" && msa_env ./node_modules/.bin/mindstone "$@"); }
+
+# `mindstone gateway start|restart`, with one addition for J11: MindStone-Agent #126 lets an enterprise
+# endpoint be a loopback or private host (plain http on loopback only) only when the gateway's own
+# environment has MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1, never from the Console. J11's stub Azure endpoint is
+# on 127.0.0.1, so the gateway the harness starts has it; no other command gets it. The CLI passes its
+# environment to the gateway it spawns. (A gateway without #126 ignores it.)
+gateway_cmd() { (cd "${MSA_DIR}" && msa_env MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1 ./node_modules/.bin/mindstone gateway "$@"); }
+
+# stop_ent_stub: stops J11's stub Azure endpoint, if this run started it (only that process: its PID, and only
+# while that PID is still the stub from this checkout), then anything left listening on its port that is.
+stop_ent_stub() {
+  local pid
+  if [[ "${ENT_STUB_PID}" =~ ^[0-9]+$ ]] && ps -o command= -p "${ENT_STUB_PID}" 2>/dev/null | grep -qF "${HERE}/lib/azure-stub.mjs"; then
+    kill "${ENT_STUB_PID}" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "${ENT_STUB_PID}" 2>/dev/null || break; sleep 0.3; done
+  fi
+  if [[ -n "${ENT_STUB_PORT}" ]] && command -v lsof >/dev/null 2>&1; then
+    for pid in $(lsof -nP -t -iTCP:"${ENT_STUB_PORT}" -sTCP:LISTEN 2>/dev/null); do
+      if ps -o command= -p "${pid}" 2>/dev/null | grep -qF "${HERE}/lib/azure-stub.mjs"; then kill "${pid}" 2>/dev/null; fi
+    done
+  fi
+  return 0
+}
 
 # Compose, as the README runs it (from mindstone/), in our own project with the port override.
 compose() { (cd "${COMPOSE_DIR}" && COMPOSE_PROJECT_NAME="${PROJECT}" COMPOSE_FILE="docker-compose.yml:${OVERRIDE_FILE}" docker compose "$@"); }
@@ -252,6 +287,7 @@ teardown() {
     record "${CURRENT_STEP}" FAIL "(interrupted in this step)" "${LOG_DIR}" "${FATAL:-exit ${rc}}"
   fi
 
+  stop_ent_stub
   if [[ "${COMPOSE_STARTED}" == 1 || -d "${COMPOSE_DIR}" ]] && [[ -f "${OVERRIDE_FILE}" ]]; then
     compose logs --no-color --timestamps console >"${LOG_DIR}/console.log" 2>&1
     compose logs --no-color --timestamps mongodb >"${LOG_DIR}/mongodb.log" 2>&1
@@ -326,21 +362,24 @@ teardown() {
 
   if [[ "${STARTED}" == 1 ]]; then
     # X4: nothing left behind (what the run was asked to keep doesn't count).
-    local n_cont n_vol img scratch_left port_left leftovers=()
+    local n_cont n_vol img scratch_left port_left stub_left leftovers=()
     n_cont=$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null | wc -l | tr -d ' ')
     n_vol=$(docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null | wc -l | tr -d ' ')
     img=$(docker image inspect "${PROJECT}-console:local" >/dev/null 2>&1 && echo present || echo removed)
     scratch_left=$([[ -e "${SCRATCH}" ]] && echo yes || echo no)
     port_left=$([[ -n "${GW_PORT}" ]] && ! port_free "${GW_PORT}" && echo yes || echo no)
+    stub_left=$({ [[ -n "${ENT_STUB_PORT}" ]] && ! port_free "${ENT_STUB_PORT}"; } || { [[ "${ENT_STUB_PID}" =~ ^[0-9]+$ ]] && kill -0 "${ENT_STUB_PID}" 2>/dev/null; } && echo yes || echo no)
     {
       echo "containers: ${n_cont}"; echo "volumes: ${n_vol}"; echo "image ${PROJECT}-console:local: ${img}"
       echo "scratch exists: ${scratch_left}"; echo "gateway port ${GW_PORT:-none} listening: ${port_left}"
+      echo "J11 stub (port ${ENT_STUB_PORT:-none}) still running: ${stub_left}"
     } >"${EVIDENCE}/cleanup.txt" 2>/dev/null
     [[ "${n_cont}" == 0 ]] || leftovers+=("${n_cont} containers")
     [[ "${n_vol}" == 0 ]] || leftovers+=("${n_vol} volumes")
     [[ "${img}" == removed || "${UAT_KEEP_IMAGE:-0}" == 1 ]] || leftovers+=("the image")
     [[ "${scratch_left}" == no || "${UAT_KEEP_SCRATCH:-0}" == 1 ]] || leftovers+=("the scratch dir")
     [[ "${port_left}" == no ]] || leftovers+=("a listener on ${GW_PORT}")
+    [[ "${stub_left}" == no ]] || leftovers+=("the J11 stub Azure endpoint (port ${ENT_STUB_PORT})")
     if [[ ${#leftovers[@]} -eq 0 ]]; then
       record X4 PASS "cleanup: nothing left behind" "${EVIDENCE}/cleanup.txt" "$(tr '\n' ';' <"${EVIDENCE}/cleanup.txt")"
     else
@@ -396,21 +435,34 @@ summary() {
       fi
     done
   }
-  local common=() line
+  local common=() gate_only=() demo_only=() line
   while IFS=$'\t' read -r id _ || [[ -n "${id}" ]]; do
     [[ -z "${id}" ]] && continue
-    [[ " ${REQUIRED_STEPS} " == *" ${id} "* ]] || common+=("unknown row ${id}")
+    [[ " ${REQUIRED_STEPS} ${OPTIONAL_STEPS} " == *" ${id} "* ]] || common+=("unknown row ${id}")
   done <"${STEPS_TSV}"
-  [[ "${PW_RC}" == 0 ]] || common+=("playwright exit ${PW_RC}")
+  # Playwright's exit: a non-zero exit counts against a verdict unless every failed test is a step that verdict
+  # leaves out (J11 for the DEMO SUBSET, and for the gate without UAT_EXPECT_ENTERPRISE=1; lib/gate-rows.mjs).
+  pw_explained_by() {
+    [[ $# -gt 0 && "${PW_RC}" == 1 ]] || return 1
+    node "${HERE}/lib/gate-rows.mjs" "${EVIDENCE}/playwright/results.json" "$@" >>"${LOG_DIR}/gate-rows.log" 2>&1
+  }
+  if [[ "${PW_RC}" != 0 ]]; then
+    pw_explained_by ${GATE_UNCOUNTED} || gate_only+=("playwright exit ${PW_RC}")
+    pw_explained_by ${DEMO_UNCOUNTED} || demo_only+=("playwright exit ${PW_RC}")
+  fi
   [[ "${rc}" == 0 ]] || common+=("harness exit ${rc}${FATAL:+ (${FATAL})}")
   [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" != 0 ]] && common+=("self-test sabotage on (UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES})")
   # Stalls (lib/journey.ts recordStall): a request or page load that never answered. Their steps are
   # FAIL already; this says, at a glance, that the run hit the environment, and never lets it pass.
-  local stalls_n=0 stalls_line="none"
+  # A stall in a step a verdict leaves out (J11, see above) is listed, but doesn't count against that verdict.
+  local stalls_n=0 stalls_line="none" n
   if [[ -s "${EVIDENCE}/stalls.tsv" ]]; then
     stalls_n=$(grep -c . "${EVIDENCE}/stalls.tsv")
     stalls_line="${stalls_n}: $(awk -F'\t' '{printf "%s%s %s", (NR>1 ? "; " : ""), $1, $2}' "${EVIDENCE}/stalls.tsv")"
-    common+=("${stalls_n} stall(s)")
+    n=$(awk -F'\t' -v skip=" ${GATE_UNCOUNTED} " 'NF && index(skip, " " $1 " ") == 0' "${EVIDENCE}/stalls.tsv" | wc -l | tr -d ' ')
+    [[ "${n}" == 0 ]] || gate_only+=("${n} stall(s)")
+    n=$(awk -F'\t' -v skip=" ${DEMO_UNCOUNTED} " 'NF && index(skip, " " $1 " ") == 0' "${EVIDENCE}/stalls.tsv" | wc -l | tr -d ' ')
+    [[ "${n}" == 0 ]] || demo_only+=("${n} stall(s)")
   fi
 
   # Provenance, checked again at the end: the harness must not change during the run either.
@@ -426,6 +478,12 @@ summary() {
   while IFS= read -r line; do [[ -n "${line}" ]] && reasons+=("${line}"); done < <(row_reasons ${REQUIRED_STEPS})
   while IFS= read -r line; do [[ -n "${line}" ]] && demo_reasons+=("${line}"); done < <(row_reasons ${DEMO_STEPS})
   if [[ ${#common[@]} -gt 0 ]]; then reasons+=("${common[@]}"); demo_reasons+=("${common[@]}"); fi
+  if [[ ${#gate_only[@]} -gt 0 ]]; then reasons+=("${gate_only[@]}"); fi
+  if [[ ${#demo_only[@]} -gt 0 ]]; then demo_reasons+=("${demo_only[@]}"); fi
+  # J11, on its own line: its row, and whether this run's gate counts it.
+  local j11_status j11_line
+  j11_status=$(awk -F'\t' '$1=="J11"{print $2; exit}' "${STEPS_TSV}" 2>/dev/null)
+  j11_line="J11 enterprise endpoint (Azure OpenAI / Foundry): ${j11_status:-MISSING}; $([[ "${EXPECT_ENTERPRISE}" == 1 ]] && echo "in the gate (UAT_EXPECT_ENTERPRISE=1)" || echo "not in the gate (set UAT_EXPECT_ENTERPRISE=1 to require it)"); never in the DEMO SUBSET"
 
   if [[ -f "${EVIDENCE}/findings.md" ]]; then
     echo; log "README findings (followed literally):"; sed 's/^/  /' "${EVIDENCE}/findings.md"
@@ -460,6 +518,7 @@ summary() {
     demo="NOT PASSED${override}: ${demo_reasons[*]}"
     log "${c_red}DEMO SUBSET (J1–J6, J9 + S/C/X): NOT PASSED${override}${c_reset} (${demo_reasons[*]})"
   fi
+  log "$(colour_for "${j11_status:-MISSING}")${j11_line}${c_reset}"
   local ran_by="${UAT_RAN_BY:-unnamed (set UAT_RAN_BY)}"
   local fingerprint
   fingerprint=$(printf '%s@%s' "${USER:-?}" "$(hostname 2>/dev/null)" | shasum -a 256 2>/dev/null | cut -c1-12)
@@ -471,6 +530,8 @@ summary() {
     echo "**GATE: ${gate}**"
     echo
     echo "**DEMO SUBSET (J1–J6, J9 + S/C/X): ${demo}**"
+    echo
+    echo "**${j11_line}.**"
     echo
     echo "Setup flow driven: **$(cut -f2 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo 'not detected (J2 did not get that far)')** (\`$(cut -f1 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo none)\`)."
     echo
@@ -493,6 +554,7 @@ summary() {
     echo "- harness commit: \`$(git -C "${CONSOLE_HARNESS_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)\`"
     echo "- NODE_OPTIONS: empty (the harness refuses to run with it set)"
     [[ -n "${UAT_EXPECT_FLOW:-}" ]] && echo "- expected setup flow: \`${UAT_EXPECT_FLOW}\` (UAT_EXPECT_FLOW; J2 fails on a mismatch)"
+    echo "- enterprise endpoint expected: $([[ "${EXPECT_ENTERPRISE}" == 1 ]] && echo '**yes** (`UAT_EXPECT_ENTERPRISE=1`: J11 is in the gate and FAILs without the enterprise form)' || echo 'no (`UAT_EXPECT_ENTERPRISE` unset: J11 is PENDING without the enterprise form, and not in the gate)')"
     [[ "${MSA_REPO}" != "${MSA_REPO_DEFAULT}" ]] && echo "- **MindStone-Agent repo overridden:** \`${MSA_REPO}\` (install.sh from \`${MSA_RAW}\`)"
     [[ "${MSA_RAW}" != "https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent" && "${MSA_REPO}" == "${MSA_REPO_DEFAULT}" ]] && echo "- **install.sh source overridden:** \`${MSA_RAW}\`"
     [[ "${CONSOLE_REPO}" != "https://github.com/MindStone-Agent/mindstone-console.git" ]] && echo "- **mindstone-console repo overridden:** \`${CONSOLE_REPO}\`"
@@ -560,6 +622,7 @@ CONSOLE_URL="http://localhost:${CONSOLE_PORT}"
   echo "harness_dirty=${HARNESS_DIRTY}"
   echo "node_options=${NODE_OPTIONS:-}"
   echo "expect_flow=${UAT_EXPECT_FLOW:-}"
+  echo "expect_enterprise=${EXPECT_ENTERPRISE}"
   echo "node=$(node --version)"; echo "docker=$(docker --version 2>/dev/null)"; echo "os=$(uname -sm)"
   echo "started=$(date -u +%FT%TZ)"
 } >"${EVIDENCE}/run.env"
@@ -732,7 +795,8 @@ CURRENT_STEP=S3
 if grep -q 19789 "${MSA_README}" && ! grep -q MINDSTONE_AGENT_GATEWAY_PORT "${MSA_README}"; then
   finding F-MSA-3 "MindStone-Agent README hard-codes port 19789 (steps 3 and 5) and never says how to change it. The listener takes \`MINDSTONE_AGENT_GATEWAY_PORT\` from the environment (and \`mindstone gateway restart\` needs the same variable every time), while \`status\`/\`restart\` health checks read \`gateway.port\` from config.json; both have to agree."
 fi
-mindstone gateway start >"${LOG_DIR}/gateway-start.log" 2>&1 || true
+deviation "The gateway is started (and restarted) with \`MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1\` in its environment: the gateway host's own switch (MindStone-Agent #126) that lets an enterprise endpoint be a loopback or private host, which J11's stub Azure endpoint on 127.0.0.1 needs. A gateway without #126 ignores it."
+gateway_cmd start >"${LOG_DIR}/gateway-start.log" 2>&1 || true
 ok=0
 for _ in $(seq 1 60); do
   if curl -sf -m 2 "${GW_URL}/health" >/dev/null 2>&1; then ok=1; break; fi
@@ -788,7 +852,7 @@ if printf '%s' "${step54}" | grep -q 'mindstone config --section routing' \
 fi
 # 5.5 macOS: host.docker.internal needs nothing; Linux: bridge address (handled by msa_env).
 # 5.6 restart, since the gateway was started with `gateway start`
-mindstone gateway restart >"${LOG_DIR}/gateway-restart.log" 2>&1 || true
+gateway_cmd restart >"${LOG_DIR}/gateway-restart.log" 2>&1 || true
 for _ in $(seq 1 60); do curl -sf -m 2 "${GW_URL}/health" >/dev/null 2>&1 && break; sleep 1; done
 # The README's checks: with the token 200, without 401 (headers from files, not argv).
 with=$(curl -s -o /dev/null -w '%{http_code}' -H @"${SECRETS_DIR}/h-auth" "${GW_URL}/v1/models")
@@ -985,22 +1049,60 @@ interruptible env NODE_PATH="${PW_NODE_PATH}" "${PW_BIN}" "${PW_INSTALL_ARGS[@]}
 # X5: the on-screen check's own controls, in a real Chromium page (no Console needed), and the
 # stall detection's (console #30): a request or page load that never answers must fail as a named STALL.
 CURRENT_STEP=X5
-x5_screen=0; x5_stall=0
+# J11's own pieces too (offline): the stub Azure endpoint's key check and redaction, the stub-log proof, the
+# PENDING decision, and the gate's rule that an ungated step's failure doesn't count (lib/enterprise.selftest.mjs).
+x5_screen=0; x5_stall=0; x5_ent=0
 NODE_PATH="${PW_NODE_PATH}" node "${HERE}/lib/screen-check.selftest.mjs" >"${LOG_DIR}/screen-check-selftest.log" 2>&1 || x5_screen=$?
 NODE_PATH="${PW_NODE_PATH}" UAT_PORT_MIN="${PORT_MIN}" UAT_PORT_MAX="${PORT_MAX}" \
   node "${HERE}/lib/stall.selftest.mjs" >"${LOG_DIR}/stall-selftest.log" 2>&1 || x5_stall=$?
-x5_notes="$(tail -n 1 "${LOG_DIR}/screen-check-selftest.log"); $(tail -n 1 "${LOG_DIR}/stall-selftest.log")"
-if [[ "${x5_screen}" == 0 && "${x5_stall}" == 0 ]]; then
-  record X5 PASS "the on-screen check's self-test (a reply only in the user's bubble, or hidden, is not found) and the stall self-test (no answer is a named STALL, within its timeout)" \
-    "$(rel "${LOG_DIR}/screen-check-selftest.log"), $(rel "${LOG_DIR}/stall-selftest.log")" "${x5_notes}"
+UAT_PORT_MIN="${PORT_MIN}" UAT_PORT_MAX="${PORT_MAX}" \
+  node "${HERE}/lib/enterprise.selftest.mjs" >"${LOG_DIR}/enterprise-selftest.log" 2>&1 || x5_ent=$?
+x5_notes="$(tail -n 1 "${LOG_DIR}/screen-check-selftest.log"); $(tail -n 1 "${LOG_DIR}/stall-selftest.log"); $(tail -n 1 "${LOG_DIR}/enterprise-selftest.log")"
+x5_evidence="$(rel "${LOG_DIR}/screen-check-selftest.log"), $(rel "${LOG_DIR}/stall-selftest.log"), $(rel "${LOG_DIR}/enterprise-selftest.log")"
+if [[ "${x5_screen}" == 0 && "${x5_stall}" == 0 && "${x5_ent}" == 0 ]]; then
+  record X5 PASS "the on-screen check's self-test (a reply only in the user's bubble, or hidden, is not found), the stall self-test (no answer is a named STALL, within its timeout) and J11's (the stub endpoint takes only its key, and logs none)" \
+    "${x5_evidence}" "${x5_notes}"
 else
-  record X5 FAIL "$([[ "${x5_screen}" == 0 ]] || echo "the on-screen check failed its self-test")$([[ "${x5_screen}" != 0 && "${x5_stall}" != 0 ]] && echo "; ")$([[ "${x5_stall}" == 0 ]] || echo "the stall detection failed its self-test")" \
-    "$(rel "${LOG_DIR}/screen-check-selftest.log"), $(rel "${LOG_DIR}/stall-selftest.log")" "${x5_notes}"
+  x5_failed=()
+  [[ "${x5_screen}" == 0 ]] || x5_failed+=("the on-screen check failed its self-test")
+  [[ "${x5_stall}" == 0 ]] || x5_failed+=("the stall detection failed its self-test")
+  [[ "${x5_ent}" == 0 ]] || x5_failed+=("J11's pieces failed their self-test")
+  record X5 FAIL "$(IFS=';'; echo "${x5_failed[*]}" | sed 's/;/; /g')" "${x5_evidence}" "${x5_notes}"
 fi
 CURRENT_STEP=J
 
 provider_key_file=""
 [[ "${PROVIDER}" == ollama-cloud ]] && provider_key_file="${UAT_PROVIDER_KEY_FILE}"
+
+# J11: the stub Azure OpenAI endpoint (lib/azure-stub.mjs) on a port of our own range, on 127.0.0.1. It takes a
+# FAKE per-run key (generated here into a 0600 file, so X1 treats it as a secret and fails the run if it reaches
+# the evidence) and answers with a per-run token. Its request log (key redacted) goes to the evidence. It is
+# watched as a forbidden destination for the gateway's own token and the admin credential. Stopped on exit.
+# A stub that can't start doesn't stop the run: J11 says so (or is PENDING anyway without the enterprise form).
+ENT_TOKEN="$(printf 'quartz-heron-%s' "$(openssl rand -hex 5)")"
+ENT_DEPLOYMENT="uat-gpt-4o"
+ENT_STUB_URL=""
+(umask 077; printf 'uat-fake-azure-key-%s\n' "$(openssl rand -hex 16)" >"${SECRETS_DIR}/ent-azure-key")
+if ENT_STUB_PORT="$(pick_port "${GW_PORT}" "${CONSOLE_PORT}")"; then
+  UAT_ENT_STUB_PORT="${ENT_STUB_PORT}" UAT_ENT_KEY_FILE="${SECRETS_DIR}/ent-azure-key" UAT_ENT_TOKEN="${ENT_TOKEN}" \
+    UAT_ENT_STUB_LOG="${LOG_DIR}/j11-azure-stub-requests.jsonl" UAT_ENT_STUB_PARENT_PID="$$" \
+    UAT_ENT_FORBIDDEN_FILES="${MSA_DIR}/.runtime/mindstone/secrets/gateway-token:${SECRETS_DIR}/admin-credential" \
+    node "${HERE}/lib/azure-stub.mjs" >"${LOG_DIR}/j11-azure-stub.log" 2>&1 &
+  ENT_STUB_PID=$!
+  for _ in $(seq 1 20); do
+    curl -sf -m 2 "http://127.0.0.1:${ENT_STUB_PORT}/__stub/health" >/dev/null 2>&1 && { ENT_STUB_URL="http://127.0.0.1:${ENT_STUB_PORT}"; break; }
+    kill -0 "${ENT_STUB_PID}" 2>/dev/null || break
+    sleep 0.5
+  done
+fi
+if [[ -n "${ENT_STUB_URL}" ]]; then
+  log "  J11 stub Azure endpoint on port ${ENT_STUB_PORT} (fake per-run key; token ${ENT_TOKEN})"
+  deviation "J11: a stub Azure OpenAI endpoint (\`lib/azure-stub.mjs\`, not part of either README) listens on 127.0.0.1:${ENT_STUB_PORT} with a fake per-run key and stands in for the enterprise's Azure resource. Its request log, key redacted, is \`logs/j11-azure-stub-requests.jsonl\`."
+else
+  log "  ${c_yellow}J11 stub Azure endpoint didn't start (${LOG_DIR}/j11-azure-stub.log)${c_reset}"
+  stop_ent_stub
+fi
+{ echo "ent_stub_port=${ENT_STUB_PORT}"; echo "ent_token=${ENT_TOKEN}"; } >>"${EVIDENCE}/run.env"
 rm -f "${EVIDENCE}/journey-results.tsv" "${EVIDENCE}/journey-state.json" "${EVIDENCE}/journey-flow.txt" "${EVIDENCE}/stalls.tsv"
 set +e
 (cd "${PW_DIR}" && \
@@ -1019,10 +1121,17 @@ set +e
   UAT_GATEWAY_LOG="${MSA_DIR}/.runtime/mindstone/gateway/gateway.log" \
   UAT_TRANSCRIPT_DIR="${MSA_DIR}/.runtime/mindstone/transcripts" \
   UAT_DATA_DIR="${MSA_DIR}/.runtime/mindstone" \
+  UAT_EXPECT_ENTERPRISE="${EXPECT_ENTERPRISE}" \
+  UAT_ENT_STUB_URL="${ENT_STUB_URL}" \
+  UAT_ENT_TOKEN="${ENT_TOKEN}" \
+  UAT_ENT_DEPLOYMENT="${ENT_DEPLOYMENT}" \
+  UAT_ENT_KEY_FILE="${SECRETS_DIR}/ent-azure-key" \
+  UAT_ENT_STUB_LOG="${LOG_DIR}/j11-azure-stub-requests.jsonl" \
   NODE_PATH="${PW_NODE_PATH}" \
   "${PW_BIN}" test --config "${PW_DIR}/playwright.config.ts") 2>&1 | tee "${LOG_DIR}/playwright.log"
 PW_RC=${PIPESTATUS[0]}
 set -e
+stop_ent_stub
 if [[ -f "${EVIDENCE}/journey-results.tsv" ]]; then
   cat "${EVIDENCE}/journey-results.tsv" >>"${STEPS_TSV}"
   [[ -z "$(tail -c 1 "${STEPS_TSV}")" ]] || echo >>"${STEPS_TSV}" # an unterminated last row stays a row

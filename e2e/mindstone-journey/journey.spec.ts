@@ -10,6 +10,10 @@
  * drives it; an unknown list FAILs. J3 and J5 are real tests in the `102`
  * flow and PENDING in `pre-102`. J9 (recall across chats) is PENDING while
  * setup leaves automatic recall off, and real once it's on by default.
+ * J11 (an enterprise Azure OpenAI endpoint, against the harness's stub) is
+ * PENDING while the Console has no enterprise form; it is in the gate only
+ * with UAT_EXPECT_ENTERPRISE=1, and never in the DEMO SUBSET. (J10 is kept
+ * for the persona builder.)
  *
  * PENDING steps first assert the flow's exact state: the setup step list, the
  * gateway's onboarding checklist keys, the links on /mindstone, and 404 from
@@ -35,6 +39,7 @@ import {
   detectFlow,
   ensureMindStoneModel,
   ensureSignedIn,
+  enterpriseStub,
   expectOnScreen,
   fillSecret,
   formationEvidence,
@@ -57,6 +62,9 @@ import {
   waitForReplyTo,
   writeState,
   personaForConversation,
+  j11Decision,
+  stubHealth,
+  waitForStubProof,
 } from './lib/journey';
 import type { FlowName, Reply, StoredMessage } from './lib/journey';
 
@@ -67,6 +75,7 @@ const ISSUES = {
   skills: 'MindStone-Agent#104',
   persona: 'MindStone-Agent#105',
   recall: 'MindStone-Agent#106 (automatic memory recall, on by default)',
+  enterprise: 'MindStone-Agent#126 (enterprise model endpoints)',
 };
 
 /** The phrase as a phone or autocomplete types it: a capital and a trailing space (#18). */
@@ -77,9 +86,10 @@ const TODAY_STATUS_LINKS = ['Run guided setup again', 'Diagnostics', 'Approvals'
 
 /**
  * Left out of the comparison: links inside the #102 checklist items (a step's
- * own "set it up" link), and the #105 Personas link, which J8 checks.
+ * own "set it up" link), the #105 Personas link, which J8 checks, and the
+ * MindStone-Agent #126 Model providers link, which J11 checks.
  */
-const IGNORED_STATUS_LINKS = ['Set up memory', 'Tell the agent about you', 'Personas'];
+const IGNORED_STATUS_LINKS = ['Set up memory', 'Tell the agent about you', 'Personas', 'Model providers'];
 
 /** Steps that judge the state after setup: when J2 failed they report "blocked by J2", not "state changed". */
 const NEEDS_SETUP = /^J[789] /;
@@ -1156,4 +1166,176 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
     const restored = await setAutoRecall(true).catch((error: Error) => ({ status: 0, json: { error: error.message } }));
     note(testInfo, `memory.autoRecall put back on: HTTP ${restored.status}${restored.status >= 300 || restored.status === 0 ? ` ${JSON.stringify(restored.json)}` : ''}`);
   }
+});
+
+/** The provider step's enterprise choice for Azure (the gateway names it "Azure OpenAI / AI Foundry"), and its form. */
+const AZURE_CHOICE = /^Azure OpenAI\b/;
+const AZURE_FORM = 'ms-ent-form-azure-openai';
+
+test('J11 enterprise endpoint (Azure OpenAI / Foundry): saved, tested and chatted through in the UI', async ({}, testInfo) => {
+  testInfo.setTimeout(12 * 60_000);
+  const expectEnterprise = process.env.UAT_EXPECT_ENTERPRISE === '1';
+  testInfo.annotations.push({ type: 'label', description: expectEnterprise ? 'gated: UAT_EXPECT_ENTERPRISE=1' : 'not gated' });
+  await ensureSignedIn(page);
+
+  // Guided setup again, from the settings page's own link, through Access (turned on with the phrase if it's off).
+  await test.step('guided setup, from the settings page', async () => {
+    await navigate(page, '/mindstone');
+    await expect(page.getByRole('heading', { name: 'MindStone settings' })).toBeVisible();
+    await page.locator('section[aria-labelledby="ms-onboarding"] a[href="/mindstone/onboarding"]').first().click();
+    await expect(page).toHaveURL(/\/mindstone\/onboarding$/);
+    const access = await page.waitForFunction(
+      () => {
+        const card = document.querySelector('section[aria-labelledby="ms-onb-access"]');
+        if (!card) return undefined;
+        const hasInput = Boolean(card.querySelector('input[aria-label="Confirmation"]'));
+        const hasNext = Array.from(card.querySelectorAll('button')).some((b) => b.textContent?.trim() === 'Next');
+        return hasInput || hasNext ? { hasInput, hasNext } : undefined;
+      },
+      undefined,
+      { timeout: 30_000 },
+    );
+    const state = (await access.jsonValue()) as { hasInput: boolean; hasNext: boolean };
+    if (state.hasNext) {
+      note(testInfo, 'advanced settings already on: Next');
+      await page.locator('section[aria-labelledby="ms-onb-access"]').getByRole('button', { name: 'Next' }).click();
+    } else {
+      note(testInfo, 'advanced settings off: typed the phrase and turned them on');
+      await page.getByRole('textbox', { name: 'Confirmation' }).fill(TYPED_PHRASE);
+      await page.getByRole('button', { name: 'Turn on' }).click();
+    }
+    await expect(page.getByRole('heading', { name: 'Connect a model provider' })).toBeVisible();
+  });
+
+  // Is the feature here? Positive first: the provider step rendered its choices; only then does "no Azure choice" mean something.
+  const provider = page.locator('section[aria-labelledby="ms-onb-provider"]');
+  await expect(provider.getByRole('radio').first(), 'the provider step lists its choices').toBeVisible({ timeout: 30_000 });
+  const choices = (await provider.locator('label:has(input[type="radio"])').allTextContents()).map((s) => s.trim());
+  const azure = provider.getByRole('radio', { name: AZURE_CHOICE });
+  const kindOffered = (await azure.count()) > 0;
+  if (kindOffered) await azure.first().check();
+  const formPresent = await appears(page.getByTestId(AZURE_FORM), kindOffered ? 10_000 : 1_000);
+  await shot(page, testInfo, 'provider');
+  const listed = await consoleApi<{ enterprise?: { kind: string }[] }>(page, 'GET', '/api/mindstone/admin/models');
+  const gatewayKinds = (listed.json?.enterprise ?? []).map((k) => k.kind);
+  note(testInfo, `provider step: ${choices.join(', ')}; the gateway lists enterprise kinds: ${gatewayKinds.join(', ') || 'none'}`);
+  const decision = j11Decision({ kindOffered, formPresent, expectEnterprise });
+  if (decision.verdict === 'pending') {
+    test.fixme(
+      true,
+      `PENDING ${ISSUES.enterprise}: ${decision.why}. Not gated (set UAT_EXPECT_ENTERPRISE=1 to require it). ` +
+        'Done when: the provider step (and settings) offer Azure OpenAI / AI Foundry with a form (Endpoint, Deployment names, API key, Save endpoint); ' +
+        "saving it against the harness's stub Azure endpoint shows the setup's Test, whose result (ms-ent-test-result) is a success with the stub's token, " +
+        'and the stub logged an authenticated POST <endpoint>/responses?api-version=v1 (the key in api-key); choosing its deployment as the model makes ' +
+        "a chat's reply come from the stub (its token on screen, the chat's own message in the stub's log); and no gateway credential ever reaches the endpoint.",
+    );
+    return;
+  }
+  if (decision.verdict === 'fail') throw new Error(decision.why);
+
+  // The real test. It needs finished setup (J2) and the stub run-journey.sh started.
+  requireSetupDone();
+  const stub = enterpriseStub();
+  if (!stub) throw new Error('no stub Azure endpoint: run J11 through run-journey.sh (UAT_ENT_STUB_URL, UAT_ENT_TOKEN, UAT_ENT_KEY_FILE, UAT_ENT_STUB_LOG)');
+  expect(await stubHealth(stub.url), 'the stub Azure endpoint answers its health route').toBe(200);
+  const model = `enterprise-azure/${stub.deployment}`;
+  const proofs: Record<string, unknown> = {};
+
+  await test.step('save the endpoint: Endpoint, Deployment names, API key (the fake per-run key)', async () => {
+    const form = page.getByTestId(AZURE_FORM);
+    await form.getByLabel(/^Endpoint/).fill(stub.endpoint);
+    await form.getByLabel(/^Deployment names/).fill(stub.deployment);
+    await fillSecret(form.getByLabel(/^API key/), readSecretFile('UAT_ENT_KEY_FILE'));
+    await shot(page, testInfo, 'form');
+    await form.getByRole('button', { name: 'Save endpoint' }).click();
+    const done = page.getByTestId('ms-onb-enterprise-done');
+    const saved = await appears(done, 60_000);
+    const status = ((await page.getByRole('status').first().textContent().catch(() => '')) ?? '').trim();
+    await shot(page, testInfo, 'saved');
+    expect(saved, `the endpoint was saved (ms-onb-enterprise-done); the page says: "${status}"`).toBe(true);
+    note(testInfo, `saved: "${status}"`);
+  });
+
+  await test.step("Test: a success with the stub's token, and the stub saw the authenticated call", async () => {
+    const done = page.getByTestId('ms-onb-enterprise-done');
+    const since = Date.now();
+    await done.getByRole('button', { name: 'Test', exact: true }).click();
+    const result = page.getByTestId('ms-ent-test-result');
+    await expect(result).toBeVisible({ timeout: 120_000 });
+    const text = ((await result.textContent()) ?? '').trim();
+    await shot(page, testInfo, 'test-result');
+    note(testInfo, `Test: "${text}"`);
+    expect(text, 'the Test result is a success ("<model> answered in N ms: <reply>")').toMatch(/ answered in \d+ ms: /);
+    expect(text, "the Test's reply is the stub's (its per-run token)").toContain(stub.token);
+    // UI text alone is not proof: the stub must have answered an authenticated Responses API call.
+    const proof = await waitForStubProof(page, stub.log, { sinceMs: since });
+    proofs.test = { matched: proof.matched, sinceTheClick: proof.recent, reasons: proof.reasons };
+    expect(proof.reasons, 'the stub logged the Test: an authenticated POST <endpoint>/responses?api-version=v1, streamed, answered with the token').toEqual([]);
+    note(testInfo, `stub: Test call #${proof.matched?.n} ${proof.matched?.method} ${proof.matched?.path}?api-version=${proof.matched?.apiVersion}, key ok`);
+  });
+
+  // The enterprise model for chat: the chat's model menu lists agents, not provider models, so the model the agent
+  // chats with is chosen where the UI chooses it, guided setup's Model step (saved as the route's default model).
+  const offered = await test.step('choose its deployment as the model (guided setup, Model step)', async () => {
+    await page.getByTestId('ms-onb-enterprise-done').getByRole('button', { name: 'Save and continue' }).click();
+    await expect(page.getByRole('heading', { name: 'Choose the model' })).toBeVisible();
+    const select = page.getByRole('combobox', { name: 'Choose the model' });
+    const values = (await select.count())
+      ? await select.locator('option').evaluateAll((options) => options.map((o) => (o as HTMLOptionElement).value).filter(Boolean))
+      : [];
+    await attachText(testInfo, 'model-options.txt', values.join('\n'));
+    const wanted = values.find((v) => v === model) ?? '';
+    await shot(page, testInfo, 'model');
+    if (!wanted) return { values };
+    await select.selectOption(wanted);
+    await page.getByRole('button', { name: 'Save and continue' }).click();
+    await expect(page.getByRole('heading', { name: 'Choose a base persona' }), 'the model was saved (setup moved on)').toBeVisible({ timeout: 30_000 });
+    const config = await consoleApi<{ config?: { routing?: { mode?: string; defaultModel?: string } } }>(page, 'GET', '/api/mindstone/admin/config');
+    const routing = config.json.config?.routing ?? {};
+    note(testInfo, `routing: ${routing.mode} ${routing.defaultModel}`);
+    expect(routing.defaultModel, 'the chosen deployment is the default route').toBe(model);
+    return { values, chosen: wanted };
+  });
+  if (!offered.chosen) {
+    await attachText(testInfo, 'stub-proof.json', JSON.stringify(proofs, null, 2));
+    test.fixme(
+      true,
+      `PENDING ${ISSUES.enterprise} (chat part): the endpoint was saved and its Test proved against the stub, but the Model step doesn't offer ${model} ` +
+        `(it offers: ${offered.values.join(', ') || 'nothing'}), so a chat can't be pointed at it from the UI. ` +
+        `Done when: the Model step lists ${model}, and a chat after choosing it is answered by the stub.`,
+    );
+    return;
+  }
+
+  await test.step("a chat is answered through the endpoint: the stub's token on screen, the chat's message in the stub's log", async () => {
+    await navigate(page, '/c/new');
+    await ensureMindStoneModel(page, testInfo);
+    const nonce = `ent-${Date.now().toString(36)}`;
+    const since = Date.now();
+    const reply = await sendAndWaitForReply(page, `Enterprise endpoint check ${nonce}: please reply in one short sentence.`);
+    await attachText(testInfo, 'reply.txt', replyLog(reply));
+    await shot(page, testInfo, 'chat-reply');
+    await gatewayExcerpt(testInfo, 40);
+    expectAnswer(reply, 'the chat through the enterprise endpoint');
+    expect(reply.text, "the reply is the stub's (its per-run token)").toContain(stub.token);
+    await expectOnScreen(page, stub.token, "the stub's token in the reply", { role: 'assistant', messageId: reply.messageId });
+    const proof = await waitForStubProof(page, stub.log, { sinceMs: since, nonce });
+    proofs.chat = { nonce, matched: proof.matched, sinceTheMessage: proof.recent, reasons: proof.reasons };
+    expect(proof.reasons, "the stub logged the chat: an authenticated, streamed POST <endpoint>/responses?api-version=v1 carrying the chat's own message").toEqual([]);
+    const answered = answeredBy(reply.text);
+    note(
+      testInfo,
+      `chat ${reply.conversationId}: "${reply.text.slice(0, 120)}"; stub call #${proof.matched?.n}; ` +
+        `answered by (Pi session): ${answered?.provider ?? '?'} / ${answered?.model ?? '?'}`,
+    );
+  });
+
+  await test.step('settings: the Model providers page lists it', async () => {
+    await navigate(page, '/mindstone');
+    await page.locator('section[aria-labelledby="ms-onboarding"]').getByRole('link', { name: 'Model providers' }).click();
+    await expect(page).toHaveURL(/\/mindstone\/providers$/);
+    await expect(page.getByTestId('ms-provider-enterprise-azure'), 'the Model providers page lists enterprise-azure').toBeVisible({ timeout: 30_000 });
+    await shot(page, testInfo, 'providers');
+  });
+  await attachText(testInfo, 'stub-proof.json', JSON.stringify(proofs, null, 2));
 });
