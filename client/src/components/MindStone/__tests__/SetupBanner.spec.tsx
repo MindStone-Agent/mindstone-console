@@ -1,6 +1,6 @@
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import MindStoneSetupBanner, { SETUP_BANNER_DISMISSED_KEY } from '../SetupBanner';
+import MindStoneSetupBanner, { SETUP_BANNER_DISMISSED_KEY, SETUP_DONE_KEY } from '../SetupBanner';
 
 let mockRole: string | undefined;
 const mockGet = jest.fn();
@@ -61,8 +61,22 @@ describe('MindStoneSetupBanner (mindstone-console #18)', () => {
     mockGet.mockRejectedValue(Object.assign(new Error('503'), { response: { status: 503 } }));
     renderBanner();
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    // Let the rejected call settle before checking, so a banner shown on failure would be caught.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.queryByTestId('mindstone-setup-banner')).toBeNull();
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('stops asking once the gateway reports setup done', async () => {
+    mockGet.mockResolvedValue({ onboarded: true });
+    const first = renderBanner();
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(sessionStorage.getItem(SETUP_DONE_KEY)).toBe('1'));
+    first.unmount();
+    renderBanner();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('mindstone-setup-banner')).toBeNull();
   });
 
   it('is never shown to, or fetched for, a non-admin', async () => {
@@ -74,7 +88,7 @@ describe('MindStoneSetupBanner (mindstone-console #18)', () => {
     expect(screen.queryByTestId('mindstone-setup-banner')).toBeNull();
   });
 
-  it('remembers a dismissal for the browser session', async () => {
+  it('remembers a dismissal for the tab', async () => {
     mockGet.mockResolvedValue({ ok: true, onboarded: false });
     const { unmount } = renderBanner();
     fireEvent.click(

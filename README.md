@@ -119,7 +119,7 @@ Sign-up from the page is off. The first account you create is the admin; later o
 - Open <http://localhost:3080> and sign in.
 - Chat with the agent from the model menu. The gateway lists each agent as `mindstone/<agentId>`, plus its default model.
 - Admin settings are at <http://localhost:3080/mindstone>: onboarding, settings, secrets, approvals, doctor and logs, and restarting the gateway.
-- **First-time setup** is at <http://localhost:3080/mindstone/onboarding>. Nothing redirects you there yet ([#18](https://github.com/MindStone-Agent/mindstone-console/issues/18)), so open it directly. Its first step asks you to type `enable advanced settings`. It has to match exactly: all lowercase, and no space at the end.
+- **First-time setup:** until setup is finished, an admin sees a **Set up MindStone** banner on the chat page. The same setup is at <http://localhost:3080/mindstone/onboarding>. Its first step asks you to type `enable advanced settings`; capitals and extra spaces don't matter.
 
 **Check:** a chat message gets a real answer, and `/mindstone` shows the status panel without errors.
 

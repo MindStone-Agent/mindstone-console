@@ -4,7 +4,8 @@
  * reads the same onboarding status as the settings page (/admin/status,
  * `onboarded`). Non-admins never see it, and it stays hidden if the status
  * call fails for any reason, so it can never get in the way of chat.
- * Dismissing it lasts for this browser session.
+ * Dismissing it lasts for this tab. Once the gateway reports setup done, it stops
+ * asking for the rest of the tab's life (the status call reads every transcript).
  */
 import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
@@ -13,13 +14,22 @@ import { request, SystemRoles } from 'librechat-data-provider';
 import { useAuthContext, useLocalize } from '~/hooks';
 
 export const SETUP_BANNER_DISMISSED_KEY = 'mindstone:setup-banner-dismissed';
+export const SETUP_DONE_KEY = 'mindstone:setup-done';
 const STATUS_URL = '/api/mindstone/admin/status';
 
-function wasDismissed(): boolean {
+function flagSet(key: string): boolean {
   try {
-    return sessionStorage.getItem(SETUP_BANNER_DISMISSED_KEY) === '1';
+    return sessionStorage.getItem(key) === '1';
   } catch {
     return false;
+  }
+}
+
+function setFlag(key: string): void {
+  try {
+    sessionStorage.setItem(key, '1');
+  } catch {
+    // Storage refused: the flag lasts until the page reloads.
   }
 }
 
@@ -28,7 +38,9 @@ export default function MindStoneSetupBanner() {
   const localize = useLocalize();
   const navigate = useNavigate();
   const isAdmin = user?.role === SystemRoles.ADMIN;
-  const [dismissed, setDismissed] = useState(wasDismissed);
+  const [dismissed, setDismissed] = useState(
+    () => flagSet(SETUP_BANNER_DISMISSED_KEY) || flagSet(SETUP_DONE_KEY),
+  );
   const [needsSetup, setNeedsSetup] = useState(false);
 
   useEffect(() => {
@@ -38,6 +50,7 @@ export default function MindStoneSetupBanner() {
       .get<{ onboarded?: unknown }>(STATUS_URL)
       .then((status) => {
         // Only an explicit "not onboarded" shows the banner; anything else keeps it hidden.
+        if (status?.onboarded === true) setFlag(SETUP_DONE_KEY);
         if (active) setNeedsSetup(status?.onboarded === false);
       })
       .catch(() => {
@@ -51,11 +64,7 @@ export default function MindStoneSetupBanner() {
   if (!isAdmin || dismissed || !needsSetup) return null;
 
   const dismiss = () => {
-    try {
-      sessionStorage.setItem(SETUP_BANNER_DISMISSED_KEY, '1');
-    } catch {
-      // Storage refused: it is still dismissed until the page reloads.
-    }
+    setFlag(SETUP_BANNER_DISMISSED_KEY);
     setDismissed(true);
   };
 
