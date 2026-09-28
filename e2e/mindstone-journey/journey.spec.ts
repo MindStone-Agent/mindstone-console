@@ -812,7 +812,7 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
     ).toBe(true);
     await item.click();
     const detail = page.locator('section[aria-labelledby="ms-appr-detail"]');
-    await expect(detail.locator('pre')).toContainText(chatWord);
+    await expect(detail.getByTestId('ms-appr-skill-instructions')).toContainText(chatWord);
     await detail.getByRole('button', { name: 'Approve' }).click();
     await expect(detail).toContainText('Approving installs this skill');
     await detail.getByRole('button', { name: 'Yes, approve' }).click();
