@@ -11,7 +11,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { request } from 'librechat-data-provider';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import type { TranslationKeys } from '~/hooks';
+import type { StatusSteps } from './steps';
 import { CONFIRMATION, confirmationMatches, normalizeConfirmation } from './confirmation';
+import { linkableStep } from './steps';
 import { useLocalize } from '~/hooks';
 
 type Preset = {
@@ -25,19 +27,14 @@ type PiProvider = { id: string; name: string; configured: boolean; availableMode
 type PiModel = { id: string; provider: string; name?: string };
 type ModelsInfo = { presets: Preset[]; providers: PiProvider[]; models: PiModel[]; error?: string };
 type Profile = { id: string; label: string; description: string };
-type Status = {
-  onboarded: boolean;
-  profiles?: Profile[];
-  steps?: Record<string, { done: boolean; detail: string }>;
-};
+type Status = { onboarded: boolean; profiles?: Profile[]; steps?: StatusSteps };
 type Permissions = { advancedSettings: boolean; expiresAt?: string };
 type Config = {
   routing?: { mode?: string; defaultAgentId?: string; defaultModel?: string };
   onboarding?: { profile?: { id?: string } };
-  memory?: { vectorStore?: string; embeddingProvider?: string; autoRecall?: boolean };
+  memory?: { embeddingProvider?: string; autoRecall?: boolean };
 };
 type EmbedKind = 'ollama' | 'openai' | 'openai-compatible';
-type VectorStore = 'sqlite-vec' | 'lancedb';
 type Connector = 'telegram' | 'slack' | 'discord';
 type MemoryCheck = { spec: string; ok: boolean; text: string; missingModel?: boolean };
 type MemoryCheckResult = {
@@ -69,12 +66,6 @@ const STEP_LABELS = {
   about: 'com_mindstone_onb_step_about',
   finish: 'com_mindstone_onb_step_finish',
 } as const;
-/** The steps ?step= can open, and the /admin/status steps that must be done first. */
-const LINKABLE: Partial<Record<Step, string[]>> = {
-  memory: ['provider', 'persona'],
-  connectors: ['provider', 'persona', 'memory'],
-  about: ['provider', 'persona', 'memory'],
-};
 
 /** The embedding choices `mindstone onboard` offers; the first is the default. */
 const EMBED_KINDS: Array<{ kind: EmbedKind; label: TranslationKeys }> = [
@@ -89,10 +80,8 @@ const EMBED_MODELS: Record<EmbedKind, string[]> = {
 };
 const CUSTOM_MODEL = 'custom';
 const COMPATIBLE_MODEL = 'nomic-embed-text';
-const VECTOR_STORES: Array<{ id: VectorStore; label: TranslationKeys }> = [
-  { id: 'sqlite-vec', label: 'com_mindstone_onb_vector_sqlite' },
-  { id: 'lancedb', label: 'com_mindstone_onb_vector_lancedb' },
-];
+/** The gateway builds vector recall for sqlite-vec only, so setup always saves it. */
+const VECTOR_STORE = 'sqlite-vec';
 
 /** Each connector's tokens, stored as secrets; the connector reads them as secrets/<name>. */
 const CONNECTORS: Array<{
@@ -134,6 +123,16 @@ function senderIds(text: string): string[] {
     .split(',')
     .map((id) => id.trim())
     .filter(Boolean);
+}
+
+/** Everyone the connector answers: the allowed ids, and always its owners. */
+function allowedWithOwners(allowed: string, owners: string): string[] {
+  return [...new Set([...senderIds(allowed), ...senderIds(owners)])];
+}
+
+/** A wildcard would let anyone reach the agent, so setup takes exact ids only. */
+function hasWildcard(text: string): boolean {
+  return senderIds(text).some((id) => id.includes('*'));
 }
 
 /** The current step bold, finished steps dimmed. */
@@ -178,8 +177,8 @@ export default function MindStoneOnboardingView() {
   const [embedKind, setEmbedKind] = useState<EmbedKind>('ollama');
   const [embedChoice, setEmbedChoice] = useState(EMBED_MODELS.ollama[0]);
   const [embedCustom, setEmbedCustom] = useState('');
-  const [vectorStore, setVectorStore] = useState<VectorStore>('sqlite-vec');
-  const [autoRecall, setAutoRecall] = useState(true);
+  // Off by default, as in `mindstone onboard`.
+  const [autoRecall, setAutoRecall] = useState(false);
   const [memoryCheck, setMemoryCheck] = useState<MemoryCheck | null>(null);
   const [pulling, setPulling] = useState(false);
   const memoryPrefilled = useRef(false);
@@ -190,6 +189,8 @@ export default function MindStoneOnboardingView() {
   const [owners, setOwners] = useState('');
   const [allowed, setAllowed] = useState('');
   const [allowedEdited, setAllowedEdited] = useState(false);
+  // A connector saved in this setup that starts only after a gateway restart.
+  const [restartFor, setRestartFor] = useState<TranslationKeys | null>(null);
   // About step.
   const [purpose, setPurpose] = useState('');
   const [userContext, setUserContext] = useState('');
@@ -225,12 +226,18 @@ export default function MindStoneOnboardingView() {
   useEffect(() => {
     if (linkChecked.current || !status || !permissions) return;
     linkChecked.current = true;
-    const wanted = searchParams.get('step') as Step | null;
-    const needs = wanted ? LINKABLE[wanted] : undefined;
-    if (!wanted || !needs || !needs.every((name) => status.steps?.[name]?.done)) return;
+    const wanted = linkableStep(searchParams.get('step'), status.steps);
+    if (!wanted) return;
     setResumeAt(wanted);
     if (permissions.advancedSettings) setStep(wanted);
   }, [status, permissions, searchParams]);
+
+  // Typed tokens never outlive the connectors step, however it is left.
+  useEffect(() => {
+    if (step === 'connectors') return;
+    setBotToken('');
+    setAppToken('');
+  }, [step]);
 
   /** Move to a step; a message from the step being left is cleared. */
   const goTo = (next: Step) => {
@@ -273,9 +280,6 @@ export default function MindStoneOnboardingView() {
       setEmbedKind(saved.kind);
       setEmbedChoice(saved.choice);
       setEmbedCustom(saved.custom);
-    }
-    if (memory?.vectorStore === 'sqlite-vec' || memory?.vectorStore === 'lancedb') {
-      setVectorStore(memory.vectorStore);
     }
     if (typeof memory?.autoRecall === 'boolean') setAutoRecall(memory.autoRecall);
   }, [config]);
@@ -472,7 +476,11 @@ export default function MindStoneOnboardingView() {
     if (!currentCheck?.ok) return;
     setBusy(true);
     try {
-      await patchSection('memory', { vectorStore, embeddingProvider: embedSpec, autoRecall });
+      await patchSection('memory', {
+        vectorStore: VECTOR_STORE,
+        embeddingProvider: embedSpec,
+        autoRecall,
+      });
       await load();
       goTo('connectors');
     } catch (error) {
@@ -501,9 +509,10 @@ export default function MindStoneOnboardingView() {
           tokenFile: `secrets/${chosen.bot}`,
           ...(chosen.app ? { appTokenFile: `secrets/${chosen.app}` } : {}),
           ownerSenders: senderIds(owners),
-          allowedSenders: senderIds(allowed),
+          allowedSenders: allowedWithOwners(allowed, owners),
         },
       });
+      if (result?.restartRequired) setRestartFor(chosen.label);
       await load();
       goTo('about');
       setMessage({
@@ -529,14 +538,8 @@ export default function MindStoneOnboardingView() {
     if (userContext.trim()) body.userContext = userContext.trim();
     setBusy(true);
     try {
-      const result = (await request.post(`${BASE}/onboarding/complete`, body)) as {
-        ok?: boolean;
-        error?: string;
-      };
-      if (result?.ok !== true) {
-        setMessage({ ok: false, text: result?.error ?? localize('com_mindstone_not_saved') });
-        return;
-      }
+      // The gateway refuses with a 4xx (409 until a provider and persona are set).
+      await request.post(`${BASE}/onboarding/complete`, body);
       await load();
       goTo('finish');
     } catch (error) {
@@ -586,11 +589,13 @@ export default function MindStoneOnboardingView() {
   const confirmOk = confirmationMatches(confirmText);
   const confirmHint = confirmText !== '' && !confirmOk;
   const chosenConnector = CONNECTORS.find((candidate) => candidate.id === connector);
+  const wildcard = hasWildcard(owners) || hasWildcard(allowed);
   const connectorReady =
     chosenConnector !== undefined &&
     botToken !== '' &&
     (!chosenConnector.app || appToken !== '') &&
-    senderIds(owners).length > 0;
+    senderIds(owners).length > 0 &&
+    !wildcard;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -939,26 +944,9 @@ export default function MindStoneOnboardingView() {
                   />
                 </label>
               )}
-              <div
-                role="radiogroup"
-                aria-labelledby="ms-onb-vector"
-                className="flex flex-col gap-1"
-              >
-                <span id="ms-onb-vector" className="text-sm text-text-secondary">
-                  {localize('com_mindstone_onb_vector_store')}
-                </span>
-                {VECTOR_STORES.map((candidate) => (
-                  <label key={candidate.id} className="flex items-center gap-2">
-                    <input
-                      type="radio"
-                      name="ms-onb-vector"
-                      checked={vectorStore === candidate.id}
-                      onChange={() => setVectorStore(candidate.id)}
-                    />
-                    {localize(candidate.label)}
-                  </label>
-                ))}
-              </div>
+              <p className="text-sm">
+                {localize('com_mindstone_onb_vector_store', { 0: VECTOR_STORE })}
+              </p>
               <div className="flex flex-col gap-1">
                 <label className="flex items-center gap-2">
                   <input
@@ -1115,6 +1103,16 @@ export default function MindStoneOnboardingView() {
                 </div>
               </div>
             )}
+            {wildcard && (
+              <p role="alert" className="mb-3 text-sm text-red-500">
+                {localize('com_mindstone_onb_no_wildcard')}
+              </p>
+            )}
+            {connector === 'discord' && (
+              <p className="mb-3 text-sm text-text-secondary">
+                {localize('com_mindstone_onb_discord_dms')}
+              </p>
+            )}
             <p className="mb-3 text-sm text-text-secondary">
               {localize('com_mindstone_onb_email_calendar')}
             </p>
@@ -1204,6 +1202,14 @@ export default function MindStoneOnboardingView() {
               )}
             </h2>
             <p className="mb-2 text-sm">{localize('com_mindstone_onb_say_hello')}</p>
+            {restartFor && (
+              <p className="mb-2 text-sm" data-testid="ms-onb-finish-restart">
+                {localize('com_mindstone_onb_finish_restart', { 0: localize(restartFor) })}{' '}
+                <Link to="/mindstone#ms-restart" className="underline">
+                  {localize('com_mindstone_onb_finish_restart_link')}
+                </Link>
+              </p>
+            )}
             <p className="mb-3 text-sm text-text-secondary">
               {localize('com_mindstone_onb_optional_hint')}
             </p>

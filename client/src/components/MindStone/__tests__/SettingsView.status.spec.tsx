@@ -77,8 +77,12 @@ describe('MindStone settings page status', () => {
       );
     });
 
+    const DONE = { done: true, detail: 'done' };
+
     it("says what memory is missing and links to setup's memory step", async () => {
       await renderSteps({
+        provider: DONE,
+        persona: DONE,
         connectors: { done: false, detail: 'none' },
         memory: { done: false, detail: 'no embedding provider set' },
       });
@@ -91,6 +95,9 @@ describe('MindStone settings page status', () => {
 
     it('shows the identity step and links a missing one to the about step', async () => {
       await renderSteps({
+        provider: DONE,
+        persona: DONE,
+        memory: DONE,
         connectors: { done: false, detail: 'none' },
         identity: { done: false, detail: 'no identity yet' },
       });
@@ -99,6 +106,32 @@ describe('MindStone settings page status', () => {
       expect(
         within(row).getByRole('link', { name: 'com_mindstone_step_set_up_identity' }),
       ).toHaveAttribute('href', '/mindstone/onboarding?step=about');
+    });
+
+    it('shows only the detail while the steps before it are not done', async () => {
+      await renderSteps({
+        provider: DONE,
+        persona: { done: false, detail: 'no persona' },
+        memory: { done: false, detail: 'no embedding provider set' },
+        connectors: { done: false, detail: 'none' },
+        identity: { done: false, detail: 'no identity yet' },
+      });
+      const memory = screen.getByTestId('ms-step-memory');
+      expect(memory).toHaveTextContent('com_mindstone_step_memory: no embedding provider set');
+      expect(within(memory).queryByRole('link')).toBeNull();
+      expect(within(screen.getByTestId('ms-step-identity')).queryByRole('link')).toBeNull();
+    });
+
+    it('links identity only once memory is done', async () => {
+      await renderSteps({
+        provider: DONE,
+        persona: DONE,
+        memory: { done: false, detail: 'no embedding provider set' },
+        connectors: { done: false, detail: 'none' },
+        identity: { done: false, detail: 'no identity yet' },
+      });
+      expect(within(screen.getByTestId('ms-step-memory')).getByRole('link')).toBeInTheDocument();
+      expect(within(screen.getByTestId('ms-step-identity')).queryByRole('link')).toBeNull();
     });
 
     it('links nothing once a step is done, and names a step it does not know', async () => {

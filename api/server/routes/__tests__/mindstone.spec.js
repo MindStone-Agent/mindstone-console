@@ -363,12 +363,12 @@ describe('MindStone admin proxy', () => {
     }
   });
 
-  it('gives a model download minutes to finish, and every other call 15 seconds', async () => {
+  it("waits past the gateway's own limits on the embed check and the model download, 15 s elsewhere", async () => {
     const timeout = jest.spyOn(AbortSignal, 'timeout');
     try {
       for (const [method, path, expected] of [
-        ['post', 'memory/pull', 15 * 60_000],
-        ['post', 'memory/check', 15_000],
+        ['post', 'memory/pull', 16 * 60_000],
+        ['post', 'memory/check', 25_000],
         ['post', 'onboarding/complete', 15_000],
         ['get', 'status', 15_000],
       ]) {

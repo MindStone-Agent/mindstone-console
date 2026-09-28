@@ -146,7 +146,6 @@ describe('memory step', () => {
     mockPost.mockResolvedValue(CHECK_OK);
     renderAt('memory');
     await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
-    fireEvent.click(screen.getByRole('radio', { name: 'com_mindstone_onb_vector_lancedb' }));
     fireEvent.click(screen.getByRole('checkbox', { name: 'com_mindstone_onb_auto_recall' }));
     fireEvent.click(button('com_mindstone_onb_memory_test'));
     await waitFor(() => expect(button('com_mindstone_onb_save_next')).toBeEnabled());
@@ -155,21 +154,27 @@ describe('memory step', () => {
       await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' }),
     ).toBeInTheDocument();
     expect(mockPatch).toHaveBeenCalledWith(`${BASE}/config/memory?ifMatch=%22e1%22`, {
-      vectorStore: 'lancedb',
+      vectorStore: 'sqlite-vec',
       embeddingProvider: 'ollama:nomic-embed-text',
-      autoRecall: false,
+      autoRecall: true,
     });
   });
 
-  it('turns automatic recall on by default and says whose chats it runs in', async () => {
+  it('leaves automatic recall off by default, as `mindstone onboard` does, and says whose chats it runs in', async () => {
     renderAt('memory');
     await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
-    expect(screen.getByRole('checkbox', { name: 'com_mindstone_onb_auto_recall' })).toBeChecked();
-    expect(
-      screen.getByRole('checkbox', { name: 'com_mindstone_onb_auto_recall' }),
-    ).toHaveAccessibleDescription('com_mindstone_onb_auto_recall_hint');
-    expect(screen.getByRole('radio', { name: 'com_mindstone_onb_vector_sqlite' })).toBeChecked();
-    expect(screen.queryByRole('radio', { name: /memory/i })).toBeNull();
+    const recall = screen.getByRole('checkbox', { name: 'com_mindstone_onb_auto_recall' });
+    expect(recall).not.toBeChecked();
+    expect(recall).toHaveAccessibleDescription('com_mindstone_onb_auto_recall_hint');
+  });
+
+  it('uses sqlite-vec, the store the gateway builds recall for, without offering another', async () => {
+    renderAt('memory');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    expect(screen.getByText('com_mindstone_onb_vector_store sqlite-vec')).toBeInTheDocument();
+    expect(screen.queryByText(/lancedb/i)).toBeNull();
+    const radios = screen.getAllByRole('radio').map((radio) => radio.getAttribute('name'));
+    expect(new Set(radios)).toEqual(new Set(['ms-onb-embed-kind']));
   });
 
   it('offers to download a missing Ollama model, then checks again', async () => {
@@ -258,7 +263,7 @@ describe('memory step', () => {
               memory: {
                 vectorStore: 'lancedb',
                 embeddingProvider: 'ollama:all-minilm',
-                autoRecall: false,
+                autoRecall: true,
               },
             },
             etag: '"e1"',
@@ -269,10 +274,18 @@ describe('memory step', () => {
     await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
     expect(screen.getByRole('combobox')).toHaveValue('custom');
     expect(screen.getByLabelText('com_mindstone_onb_embed_custom_name')).toHaveValue('all-minilm');
-    expect(screen.getByRole('radio', { name: 'com_mindstone_onb_vector_lancedb' })).toBeChecked();
-    expect(
-      screen.getByRole('checkbox', { name: 'com_mindstone_onb_auto_recall' }),
-    ).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'com_mindstone_onb_auto_recall' })).toBeChecked();
+    // A saved LanceDB store still becomes sqlite-vec: setup offers nothing else.
+    mockPost.mockResolvedValue(CHECK_OK);
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    await waitFor(() => expect(button('com_mindstone_onb_save_next')).toBeEnabled());
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' });
+    expect(mockPatch.mock.calls[0][1]).toEqual({
+      vectorStore: 'sqlite-vec',
+      embeddingProvider: 'ollama:all-minilm',
+      autoRecall: true,
+    });
   });
 });
 
@@ -303,7 +316,8 @@ describe('connectors step', () => {
     await openTelegram();
     const allowed = screen.getByLabelText('com_mindstone_onb_allowed_ids');
     expect(allowed).toHaveValue('111, 222');
-    fireEvent.change(allowed, { target: { value: '111, 222, 333' } });
+    // The owners always get in, even when left out of the allowed list.
+    fireEvent.change(allowed, { target: { value: '222, 333' } });
     fireEvent.click(button('com_mindstone_onb_save_next'));
     expect(
       await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' }),
@@ -316,7 +330,7 @@ describe('connectors step', () => {
         enabled: true,
         tokenFile: 'secrets/telegram-bot.token',
         ownerSenders: ['111', '222'],
-        allowedSenders: ['111', '222', '333'],
+        allowedSenders: ['222', '333', '111'],
       },
     });
     expect(
@@ -329,6 +343,84 @@ describe('connectors step', () => {
     fireEvent.click(button('com_mindstone_onb_back'));
     await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' });
     expect(screen.getByLabelText('com_mindstone_onb_bot_token')).toHaveValue('');
+  });
+
+  it('clears typed tokens whenever the step is left, not only on save', async () => {
+    mockPost.mockResolvedValue(CHECK_OK);
+    await openTelegram();
+    fireEvent.click(button('com_mindstone_onb_skip'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    fireEvent.click(button('com_mindstone_onb_back'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' });
+    expect(screen.getByLabelText('com_mindstone_onb_bot_token')).toHaveValue('');
+
+    fireEvent.change(screen.getByLabelText('com_mindstone_onb_bot_token'), {
+      target: { value: '123456:FAKE-token' },
+    });
+    fireEvent.click(button('com_mindstone_onb_back'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    await waitFor(() => expect(button('com_mindstone_onb_save_next')).toBeEnabled());
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' });
+    expect(screen.getByLabelText('com_mindstone_onb_bot_token')).toHaveValue('');
+    expect(postsTo('secrets/telegram-bot.token')).toEqual([]);
+  });
+
+  it('refuses a wildcard in either id field', async () => {
+    await openTelegram();
+    expect(button('com_mindstone_onb_save_next')).toBeEnabled();
+    expect(screen.queryByRole('alert')).toBeNull();
+    fireEvent.change(screen.getByLabelText('com_mindstone_onb_allowed_ids'), {
+      target: { value: '111, *' },
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('com_mindstone_onb_no_wildcard');
+    expect(button('com_mindstone_onb_save_next')).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('com_mindstone_onb_allowed_ids'), {
+      target: { value: '111' },
+    });
+    expect(button('com_mindstone_onb_save_next')).toBeEnabled();
+    fireEvent.change(screen.getByLabelText('com_mindstone_onb_owner_ids'), {
+      target: { value: '*' },
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent('com_mindstone_onb_no_wildcard');
+    expect(button('com_mindstone_onb_save_next')).toBeDisabled();
+  });
+
+  it('says Discord answers direct messages only, for Discord alone', async () => {
+    renderAt('connectors');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' });
+    fireEvent.click(screen.getByRole('radio', { name: 'com_mindstone_onb_connector_telegram' }));
+    expect(screen.queryByText('com_mindstone_onb_discord_dms')).toBeNull();
+    fireEvent.click(screen.getByRole('radio', { name: 'com_mindstone_onb_connector_discord' }));
+    expect(screen.getByText('com_mindstone_onb_discord_dms')).toBeInTheDocument();
+  });
+
+  it('keeps the restart reminder until Finish when a connector needs one', async () => {
+    mockPost.mockResolvedValue({ ok: true });
+    mockPatch.mockResolvedValue({ ok: true, changed: ['channels'], restartRequired: true });
+    await openTelegram();
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_done_title' });
+    const reminder = screen.getByTestId('ms-onb-finish-restart');
+    expect(reminder).toHaveTextContent(
+      'com_mindstone_onb_finish_restart com_mindstone_onb_connector_telegram',
+    );
+    expect(
+      screen.getByRole('link', { name: 'com_mindstone_onb_finish_restart_link' }),
+    ).toHaveAttribute('href', '/mindstone#ms-restart');
+  });
+
+  it('shows no restart reminder when the save needed none', async () => {
+    mockPost.mockResolvedValue({ ok: true });
+    await openTelegram();
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_done_title' });
+    expect(screen.queryByTestId('ms-onb-finish-restart')).toBeNull();
   });
 
   it('clears the token from the page as it is sent, even when the save fails', async () => {
@@ -497,6 +589,21 @@ describe('?step= from the settings page', () => {
     fireEvent.click(button('com_mindstone_onb_next'));
     expect(
       await screen.findByRole('heading', { name: 'com_mindstone_onb_provider_title' }),
+    ).toBeInTheDocument();
+  });
+
+  it('never skips memory to reach the connectors step', async () => {
+    renderAt('connectors');
+    expect(
+      await screen.findByRole('heading', { name: 'com_mindstone_onb_access_title' }),
+    ).toBeInTheDocument();
+  });
+
+  it('opens the connectors and about steps once memory is done', async () => {
+    steps.memory = DONE;
+    renderAt('connectors');
+    expect(
+      await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' }),
     ).toBeInTheDocument();
   });
 
