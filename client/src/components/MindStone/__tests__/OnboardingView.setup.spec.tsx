@@ -153,7 +153,6 @@ describe('memory step', () => {
     mockPost.mockResolvedValue(CHECK_OK);
     renderAt('memory');
     await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
-    fireEvent.click(screen.getByRole('checkbox', { name: 'com_mindstone_onb_auto_recall' }));
     fireEvent.click(button('com_mindstone_onb_memory_test'));
     await waitFor(() => expect(button('com_mindstone_onb_save_next')).toBeEnabled());
     fireEvent.click(button('com_mindstone_onb_save_next'));
@@ -167,12 +166,45 @@ describe('memory step', () => {
     });
   });
 
-  it('leaves automatic recall off by default, as `mindstone onboard` does, and says whose chats it runs in', async () => {
+  it('turns automatic recall on by default, as `mindstone onboard` does, and says whose chats it runs in', async () => {
     renderAt('memory');
     await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
     const recall = screen.getByRole('checkbox', { name: 'com_mindstone_onb_auto_recall' });
-    expect(recall).not.toBeChecked();
+    expect(recall).toBeChecked();
     expect(recall).toHaveAccessibleDescription('com_mindstone_onb_auto_recall_hint');
+  });
+
+  it('keeps recall off on a rerun where the owner turned it off, and saves it off', async () => {
+    const base = mockGet.getMockImplementation();
+    mockGet.mockImplementation(async (url: string) =>
+      url === `${BASE}/config`
+        ? {
+            config: {
+              memory: {
+                vectorStore: 'sqlite-vec',
+                embeddingProvider: 'ollama:nomic-embed-text',
+                autoRecall: false,
+              },
+            },
+            etag: '"e1"',
+          }
+        : base?.(url),
+    );
+    renderAt('memory');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    expect(
+      screen.getByRole('checkbox', { name: 'com_mindstone_onb_auto_recall' }),
+    ).not.toBeChecked();
+    mockPost.mockResolvedValue(CHECK_OK);
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    await waitFor(() => expect(button('com_mindstone_onb_save_next')).toBeEnabled());
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' });
+    expect(mockPatch.mock.calls[0][1]).toEqual({
+      vectorStore: 'sqlite-vec',
+      embeddingProvider: 'ollama:nomic-embed-text',
+      autoRecall: false,
+    });
   });
 
   it('uses sqlite-vec, the store the gateway builds recall for, without offering another', async () => {

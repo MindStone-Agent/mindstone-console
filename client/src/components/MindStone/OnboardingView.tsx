@@ -182,7 +182,8 @@ export default function MindStoneOnboardingView() {
   const [embedChoice, setEmbedChoice] = useState(EMBED_MODELS.ollama[0]);
   const [embedCustom, setEmbedCustom] = useState('');
   // Off by default, as in `mindstone onboard`.
-  const [autoRecall, setAutoRecall] = useState(false);
+  // On by default (#106), as `mindstone onboard` does; a saved setting wins.
+  const [autoRecall, setAutoRecall] = useState(true);
   const [memoryCheck, setMemoryCheck] = useState<MemoryCheck | null>(null);
   const [pulling, setPulling] = useState(false);
   const memoryPrefilled = useRef(false);
