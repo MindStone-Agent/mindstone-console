@@ -161,7 +161,12 @@ function SkillFields({ skill }: { skill: NonNullable<Detail['skill']> }) {
               })}
             </span>
           </dt>
-          <dd className={`${cell} max-h-80 overflow-y-auto font-mono`}>{shown(instructions)}</dd>
+          <dd
+            className={`${cell} max-h-80 overflow-y-auto font-mono`}
+            data-testid="ms-appr-skill-instructions"
+          >
+            {shown(instructions)}
+          </dd>
         </div>
       ) : null}
     </dl>

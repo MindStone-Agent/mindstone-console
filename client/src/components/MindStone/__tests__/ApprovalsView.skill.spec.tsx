@@ -96,6 +96,10 @@ describe('MindStone approvals: a skill the agent proposed in chat', () => {
       'WEEKLY-SKILL-BODY',
     );
     expect(within(card).getByTestId('ms-appr-skill-size')).toBeInTheDocument();
+    // The journey (J7) reads the instructions by this id.
+    expect(within(card).getByTestId('ms-appr-skill-instructions')).toHaveTextContent(
+      'WEEKLY-SKILL-BODY',
+    );
   });
 
   it('keeps a field that fakes another field inside its own value', async () => {
