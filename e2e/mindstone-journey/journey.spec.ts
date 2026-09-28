@@ -420,15 +420,22 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
   const consoleWord = `${['amber', 'cobalt', 'violet', 'saffron'][Date.now() % 4]}-kestrel-${tag}`;
   const chatWord = `${['teal', 'coral', 'umber', 'jade'][Date.now() % 4]}-plover-${tag}`;
   const skills = page.getByRole('heading', { name: 'Skills', exact: true });
-  const permissions = await consoleApi<{ permissions?: { advancedSettings?: boolean } }>(
-    page,
-    'GET',
-    '/api/mindstone/admin/permissions',
-  );
-  expect(
-    permissions.json.permissions?.advancedSettings,
-    'advanced settings are on (J2 turned them on)',
-  ).toBe(true);
+
+  await test.step('advanced settings, turned on from the settings page', async () => {
+    // "Start a chat" (J4) turned them off; installing a skill needs them.
+    await page.goto('/mindstone');
+    const state = page.getByTestId('ms-advanced-state');
+    await expect(state).toBeVisible();
+    if ((await state.textContent())?.trim() === 'Off.') {
+      await page.goto('/mindstone/skills');
+      await expect(page.getByText('Installing a skill needs advanced settings')).toBeVisible();
+      await page.goto('/mindstone');
+      await page.getByLabel('Confirmation').fill(TYPED_PHRASE);
+      await page.getByRole('button', { name: 'Turn on' }).click();
+    }
+    await expect(state).toHaveText(/^On\b/);
+    note(testInfo, 'advanced settings on');
+  });
 
   await test.step('the Skills page, from the settings page', async () => {
     await page.goto('/mindstone');
