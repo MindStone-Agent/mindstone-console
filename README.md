@@ -14,7 +14,7 @@
 
 - **Chat** with MindStone agents over the gateway's OpenAI-compatible API. Each agent appears as a model (`mindstone/<agentId>`), and each Console conversation gets its own MindStone session.
 - **Admin settings** at `/mindstone`, for admins only:
-  - **guided onboarding:** a checklist for model providers and first setup;
+  - **guided onboarding:** a model provider, the model, a persona, memory (tested with a live embed check), an optional chat-app connector and a few words about you; the first chat then opens with the agent answering;
   - **settings:** edit config section by section, with secrets masked;
   - **stored secrets:** list and delete. Values are never shown, and the gateway's own credentials are protected;
   - **approvals:** approve or reject actions the agent proposes;

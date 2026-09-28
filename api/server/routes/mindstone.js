@@ -42,7 +42,18 @@ const ALLOWED = [
   { method: 'POST', path: /^approvals\/[0-9a-f-]{8,36}\/(approve|reject)$/ },
   { method: 'GET', path: /^secrets$/ },
   { method: 'DELETE', path: /^secrets\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/ },
+  { method: 'POST', path: /^onboarding\/complete$/ },
+  { method: 'POST', path: /^memory\/check$/ },
+  { method: 'POST', path: /^memory\/pull$/ },
 ];
+
+/**
+ * How long the gateway gets to answer. Each limit sits past the gateway's own
+ * (embed check 20 s, model download 15 min), so its "took too long" answer
+ * reaches the page instead of a generic 502.
+ */
+const TIMEOUT_MS = 15_000;
+const ROUTE_TIMEOUT_MS = { 'memory/check': 25_000, 'memory/pull': 16 * 60_000 };
 
 /** Gateway base URL: MINDSTONE_GATEWAY_URL is the OpenAI base (…/v1); the admin API sits at the root. */
 function gatewayBase() {
@@ -119,7 +130,7 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
       // Never follow a redirect: fetch would carry the admin credential (and
       // the body, which can hold a secret) to wherever it points.
       redirect: 'error',
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(ROUTE_TIMEOUT_MS[path] ?? TIMEOUT_MS),
     });
     const text = await response.text();
     if (response.status === 401) {
