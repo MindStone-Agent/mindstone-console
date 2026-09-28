@@ -26,6 +26,14 @@ const SKILLS = [
     label: 'Weekly report',
     description: 'Writes the report',
     source: 'installed',
+    inPrompt: true,
+  },
+  {
+    id: 'big-one',
+    label: 'Big one',
+    description: 'Too long',
+    source: 'installed',
+    inPrompt: false,
   },
   { id: 'triage', label: 'Triage', description: 'Sorts the inbox', source: 'draft' },
   {
@@ -91,7 +99,11 @@ describe('MindStone Skill Builder page', () => {
     expect(screen.getByTestId('ms-skill-builtin-integration-builder')).toHaveTextContent(
       'com_mindstone_skill_state_builtin',
     );
-    expect(screen.getByText('com_mindstone_skill_installed_list 1')).toBeInTheDocument();
+    // Installed but over the prompt budget is not called Active.
+    const big = screen.getByTestId('ms-skill-installed-big-one');
+    expect(big).toHaveTextContent('com_mindstone_skill_state_over_budget');
+    expect(big).not.toHaveTextContent('com_mindstone_skill_state_active');
+    expect(screen.getByText('com_mindstone_skill_installed_list 2')).toBeInTheDocument();
     expect(screen.getByText('com_mindstone_skill_draft_list 2')).toBeInTheDocument();
     // A broken skill shows its error and can't be opened.
     const broken = screen.getByTestId('ms-skill-draft-broken');
@@ -230,6 +242,31 @@ describe('MindStone Skill Builder page', () => {
         force: true,
       }),
     );
+  });
+
+  it('drops the Replace offer once the form changes', async () => {
+    gateway(true);
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'com_mindstone_skill_new_start' }));
+    for (const [label, value] of [
+      ['id', 'triage'],
+      ['label', 'Triage'],
+      ['description', 'Sorts the inbox'],
+    ]) {
+      fireEvent.change(screen.getByLabelText(new RegExp(`^com_mindstone_skill_field_${label}`)), {
+        target: { value },
+      });
+    }
+    mockPost.mockRejectedValueOnce(refusal(409, { error: 'Draft already exists' }));
+    fireEvent.click(screen.getByRole('button', { name: 'com_mindstone_skill_create_draft' }));
+    expect(
+      await screen.findByRole('button', { name: 'com_mindstone_skill_replace_draft' }),
+    ).toBeInTheDocument();
+    // A different id is a different draft: forcing it would replace one never shown to the admin.
+    fireEvent.change(screen.getByLabelText(/^com_mindstone_skill_field_id/), {
+      target: { value: 'other-draft' },
+    });
+    expect(screen.queryByRole('button', { name: 'com_mindstone_skill_replace_draft' })).toBeNull();
   });
 });
 

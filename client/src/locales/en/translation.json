@@ -3051,6 +3051,7 @@
   "com_mindstone_skill_state_active": "Active",
   "com_mindstone_skill_state_draft": "Draft, not active",
   "com_mindstone_skill_state_builtin": "Built-in",
+  "com_mindstone_skill_state_over_budget": "Installed, but over the prompt budget: the agent sees only its name and description",
   "com_mindstone_skill_start_from": "Build a skill from this",
   "com_mindstone_skill_new": "New skill",
   "com_mindstone_skill_new_start": "Build a skill",

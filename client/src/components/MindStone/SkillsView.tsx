@@ -19,6 +19,8 @@ type Summary = {
   description?: string;
   version?: string;
   source: Source;
+  /** Installed skills only: false when it is over the prompt budget and only listed by name. */
+  inPrompt?: boolean;
   error?: string;
 };
 type Detail = Summary & {
@@ -237,6 +239,18 @@ export default function MindStoneSkillsView() {
     draft: 'com_mindstone_skill_state_draft',
     builtin: 'com_mindstone_skill_state_builtin',
   };
+  // A changed form is a different draft: Replace no longer applies to it.
+  const edit = (patch: Partial<Form>) => {
+    setForm({ ...form, ...patch });
+    setDraftExists(false);
+  };
+  // Installed and in the prompt is Active; installed past the budget says so.
+  const stateOf = (skill: Pick<Summary, 'id' | 'source' | 'inPrompt'>): TranslationKeys => {
+    const listed = skills?.find((entry) => entry.id === skill.id && entry.source === skill.source);
+    return skill.source === 'installed' && (skill.inPrompt ?? listed?.inPrompt) === false
+      ? 'com_mindstone_skill_state_over_budget'
+      : state[skill.source];
+  };
   const field = (
     key: keyof Form,
     label: TranslationKeys,
@@ -250,13 +264,13 @@ export default function MindStoneSkillsView() {
           className={input}
           rows={rows}
           value={form[key]}
-          onChange={(event) => setForm({ ...form, [key]: event.target.value })}
+          onChange={(event) => edit({ [key]: event.target.value })}
         />
       ) : (
         <input
           className={input}
           value={form[key]}
-          onChange={(event) => setForm({ ...form, [key]: event.target.value })}
+          onChange={(event) => edit({ [key]: event.target.value })}
         />
       )}
       {hint && <span className="text-xs text-text-secondary">{localize(hint)}</span>}
@@ -329,7 +343,7 @@ export default function MindStoneSkillsView() {
                         <span className="text-sm font-medium">{skill.label}</span>{' '}
                         <span className="font-mono text-xs text-text-secondary">{skill.id}</span>{' '}
                         <span className="text-xs text-text-secondary">
-                          · {localize(state[source])}
+                          · {localize(stateOf(skill))}
                         </span>
                         <br />
                         <span className="text-xs text-text-secondary">
@@ -377,7 +391,7 @@ export default function MindStoneSkillsView() {
                 <select
                   className={input}
                   value={form.fromBuiltin}
-                  onChange={(event) => setForm({ ...form, fromBuiltin: event.target.value })}
+                  onChange={(event) => edit({ fromBuiltin: event.target.value })}
                 >
                   <option value="">{localize('com_mindstone_skill_from_scratch')}</option>
                   {builtins.map((skill) => (
@@ -472,7 +486,7 @@ export default function MindStoneSkillsView() {
               {detail.label}
             </h2>
             <p className="mb-2 text-xs text-text-secondary">
-              <span className="font-mono">{detail.id}</span> · {localize(state[detail.source])}
+              <span className="font-mono">{detail.id}</span> · {localize(stateOf(detail))}
               {detail.version ? ` · ${detail.version}` : ''}
             </p>
             {detail.description && <p className="mb-2 text-sm">{detail.description}</p>}
