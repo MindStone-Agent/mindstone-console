@@ -76,7 +76,7 @@ describe('MindStone personas page (MindStone-Agent #105)', () => {
     await renderPage('atlas');
     expect(mockGet).toHaveBeenCalledWith('/api/mindstone/admin/personas');
     expect(screen.getByText(/com_mindstone_per_intro/)).toHaveTextContent(
-      'com_mindstone_per_intro com_mindstone_persona_routes_note',
+      'com_mindstone_per_intro com_mindstone_per_every_chat com_mindstone_persona_routes_note',
     );
     expect(row('atlas')).toHaveTextContent('Atlas');
     expect(row('atlas')).toHaveTextContent('Steady and thorough.');

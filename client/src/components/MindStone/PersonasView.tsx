@@ -104,7 +104,8 @@ export default function MindStonePersonasView() {
           </Link>
         </div>
         <p className="text-sm text-text-secondary">
-          {localize('com_mindstone_per_intro')} {localize('com_mindstone_persona_routes_note')}
+          {localize('com_mindstone_per_intro')} {localize('com_mindstone_per_every_chat')}{' '}
+          {localize('com_mindstone_persona_routes_note')}
         </p>
         {message && (
           <p role="status" className={message.ok ? 'text-green-600' : 'text-red-600'}>
