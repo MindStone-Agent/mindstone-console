@@ -1,31 +1,37 @@
 /**
- * How J9 reads the gateway transcript for proof that automatic memory recall
- * was injected into a chat's turn. Plain CommonJS, shared with the offline
- * self-test (lib/recall-evidence.selftest.mjs), so both run the same code.
+ * How J9 reads the gateway transcript and the recall index for proof that
+ * automatic memory recall supplied a fact to a chat's turn. Plain CommonJS,
+ * shared with the offline self-test (lib/recall-evidence.selftest.mjs), so
+ * both run the same code. Pure functions: the file and database reads are in
+ * lib/journey.ts.
  *
  * What the gateway records (MindStone-Agent main,
- * packages/mindstone-gateway/src/index.ts): when recall found hits for a
- * turn, a `role: "event"` entry with `metadata.event:
+ * packages/mindstone-gateway/src/index.ts:1309-1334): when recall found hits
+ * for a turn, a `role: "event"` entry with `metadata.event:
  * "memory_recall_injected"`, the turn's `runId`, and `metadata.query`,
- * `hitCount`, `promptTokens` and `hits` (id, chunkId, title, score; no text).
- * The turn's assistant entry also carries `metadata.memoryRecall` ({ query,
- * hitCount, promptTokens }) whenever recall ran. With no hits, or with recall
- * off, there is no event: then recall wasn't injected, or isn't observable,
- * and a reply that happens to name the fact proves nothing.
+ * `hitCount`, `promptTokens` and `hits` (id, chunkId, title, score,
+ * recallMode; no text). The hit's chunkId is the recall index's
+ * `memory_chunks.chunk_id`, so J9 reads the chunk text from there.
+ * `memoryRecall` ({ query, hitCount, promptTokens }) goes only into the HTTP
+ * response (index.ts:1415-1421), NOT onto the assistant transcript entry
+ * (index.ts:1370-1381); Cairn is asked to add it there. Until then the
+ * hitCount cross-check can't run, and the evidence says so in `notes`.
+ * With no event, recall wasn't injected or isn't observable, and a reply that
+ * names the fact proves nothing.
  */
 const RECALL_EVENT = 'memory_recall_injected';
 
-/** A conversation's entries from one transcript file's text: JSON lines whose session key ends in `:<conversationId>`. */
+/** A conversation's entries from one transcript file's text: JSON lines whose session key ends in exactly `:<conversationId>`. */
 function sessionLines(text, conversationId) {
   const entries = [];
   if (!conversationId) return entries;
+  const suffix = `:${conversationId}`;
   for (const line of String(text).split('\n')) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line);
-      if (parsed && typeof parsed === 'object' && typeof parsed.sessionKey === 'string' && parsed.sessionKey.endsWith(`:${conversationId}`)) {
-        entries.push(parsed);
-      }
+      const key = parsed && typeof parsed === 'object' ? parsed.sessionKey : undefined;
+      if (typeof key === 'string' && key.length > suffix.length && key.slice(-suffix.length) === suffix) entries.push(parsed);
     } catch {
       // not JSON
     }
@@ -34,49 +40,76 @@ function sessionLines(text, conversationId) {
 }
 
 const lower = (value) => String(value ?? '').toLowerCase();
+const isRecallEvent = (entry) => entry?.role === 'event' && entry?.metadata?.event === RECALL_EVENT;
+const lastAssistantAt = (list) => {
+  let at = -1;
+  list.forEach((entry, i) => {
+    if (entry?.role === 'assistant') at = i;
+  });
+  return at;
+};
+/** An entry as the text it carries anywhere (JSON), without the recall event's own hit list (recall's provenance). */
+const entryText = (entry) => lower(JSON.stringify(isRecallEvent(entry) ? { ...entry, metadata: { ...entry.metadata, hits: undefined } } : entry));
+const outlineOf = (list) => list.map((e, i) => `${i} ${e?.role}${e?.metadata?.event ? ` ${e.metadata.event}` : ''}${e?.runId ? ` run ${e.runId}` : ''}`);
 
 /**
  * Judges one conversation's entries (in order) for the reply that answered
- * its latest turn: was recall injected into that turn? `token` is the fact
- * that must come from memory; it must not be in the conversation's own user
- * turns. Returns the evidence (no message text) and `reasons`, empty when the
- * transcript proves recall.
+ * its latest turn: did recall supply `token` to that turn?
+ * - the reply's own turn has a memory_recall_injected event: before the
+ *   reply, both carrying a run id, the same one;
+ * - it lists hits, and at least one hit's chunk (`chunkTexts`: chunk_id ->
+ *   text, read from the recall index) holds the token;
+ * - the token is in no other entry of the conversation, whatever its role
+ *   (only the reply may carry it; the recall event's hit list is exempt);
+ * - the reply's metadata.memoryRecall.hitCount matches, when the entry
+ *   carries it (a missing field is reported in `notes`, never passed silently).
+ * Returns the evidence (no message text) and `reasons`, empty when proven.
  */
-function recallEvidence(entries, token) {
+function recallEvidence(entries, token, chunkTexts) {
   const list = Array.isArray(entries) ? entries : [];
   const want = lower(token);
   const reasons = [];
-  let assistantAt = -1;
-  list.forEach((entry, i) => {
-    if (entry?.role === 'assistant') assistantAt = i;
-  });
+  const notes = [];
+  const assistantAt = lastAssistantAt(list);
   const assistant = assistantAt >= 0 ? list[assistantAt] : undefined;
   const runId = assistant?.runId;
-  const isRecall = (entry) => entry?.role === 'event' && entry?.metadata?.event === RECALL_EVENT;
-  const recallEvents = list.map((entry, i) => (isRecall(entry) ? i : -1)).filter((i) => i >= 0);
-  // The reply's own turn: before the reply, and in its run when both carry a run id.
-  const sameTurn = recallEvents.filter((i) => i < assistantAt && (!runId || !list[i].runId || list[i].runId === runId));
+  const recallEvents = list.map((entry, i) => (isRecallEvent(entry) ? i : -1)).filter((i) => i >= 0);
+  const sameTurn = recallEvents.filter((i) => i < assistantAt && runId && list[i].runId && list[i].runId === runId);
   const recallAt = sameTurn.length ? sameTurn[sameTurn.length - 1] : -1;
   const event = recallAt >= 0 ? list[recallAt] : undefined;
   const hits = Array.isArray(event?.metadata?.hits) ? event.metadata.hits : [];
   const hitCount = typeof event?.metadata?.hitCount === 'number' ? event.metadata.hitCount : hits.length;
   const replyRecall = assistant?.metadata?.memoryRecall;
-  const userTurnsWithToken = want ? list.filter((e) => e?.role === 'user' && lower(e.text).includes(want)).length : 0;
+  const otherEntriesWithToken = want ? list.map((e, i) => (i !== assistantAt && entryText(e).includes(want) ? i : -1)).filter((i) => i >= 0) : [];
+  const chunks = chunkTexts && typeof chunkTexts === 'object' ? chunkTexts : undefined;
+  const hitChunksWithToken = chunks ? hits.filter((h) => typeof h?.chunkId === 'string' && lower(chunks[h.chunkId]).includes(want)).length : 0;
 
   if (!list.length) reasons.push('the gateway transcript has no entries for this conversation');
   else if (!assistant) reasons.push("the gateway transcript has no assistant entry for this conversation's reply");
-  if (want && userTurnsWithToken) reasons.push(`the token is in ${userTurnsWithToken} of this conversation's own user turns, so a reply naming it proves nothing`);
-  if (assistant && recallAt < 0) {
+  else if (!runId) reasons.push("the reply's transcript entry has no run id, so no recall event can be tied to its turn");
+  if (otherEntriesWithToken.length) {
+    reasons.push(
+      `the token is in ${otherEntriesWithToken.length} entr${otherEntriesWithToken.length === 1 ? 'y' : 'ies'} of this conversation other than the reply ` +
+        `(${otherEntriesWithToken.map((i) => outlineOf(list)[i]).join('; ')}), so it didn't have to come from recall`,
+    );
+  }
+  if (assistant && runId && recallAt < 0) {
     reasons.push(
       recallEvents.length
-        ? `a ${RECALL_EVENT} event is in this conversation, but not in the reply's own turn (before it${runId ? `, run ${runId}` : ''})`
+        ? `a ${RECALL_EVENT} event is in this conversation, but not in the reply's own turn (before it, with run ${runId})`
         : `no ${RECALL_EVENT} event in this conversation: recall was not injected, or the gateway did not record it (not observable)`,
     );
   }
   if (event && !(hitCount > 0)) reasons.push(`the ${RECALL_EVENT} event lists no hits (hitCount ${hitCount})`);
-  if (event && want && lower(event.metadata?.query).includes(want)) reasons.push("the recall query itself holds the token: it came from this conversation, not from memory");
+  if (event && hitCount > 0) {
+    if (!chunks) reasons.push("the recalled chunks' text could not be read from the recall index, so no hit is tied to the fact");
+    else if (!hitChunksWithToken) reasons.push(`none of the ${hits.length} recalled chunk(s) holds the token: recall didn't supply it`);
+  }
   if (event && replyRecall && typeof replyRecall.hitCount === 'number' && replyRecall.hitCount !== hitCount) {
     reasons.push(`the reply's metadata.memoryRecall.hitCount (${replyRecall.hitCount}) doesn't match the event's (${hitCount})`);
+  }
+  if (assistant && !replyRecall) {
+    notes.push("the reply's transcript entry carries no metadata.memoryRecall (the gateway puts it only in the HTTP response; Cairn is asked to add it), so the hitCount cross-check did not run");
   }
 
   return {
@@ -88,14 +121,56 @@ function recallEvidence(entries, token) {
     recallEvents: recallEvents.length,
     hitCount: event ? hitCount : 0,
     hits: hits.map((h) => ({ id: h?.id, chunkId: h?.chunkId, title: h?.title, score: h?.score, recallMode: h?.recallMode })),
-    /** Hits whose id, chunk id or title holds the token (provenance, not required: the event carries no hit text). */
-    hitsNamingToken: want ? hits.filter((h) => [h?.id, h?.chunkId, h?.title].some((v) => lower(v).includes(want))).length : 0,
+    /** Recalled chunks (by the recall index's text) that hold the token. */
+    hitChunksWithToken,
     replyMemoryRecall: replyRecall ? { hitCount: replyRecall.hitCount, promptTokens: replyRecall.promptTokens } : undefined,
-    userTurnsWithToken,
+    otherEntriesWithToken: otherEntriesWithToken.length,
     /** The entries as index, role, event and run only: no text. */
-    outline: list.map((e, i) => `${i} ${e?.role}${e?.metadata?.event ? ` ${e.metadata.event}` : ''}${e?.runId ? ` run ${e.runId}` : ''}`),
+    outline: outlineOf(list),
+    notes,
     reasons,
   };
 }
 
-module.exports = { RECALL_EVENT, sessionLines, recallEvidence };
+/**
+ * The negative control (J9's chat 3, with automatic recall turned off): the
+ * conversation has a reply, no recall event anywhere, and the token in no
+ * entry, the reply included. Returns `reasons`, empty when the control holds.
+ */
+function controlEvidence(entries, token) {
+  const list = Array.isArray(entries) ? entries : [];
+  const want = lower(token);
+  const reasons = [];
+  const assistantAt = lastAssistantAt(list);
+  const recallEvents = list.filter(isRecallEvent).length;
+  const withToken = want ? list.map((e, i) => (entryText(e).includes(want) ? i : -1)).filter((i) => i >= 0) : [];
+  if (!list.length) reasons.push('the gateway transcript has no entries for the control conversation');
+  else if (assistantAt < 0) reasons.push('the gateway transcript has no reply in the control conversation');
+  if (recallEvents) reasons.push(`with automatic recall off, the control conversation still has ${recallEvents} ${RECALL_EVENT} event(s)`);
+  if (withToken.length) {
+    reasons.push(
+      `with automatic recall off, the token is still in the control conversation (${withToken.map((i) => outlineOf(list)[i]).join('; ')}): ` +
+        'something other than automatic recall supplies it (a memory tool, the prompt files, or the model)',
+    );
+  }
+  return { entries: list.length, assistantAt, recallEvents, withToken: withToken.length, outline: outlineOf(list), reasons };
+}
+
+/**
+ * Whether a markdown memory file is an invariant (the gateway injects it on
+ * every turn, with no recall): top-level frontmatter with a non-empty
+ * `invariant:`. Deliberately wider than the gateway's rule (which also needs
+ * `critical: true`), so no always-injected file is missed.
+ */
+function isInvariantMarkdown(text) {
+  const normalized = String(text).replace(/\r\n/g, '\n');
+  if (!normalized.startsWith('---\n')) return false;
+  const end = normalized.indexOf('\n---', 4);
+  if (end === -1) return false;
+  return normalized
+    .slice(4, end)
+    .split('\n')
+    .some((line) => /^invariant:\s*\S/.test(line));
+}
+
+module.exports = { RECALL_EVENT, sessionLines, recallEvidence, controlEvidence, isInvariantMarkdown };

@@ -39,6 +39,7 @@ import {
   fillSecret,
   formationEvidence,
   gatewayExcerpt,
+  controlForConversation,
   memoryStoreFilesWith,
   messageText,
   note,
@@ -50,7 +51,8 @@ import {
   sendAndWaitForReply,
   shot,
   signIn,
-  waitForMemoryStore,
+  promptFilesWith,
+  waitForEmbeddedChunk,
   waitForReplyTo,
   writeState,
   personaForConversation,
@@ -81,7 +83,7 @@ const IGNORED_STATUS_LINKS = ['Set up memory', 'Tell the agent about you', 'Pers
 /** Steps that judge the state after setup: when J2 failed they report "blocked by J2", not "state changed". */
 const NEEDS_SETUP = /^J[789] /;
 
-/** How long J9 polls the memory stores for the fact chat 1 told (capture and indexing), before chat 2 asks. */
+/** How long J9 polls the recall index for an embedded chunk holding the fact chat 1 told (capture and indexing); then it FAILs "not captured". */
 const RECALL_CAPTURE_WAIT_MS = 180_000;
 
 /** What the About you step tells the agent (#102 flow). Not secret. */
@@ -971,34 +973,37 @@ test('J8 the agent drafts its persona; approved in the Console', async ({}, test
 });
 
 test('J9 memory recall across chats: a fact told in one chat is recalled in a fresh one', async ({}, testInfo) => {
-  testInfo.setTimeout(15 * 60_000);
+  testInfo.setTimeout(20 * 60_000);
   const flow = requireFlow();
   await ensureSignedIn(page);
   const state = readState();
 
-  // What the Console setup left: the saved config, the status checklist, and the gateway's memory stores.
-  const config = await consoleApi<{ config?: { memory?: { autoRecall?: boolean } } }>(page, 'GET', '/api/mindstone/admin/config');
+  // What the Console setup left: the saved config, the status checklist, and the gateway's recall index.
+  type MemoryConfig = { config?: { memory?: { autoRecall?: boolean } }; etag?: string };
+  const config = await consoleApi<MemoryConfig>(page, 'GET', '/api/mindstone/admin/config');
   const autoRecall = config.json.config?.memory?.autoRecall;
   const status = await adminStatus(page);
   const memoryDetail = (status.steps.memory as { detail?: string } | undefined)?.detail;
-  const found = {
+  const setupState = {
     autoRecall: autoRecall ?? null,
     recallDefaultOn: state.recallDefaultOn ?? null,
     statusMemoryDetail: memoryDetail ?? null,
     recallIndexBuilt: recallIndexExists(),
-    j6CodewordInMemoryStores: state.j6Codeword ? memoryStoreFilesWith(state.j6Codeword) : [],
   };
-  await attachText(testInfo, 'memory-state.json', JSON.stringify({ ...found, j6Codeword: state.j6Codeword ?? null }, null, 2));
-  note(
-    testInfo,
-    `after setup: memory.autoRecall ${JSON.stringify(found.autoRecall)}; setup's recall checkbox default ${found.recallDefaultOn === true ? 'on' : found.recallDefaultOn === false ? 'off' : 'not seen'}; ` +
-      `status "${found.statusMemoryDetail ?? ''}"; recall index (vectors/memory.sqlite) ${found.recallIndexBuilt ? 'built' : 'absent'}; ` +
-      `J6's codeword in a memory store: ${found.j6CodewordInMemoryStores.join(', ') || (state.j6Codeword ? 'no' : 'not checked (J6 set none)')}`,
-  );
+  const described =
+    `after setup: memory.autoRecall ${JSON.stringify(setupState.autoRecall)}; setup's recall checkbox default ` +
+    `${setupState.recallDefaultOn === true ? 'on' : setupState.recallDefaultOn === false ? 'off' : 'not seen'}; ` +
+    `status "${setupState.statusMemoryDetail ?? ''}"; recall index (vectors/memory.sqlite) ${setupState.recallIndexBuilt ? 'built' : 'absent'}`;
 
   if (autoRecall !== true) {
-    // Today's exact state: recall off by default, no live recall index, nothing writes a memory.
-    // Anything else is a change to review, not PENDING.
+    // Today's exact state: recall off by default, no live recall index, nothing writes a memory
+    // (J6's "please remember" codeword is in no memory store). Anything else is a change to review, not PENDING.
+    if (!state.j6Codeword) {
+      throw new Error('blocked by J6: J6 recorded no codeword, so "nothing writes a memory" could not be checked; this step was not judged');
+    }
+    const found = { ...setupState, j6CodewordInMemoryStores: memoryStoreFilesWith(state.j6Codeword) };
+    await attachText(testInfo, 'memory-state.json', JSON.stringify({ ...found, j6Codeword: state.j6Codeword }, null, 2));
+    note(testInfo, `${described}; J6's codeword in a memory store (memory/, vectors/, journals/, LOG.md): ${found.j6CodewordInMemoryStores.join(', ') || 'no'}`);
     if (flow === '102') {
       requireUnchanged('the memory state after setup', found, {
         autoRecall: false,
@@ -1019,44 +1024,57 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
       `PENDING ${ISSUES.recall}: automatic recall is off after the Console setup (memory.autoRecall ${JSON.stringify(found.autoRecall)}), ` +
         'the gateway builds no recall index live, and nothing writes a memory. ' +
         'Done when: the Console setup saves memory.autoRecall: true with no manual toggle; a fact the owner tells the agent in one chat ' +
-        '("My project codename is <token>. Please remember it.") is captured and indexed; and in a fresh chat, "What is my project codename?" ' +
-        'is answered with the token, stored and on screen in its assistant row, with the token in none of that chat\'s own messages and the ' +
-        "gateway transcript for that chat recording memory_recall_injected (with hits) in the reply's own turn.",
+        '("My dog\'s name is <token>. Please remember it.") is captured into an embedded recall-index chunk, and is in none of the files every ' +
+        'prompt carries (USER.md, IDENTITY.md, memory/MEMORY.md, invariant files); in a fresh chat, "What is my dog\'s name?" is answered with ' +
+        'the token, stored and on screen in its assistant row; the gateway transcript for that chat records memory_recall_injected in the ' +
+        "reply's own run, with a hit whose chunk holds the token, and the token in no other entry of that chat; and with memory.autoRecall " +
+        'turned off, a third chat asking the same does not get the token.',
     );
     return;
   }
 
-  // The real test: recall is on, so a fact from one chat must reach a fresh one, and the gateway must say it injected it.
+  // The real test: recall is on, so a fact from one chat must reach a fresh one, through recall and nothing else.
+  await attachText(testInfo, 'memory-state.json', JSON.stringify(setupState, null, 2));
+  note(testInfo, described);
   expect(state.recallDefaultOn, 'setup\'s "Recall memories automatically" was on by default (the harness never touches it)').toBe(true);
   expect(memoryDetail, '/admin/status reports automatic recall on').toMatch(/autoRecall on/);
-  const token = `${['amber', 'cobalt', 'violet', 'saffron'][Date.now() % 4]}-osprey-${Date.now().toString(36)}`;
+  // A fact J6 doesn't share (J6 plants a project codename), so J6's memory can't satisfy this recall.
+  const token = `${['juniper', 'pepper', 'marlow', 'tansy'][Date.now() % 4]}-${Date.now().toString(36)}`;
+  const ask = "What is my dog's name? Answer with just the name.";
 
   // Chat 1: the owner tells the agent the fact.
   await page.goto('/c/new');
   await ensureMindStoneModel(page, testInfo);
-  const tell = `My project codename is ${token}. Please remember it.`;
-  const told = await sendAndWaitForReply(page, tell);
+  const told = await sendAndWaitForReply(page, `My dog's name is ${token}. Please remember it.`);
   await shot(page, testInfo, 'chat1');
   expectAnswer(told, 'chat 1 (the fact is told)');
   note(testInfo, `chat 1 ${told.conversationId}: told ${token}; reply "${told.text.slice(0, 120)}"`);
 
-  // Capture and indexing: poll the memory stores for the token instead of sleeping.
-  const captured = await waitForMemoryStore(page, token, RECALL_CAPTURE_WAIT_MS);
-  note(
-    testInfo,
-    captured.files.length
-      ? `the token reached a memory store after ${Math.round(captured.waitedMs / 1000)} s: ${captured.files.join(', ')}`
-      : `the token is in no memory store (memory/, vectors/) after ${Math.round(captured.waitedMs / 1000)} s; asking anyway`,
-  );
+  // Capture and indexing: poll the recall index until an embedded chunk holds the fact. No blind sleep, no asking anyway.
+  const captured = await waitForEmbeddedChunk(page, token, RECALL_CAPTURE_WAIT_MS);
+  const waited = Math.round(captured.waitedMs / 1000);
+  if (!captured.chunks.length) {
+    const stores = memoryStoreFilesWith(token);
+    const why =
+      `not captured: after ${waited} s no embedded chunk in the recall index (vectors/memory.sqlite, embedding_json set) holds the fact` +
+      `${captured.lastError ? ` (the index couldn't be read: ${captured.lastError})` : ''}; ` +
+      `memory stores holding it: ${stores.join(', ') || 'none'}`;
+    note(testInfo, why);
+    throw new Error(why);
+  }
+  note(testInfo, `captured after ${waited} s: ${captured.chunks.map((c) => `${c.chunkId} (${c.kind}${c.path ? ` ${c.path}` : ''})`).join(', ')}`);
+
+  // Nothing but recall may carry the fact into chat 2: it's in none of the files every prompt carries.
+  const promptFiles = promptFilesWith(token);
+  note(testInfo, `prompt files checked for the token: ${promptFiles.checked.join(', ') || 'none found'}`);
+  expect(promptFiles.found, "the fact is in none of the files every prompt carries (USER.md, IDENTITY.md, memory/MEMORY.md, invariant files), so only recall can supply it").toEqual([]);
 
   // Chat 2: a fresh conversation asks for it.
   await page.goto('/c/new');
   await ensureMindStoneModel(page, testInfo);
-  const ask = 'What is my project codename? Answer with just the codename.';
   const answer = await sendAndWaitForReply(page, ask);
   await shot(page, testInfo, 'chat2');
   await gatewayExcerpt(testInfo, 40);
-  await attachText(testInfo, 'recall.txt', `chat 1 ${told.conversationId}\n${replyLog(told)}\nchat 2 ${answer.conversationId}\n${replyLog(answer)}`);
   expect(answer.conversationId, 'chat 2 is a new conversation').not.toBe(told.conversationId);
   expect(answer.error, `chat 2's reply is not an error: ${(answer.errorText ?? '').slice(0, 300)}`).toBe(false);
 
@@ -1066,25 +1084,66 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
   expect(userTexts.length, "chat 2's user messages are stored").toBeGreaterThan(0);
   expect(userTexts.filter((t) => t.toLowerCase().includes(token)), "the token is in none of chat 2's own user messages").toEqual([]);
 
-  // The gateway's own record: recall was injected into chat 2's turn. Not the model's wording.
+  // The gateway's own record: recall supplied the fact to chat 2's turn. Not the model's wording.
   const recall = recallForConversation(answer.conversationId, token);
-  await attachText(testInfo, 'recall-transcript.json', JSON.stringify(recall, null, 2));
   note(
     testInfo,
     recall.reasons.length
-      ? `gateway transcript for chat 2: recall NOT proven: ${recall.reasons.join('; ')}`
-      : `gateway transcript for chat 2: memory_recall_injected at entry ${recall.recallAt} (run ${recall.runId ?? '?'}), ${recall.hitCount} hit(s): ` +
-          `${recall.hits.map((h) => h.title ?? h.id).join(', ')}; ${recall.hitsNamingToken} name the token`,
+      ? `gateway transcript for chat 2: recall NOT proven: ${recall.reasons.join('; ')}${recall.indexError ? ` (recall index: ${recall.indexError})` : ''}`
+      : `gateway transcript for chat 2: memory_recall_injected at entry ${recall.recallAt} (run ${recall.runId}), ${recall.hitCount} hit(s), ` +
+          `${recall.hitChunksWithToken} whose chunk holds the token: ${recall.hits.map((h) => h.chunkId).join(', ')}`,
   );
-  expect(
-    recall.reasons,
-    `the gateway transcript for chat 2 (${answer.conversationId}) proves recall was injected into its reply's turn ` +
-      '(memory_recall_injected with hits); without it recall is not observable, and a reply naming the token is not proof',
-  ).toEqual([]);
+  for (const text of recall.notes) note(testInfo, text);
 
   // The reply holds the token: stored, and on screen in its own assistant row.
+  await attachText(
+    testInfo,
+    'recall.txt',
+    `chat 1 ${told.conversationId}\n${replyLog(told)}\nchat 2 ${answer.conversationId}\n${replyLog(answer)}`,
+  );
+  await attachText(testInfo, 'recall-transcript.json', JSON.stringify(recall, null, 2));
+  expect(
+    recall.reasons,
+    `the gateway transcript for chat 2 (${answer.conversationId}) proves recall supplied the fact to its reply's turn ` +
+      '(memory_recall_injected in its run, a hit whose chunk holds the token, the token in no other entry); without it recall is not ' +
+      'observable, and a reply naming the token is not proof',
+  ).toEqual([]);
   expect(answer.text.toLowerCase(), `chat 2's reply recalls ${token} from chat 1`).toContain(token);
   await expectOnScreen(page, token, "the token in chat 2's reply", { role: 'assistant', messageId: answer.messageId });
   await shot(page, testInfo, 'recalled');
   note(testInfo, `chat 2 ${answer.conversationId}: "${answer.text.slice(0, 120)}"`);
+
+  // Negative control: with automatic recall turned off (through the Console; turning it off needs no
+  // permission), a third chat asking the same must not get the token. The setting is put back afterwards.
+  const setAutoRecall = async (value: boolean) => {
+    const current = await consoleApi<MemoryConfig>(page, 'GET', '/api/mindstone/admin/config');
+    const query = current.json.etag ? `?ifMatch=${encodeURIComponent(current.json.etag)}` : '';
+    return consoleApi<{ restartRequired?: boolean; error?: string }>(page, 'PATCH', `/api/mindstone/admin/config/memory${query}`, { autoRecall: value });
+  };
+  const off = await setAutoRecall(false);
+  expect(off.status, `memory.autoRecall turned off through the Console (${JSON.stringify(off.json)})`).toBeLessThan(300);
+  try {
+    const now = await consoleApi<MemoryConfig>(page, 'GET', '/api/mindstone/admin/config');
+    expect(now.json.config?.memory?.autoRecall, 'the saved memory.autoRecall is now off').toBe(false);
+    expect(off.json.restartRequired, 'turning recall off needs no gateway restart').not.toBe(true);
+    await page.goto('/c/new');
+    await ensureMindStoneModel(page, testInfo);
+    const control = await sendAndWaitForReply(page, ask);
+    await shot(page, testInfo, 'chat3-control');
+    await attachText(testInfo, 'control.txt', `chat 3 ${control.conversationId} (memory.autoRecall off)\n${replyLog(control)}`);
+    expect(control.conversationId, 'chat 3 is a new conversation').not.toBe(answer.conversationId);
+    expect(control.error, `chat 3's reply is not an error: ${(control.errorText ?? '').slice(0, 300)}`).toBe(false);
+    const controlEvidence = controlForConversation(control.conversationId, token);
+    await attachText(testInfo, 'control-transcript.json', JSON.stringify(controlEvidence, null, 2));
+    note(
+      testInfo,
+      `negative control, chat 3 ${control.conversationId} with recall off: ` +
+        `${controlEvidence.reasons.length ? `BROKEN: ${controlEvidence.reasons.join('; ')}` : 'no recall event, no token'}; reply "${control.text.slice(0, 120)}"`,
+    );
+    expect(control.text.toLowerCase(), "with automatic recall off, chat 3's reply doesn't have the token").not.toContain(token);
+    expect(controlEvidence.reasons, `the gateway transcript for chat 3 (${control.conversationId}), with recall off`).toEqual([]);
+  } finally {
+    const restored = await setAutoRecall(true).catch((error: Error) => ({ status: 0, json: { error: error.message } }));
+    note(testInfo, `memory.autoRecall put back on: HTTP ${restored.status}${restored.status >= 300 || restored.status === 0 ? ` ${JSON.stringify(restored.json)}` : ''}`);
+  }
 });

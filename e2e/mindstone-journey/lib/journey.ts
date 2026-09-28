@@ -567,11 +567,13 @@ type SessionEntry = {
   };
 };
 
-// Shared with lib/recall-evidence.selftest.mjs, so the self-test runs the same transcript parsing J9 uses.
+// Shared with lib/recall-evidence.selftest.mjs, so the self-test runs the same transcript parsing and judging J9 uses.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { sessionLines, recallEvidence } = require('./recall-evidence.js') as {
+const { sessionLines, recallEvidence, controlEvidence, isInvariantMarkdown } = require('./recall-evidence.js') as {
   sessionLines: (text: string, conversationId: string) => SessionEntry[];
-  recallEvidence: (entries: SessionEntry[], token: string) => RecallEvidence;
+  recallEvidence: (entries: SessionEntry[], token: string, chunkTexts?: Record<string, string>) => RecallEvidence;
+  controlEvidence: (entries: SessionEntry[], token: string) => ControlEvidence;
+  isInvariantMarkdown: (text: string) => boolean;
 };
 
 /** A Console conversation's gateway transcript entries (session key ending in its id), in order. */
@@ -652,23 +654,18 @@ export type RecallEvidence = {
   recallEvents: number;
   hitCount: number;
   hits: { id?: string; chunkId?: string; title?: string; score?: number; recallMode?: string }[];
-  hitsNamingToken: number;
+  /** Recalled chunks whose text (in the recall index) holds the token. */
+  hitChunksWithToken: number;
   replyMemoryRecall?: { hitCount?: number; promptTokens?: number };
-  userTurnsWithToken: number;
+  otherEntriesWithToken: number;
   outline: string[];
+  /** What the check couldn't run (not failures, but never silent). */
+  notes: string[];
   /** Why the transcript doesn't prove recall; empty when it does. */
   reasons: string[];
 };
 
-/**
- * Whether the gateway injected recalled memory into a Console conversation's
- * latest turn (J9): its transcript's `memory_recall_injected` event for the
- * reply's own run, with hits (lib/recall-evidence.js says what the gateway
- * records). Read by conversation, so another chat's recall can't stand in.
- */
-export function recallForConversation(conversationId: string, token: string): RecallEvidence {
-  return recallEvidence(conversationEntries(conversationId), token);
-}
+export type ControlEvidence = { entries: number; assistantAt: number; recallEvents: number; withToken: number; outline: string[]; reasons: string[] };
 
 /** The gateway's data dir (<checkout>/.runtime/mindstone); J5 and J9 read its records. */
 function dataDir(): string {
@@ -678,47 +675,178 @@ function dataDir(): string {
 }
 
 /** The recall index the gateway's sqlite-vec recall reads (MindStone-Agent: <dataDir>/vectors/memory.sqlite). */
+function recallIndexPath(): string {
+  return path.join(dataDir(), 'vectors', 'memory.sqlite');
+}
+
 export function recallIndexExists(): boolean {
-  return fs.existsSync(path.join(dataDir(), 'vectors', 'memory.sqlite'));
+  return fs.existsSync(recallIndexPath());
+}
+
+type SqliteDb = { prepare(sql: string): { all(...params: unknown[]): Record<string, unknown>[] }; close(): void };
+
+/**
+ * Runs `read` on the recall index, opened read-only with node:sqlite (Node
+ * 22.13+; the harness needs 22.19). undefined when there's no index yet.
+ */
+function readRecallIndex<T>(read: (db: SqliteDb) => T): T | undefined {
+  const file = recallIndexPath();
+  if (!fs.existsSync(file)) return undefined;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (file: string, options?: { readOnly?: boolean }) => SqliteDb };
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    return read(db);
+  } finally {
+    db.close();
+  }
+}
+
+/** Recall-index chunks whose text holds `token` and that are embedded (embedding_json set): the fact is ready to recall. */
+export function embeddedChunksWith(token: string): { chunkId: string; kind: string; path: string | null }[] {
+  return (
+    readRecallIndex((db) =>
+      db
+        .prepare('SELECT chunk_id, kind, path FROM memory_chunks WHERE instr(lower(text), ?) > 0 AND embedding_json IS NOT NULL')
+        .all(token.toLowerCase())
+        .map((r) => ({ chunkId: String(r.chunk_id), kind: String(r.kind), path: r.path === null ? null : String(r.path) })),
+    ) ?? []
+  );
 }
 
 /**
- * The files in the gateway's memory stores (<dataDir>/memory and
- * <dataDir>/vectors, the sqlite index included) whose bytes hold `text`, as
- * paths relative to the data dir. The transcripts are not a memory store and
- * aren't searched: they hold every message anyway.
+ * Waits (polling, not sleeping blindly) until the recall index has an
+ * embedded chunk holding `token`: the product's capture and indexing are
+ * done. Returns at once when it's already there, and empty on timeout. An
+ * index that can't be read yet (being created) counts as not ready.
+ */
+export async function waitForEmbeddedChunk(
+  page: Page,
+  token: string,
+  timeoutMs: number,
+): Promise<{ chunks: { chunkId: string; kind: string; path: string | null }[]; waitedMs: number; lastError?: string }> {
+  const started = Date.now();
+  let lastError: string | undefined;
+  for (;;) {
+    let chunks: { chunkId: string; kind: string; path: string | null }[] = [];
+    try {
+      chunks = embeddedChunksWith(token);
+      lastError = undefined;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    if (chunks.length || Date.now() - started >= timeoutMs) return { chunks, waitedMs: Date.now() - started, lastError };
+    await page.waitForTimeout(2_000);
+  }
+}
+
+/**
+ * Whether the gateway's recall supplied `token` to a Console conversation's
+ * latest turn (J9): its transcript's `memory_recall_injected` event for the
+ * reply's own run, with hits, one of whose chunks (read from the recall
+ * index by chunk_id) holds the token; and the token in no other entry
+ * (lib/recall-evidence.js). Read by conversation, so another chat's recall
+ * can't stand in.
+ */
+export function recallForConversation(conversationId: string, token: string): RecallEvidence & { indexError?: string } {
+  const entries = conversationEntries(conversationId);
+  const chunkIds = entries
+    .filter((e) => e.role === 'event' && e.metadata?.event === 'memory_recall_injected')
+    .flatMap((e) => ((e.metadata as { hits?: { chunkId?: unknown }[] }).hits ?? []).map((h) => h?.chunkId))
+    .filter((id): id is string => typeof id === 'string');
+  let chunkTexts: Record<string, string> | undefined;
+  let indexError: string | undefined;
+  try {
+    chunkTexts = chunkIds.length
+      ? readRecallIndex((db) =>
+          Object.fromEntries(
+            db
+              .prepare(`SELECT chunk_id, text FROM memory_chunks WHERE chunk_id IN (${chunkIds.map(() => '?').join(', ')})`)
+              .all(...chunkIds)
+              .map((r) => [String(r.chunk_id), String(r.text)]),
+          ),
+        )
+      : {};
+  } catch (error) {
+    indexError = error instanceof Error ? error.message : String(error);
+  }
+  const evidence = recallEvidence(entries, token, chunkTexts);
+  return indexError ? { ...evidence, indexError } : evidence;
+}
+
+/** J9's negative control: with automatic recall off, the conversation has no recall event and no token (lib/recall-evidence.js). */
+export function controlForConversation(conversationId: string, token: string): ControlEvidence {
+  return controlEvidence(conversationEntries(conversationId), token);
+}
+
+/** Text files under `dir` (recursively), or `dir` itself if it's a file. */
+function filesUnder(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  if (fs.statSync(dir).isFile()) return [dir];
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    return entry.isDirectory() ? filesUnder(full) : entry.isFile() ? [full] : [];
+  });
+}
+
+/** Whether a file's bytes hold `text` (an ASCII token), ignoring case; binary files (the sqlite index) included. */
+const fileHolds = (file: string, text: string) =>
+  fs.statSync(file).size < 256 * 1024 * 1024 && fs.readFileSync(file).toString('latin1').toLowerCase().includes(text.toLowerCase());
+
+/**
+ * The files in the gateway's memory stores whose bytes hold `text`, as paths
+ * relative to the data dir: <dataDir>/memory, <dataDir>/vectors (the sqlite
+ * index included), <dataDir>/journals and <dataDir>/LOG.md. Left out:
+ * memory/recall-usage.jsonl (a usage log, not a memory) and the transcripts
+ * (they hold every message anyway).
  */
 export function memoryStoreFilesWith(text: string): string[] {
   const root = dataDir();
-  const needle = Buffer.from(text, 'utf8');
-  const found: string[] = [];
-  const walk = (d: string) => {
-    if (!fs.existsSync(d)) return;
-    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-      const full = path.join(d, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else if (entry.isFile() && fs.statSync(full).size < 256 * 1024 * 1024 && fs.readFileSync(full).includes(needle)) {
-        found.push(path.relative(root, full));
-      }
-    }
-  };
-  for (const store of ['memory', 'vectors']) walk(path.join(root, store));
-  return found.sort();
+  return ['memory', 'vectors', 'journals', 'LOG.md']
+    .flatMap((store) => filesUnder(path.join(root, store)))
+    .filter((file) => path.basename(file) !== 'recall-usage.jsonl' && fileHolds(file, text))
+    .map((file) => path.relative(root, file))
+    .sort();
 }
 
 /**
- * Waits (polling, not sleeping blindly) until a memory store holds `text`:
- * the product's capture and indexing are done. Returns at once when it's
- * already there; after `timeoutMs`, returns what it found (nothing), and the
- * recall checks decide.
+ * The files the gateway puts in every prompt, with no recall: each agent's
+ * USER.md and IDENTITY.md (agents/<id>/, and any identityPath/userPath the
+ * config names, relative to it), memory/MEMORY.md (the memory index), and
+ * the invariant files (memory files with a top-level `invariant:`, which the
+ * invariant tier injects on every turn). Returns what was checked and which
+ * of them hold `text`, relative to the data dir.
  */
-export async function waitForMemoryStore(page: Page, text: string, timeoutMs: number): Promise<{ files: string[]; waitedMs: number }> {
-  const started = Date.now();
-  for (;;) {
-    const files = memoryStoreFilesWith(text);
-    if (files.length || Date.now() - started >= timeoutMs) return { files, waitedMs: Date.now() - started };
-    await page.waitForTimeout(2_000);
+export function promptFilesWith(text: string): { checked: string[]; found: string[] } {
+  const root = dataDir();
+  const files = new Set<string>();
+  for (const agent of fs.existsSync(path.join(root, 'agents')) ? fs.readdirSync(path.join(root, 'agents')) : []) {
+    for (const name of ['USER.md', 'IDENTITY.md']) files.add(path.join(root, 'agents', agent, name));
   }
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(root, 'config.json'), 'utf8')) as unknown;
+    const visit = (value: unknown, depth: number) => {
+      if (!value || typeof value !== 'object' || depth > 6) return;
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        if ((k === 'identityPath' || k === 'userPath') && typeof v === 'string') files.add(path.resolve(root, v));
+        else visit(v, depth + 1);
+      }
+    };
+    visit((config as { agents?: unknown }).agents, 0);
+  } catch {
+    // no readable config: the agents/ files still count
+  }
+  files.add(path.join(root, 'memory', 'MEMORY.md'));
+  for (const store of ['memory', 'journals', 'LOG.md']) {
+    for (const file of filesUnder(path.join(root, store))) {
+      if (file.endsWith('.md') && isInvariantMarkdown(fs.readFileSync(file, 'utf8'))) files.add(file);
+    }
+  }
+  const existing = [...files].filter((file) => fs.existsSync(file) && fs.statSync(file).isFile());
+  return {
+    checked: existing.map((file) => path.relative(root, file)).sort(),
+    found: existing.filter((file) => fileHolds(file, text)).map((file) => path.relative(root, file)).sort(),
+  };
 }
 
 /** Text that means the Console showed an error, not an answer. */
