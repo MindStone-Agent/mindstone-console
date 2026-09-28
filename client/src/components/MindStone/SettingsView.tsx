@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
+import { CONFIRMATION, confirmationMatches, normalizeConfirmation } from './confirmation';
 import { useAuthContext, useLocalize } from '~/hooks';
 import RestartGateway from './RestartGateway';
 
@@ -38,7 +39,6 @@ const SECTIONS = [
   'packs',
   'workspace',
 ];
-const CONFIRMATION = 'enable advanced settings';
 
 function errorBody(error: unknown): { error?: string; errors?: FieldError[] } {
   const data = (error as { response?: { data?: unknown } })?.response?.data;
@@ -165,7 +165,7 @@ export default function MindStoneSettingsView() {
     try {
       await request.post(
         `${BASE}/permissions/advanced`,
-        enabled ? { enabled, confirm: confirmText } : { enabled },
+        enabled ? { enabled, confirm: normalizeConfirmation(confirmText) } : { enabled },
       );
       setConfirmText('');
       await load();
@@ -178,6 +178,8 @@ export default function MindStoneSettingsView() {
   };
 
   const card = 'rounded-xl border border-border-medium bg-surface-primary p-4';
+  const confirmOk = confirmationMatches(confirmText);
+  const confirmHint = confirmText !== '' && !confirmOk;
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-4xl flex-col gap-4 p-6 text-text-primary">
@@ -368,16 +370,25 @@ export default function MindStoneSettingsView() {
                     value={confirmText}
                     onChange={(e) => setConfirmText(e.target.value)}
                     aria-label={localize('com_mindstone_confirmation')}
+                    aria-describedby={confirmHint ? 'ms-confirm-hint' : undefined}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                   />
                 </label>
                 <button
                   type="button"
                   className="rounded bg-red-600 px-3 py-1 text-white disabled:opacity-50"
-                  disabled={confirmText !== CONFIRMATION}
+                  disabled={!confirmOk}
                   onClick={() => void setAdvanced(true)}
                 >
                   {localize('com_mindstone_turn_on')}
                 </button>
+                {confirmHint && (
+                  <p id="ms-confirm-hint" className="w-full text-sm text-text-secondary">
+                    {localize('com_mindstone_confirmation_hint', { 0: CONFIRMATION })}
+                  </p>
+                )}
               </div>
             )}
           </section>
