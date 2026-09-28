@@ -83,6 +83,7 @@ const ENDPOINTS = [
   { method: 'post', path: 'onboarding/complete', write: true },
   { method: 'post', path: 'memory/check', write: true },
   { method: 'post', path: 'memory/pull', write: true },
+  { method: 'get', path: 'personas', write: false },
 ];
 
 /** What each caller should get from an allowlisted endpoint. */
@@ -329,6 +330,15 @@ describe('MindStone admin proxy', () => {
       ['post', 'memory/pull/x'],
       ['post', 'x/memory/pull'],
       ['post', 'memory/models/pull'],
+      // Personas (MindStone-Agent #105): GET the list only; switching is PATCH config/personas.
+      ['post', 'personas'],
+      ['get', 'personas/x'],
+      ['get', 'personas/'],
+      ['get', 'personasx'],
+      ['get', 'x/personas'],
+      ['delete', 'personas'],
+      ['patch', 'personas'],
+      ['get', 'personas%2F..%2Fconfig'],
     ];
     for (const [method, path] of outside) {
       const response = await call('manage', { method, path });
