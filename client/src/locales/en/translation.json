@@ -3100,6 +3100,7 @@
   "com_mindstone_per_active_none": "No persona is active.",
   "com_mindstone_per_active_missing": "{{0}} is set as the active persona, but it isn't installed.",
   "com_mindstone_per_make_active": "Make active",
+  "com_mindstone_per_every_chat": "The active persona is used in every chat, including other people's chats and connectors, so it shouldn't hold private details about you.",
   "com_mindstone_per_use_none": "Use no persona",
   "com_mindstone_per_broken": "This persona can't be loaded, so it can't be made active.",
   "com_mindstone_per_activated": "{{0}} is now the active persona. The next message uses it.",
