@@ -159,6 +159,10 @@ export default function MindStoneOnboardingView() {
   const [info, setInfo] = useState<ModelsInfo | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  // A failed re-read stays up across steps, with a way to try again.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // The step whose write the gateway refused for lack of advanced settings.
+  const [regrantStep, setRegrantStep] = useState<Step | null>(null);
   const [busy, setBusy] = useState(false);
   // Access step.
   const [confirmText, setConfirmText] = useState('');
@@ -207,12 +211,10 @@ export default function MindStoneOnboardingView() {
       setPermissions(p.permissions);
       setInfo(m);
       setConfig(c.config);
+      setLoadError(null);
       return { models: m, config: c.config };
     } catch (error) {
-      setMessage({
-        ok: false,
-        text: errorText(error) ?? localize('com_mindstone_gateway_unreachable'),
-      });
+      setLoadError(errorText(error) ?? localize('com_mindstone_gateway_unreachable'));
       return undefined;
     }
   }, [localize]);
@@ -243,7 +245,29 @@ export default function MindStoneOnboardingView() {
   /** Move to a step; a message from the step being left is cleared. */
   const goTo = (next: Step) => {
     setMessage(null);
+    setRegrantStep(null);
     setStep(next);
+  };
+
+  /**
+   * Show why a step's write failed. The gateway answers 403 with its reason
+   * when advanced settings have run out (they last an hour), so that offers a
+   * way back through Access to this step.
+   */
+  const showWriteError = (error: unknown) => {
+    const text = errorText(error);
+    const status = (error as { response?: { status?: number } })?.response?.status;
+    setMessage({ ok: false, text: text ?? localize('com_mindstone_not_saved') });
+    setRegrantStep(status === 403 && text !== undefined ? step : null);
+  };
+
+  /** Back to Access with the grant gone, then on to the step that was refused; saved steps stay saved. */
+  const regrant = () => {
+    if (!regrantStep) return;
+    setResumeAt(regrantStep);
+    setPermissions((current) => (current ? { ...current, advancedSettings: false } : current));
+    goTo('access');
+    void load();
   };
 
   const preset = info?.presets.find((candidate) => candidate.presetId === presetId);
@@ -367,7 +391,7 @@ export default function MindStoneOnboardingView() {
     } catch (error) {
       const status = (error as { response?: { status?: number } })?.response?.status;
       if (status === 422) setListFailed(true);
-      setMessage({ ok: false, text: errorText(error) ?? localize('com_mindstone_not_saved') });
+      showWriteError(error);
     } finally {
       setBusy(false);
     }
@@ -384,7 +408,7 @@ export default function MindStoneOnboardingView() {
       await load();
       goTo('persona');
     } catch (error) {
-      setMessage({ ok: false, text: errorText(error) ?? localize('com_mindstone_not_saved') });
+      showWriteError(error);
     } finally {
       setBusy(false);
     }
@@ -408,7 +432,7 @@ export default function MindStoneOnboardingView() {
       await load();
       goTo('memory');
     } catch (error) {
-      setMessage({ ok: false, text: errorText(error) ?? localize('com_mindstone_not_saved') });
+      showWriteError(error);
     } finally {
       setBusy(false);
     }
@@ -462,6 +486,8 @@ export default function MindStoneOnboardingView() {
       }
     } catch (error) {
       failure = errorText(error) ?? localize('com_mindstone_onb_memory_pull_failed');
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      if (status === 403 && errorText(error) !== undefined) setRegrantStep('memory');
     } finally {
       setPulling(false);
       setBusy(false);
@@ -485,7 +511,7 @@ export default function MindStoneOnboardingView() {
       await load();
       goTo('connectors');
     } catch (error) {
-      setMessage({ ok: false, text: errorText(error) ?? localize('com_mindstone_not_saved') });
+      showWriteError(error);
     } finally {
       setBusy(false);
     }
@@ -530,7 +556,7 @@ export default function MindStoneOnboardingView() {
         ),
       });
     } catch (error) {
-      setMessage({ ok: false, text: errorText(error) ?? localize('com_mindstone_not_saved') });
+      showWriteError(error);
     } finally {
       setBusy(false);
     }
@@ -548,7 +574,7 @@ export default function MindStoneOnboardingView() {
       await load();
       goTo('finish');
     } catch (error) {
-      setMessage({ ok: false, text: errorText(error) ?? localize('com_mindstone_not_saved') });
+      showWriteError(error);
     } finally {
       setBusy(false);
     }
@@ -620,9 +646,29 @@ export default function MindStoneOnboardingView() {
             </li>
           ))}
         </ol>
+        {loadError && (
+          <div role="alert" className="flex flex-wrap items-center gap-2 text-red-500">
+            <span>{loadError}</span>
+            <button
+              type="button"
+              className={`${secondary} disabled:opacity-50`}
+              disabled={busy}
+              onClick={() => void load()}
+            >
+              {localize('com_mindstone_onb_check_again')}
+            </button>
+          </div>
+        )}
         {message && (
           <div role="status" className={message.ok ? 'text-green-600' : 'text-red-500'}>
             {message.text}
+          </div>
+        )}
+        {regrantStep && (
+          <div>
+            <button type="button" className={primary} onClick={regrant}>
+              {localize('com_mindstone_onb_regrant')}
+            </button>
           </div>
         )}
 

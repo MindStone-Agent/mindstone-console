@@ -32,6 +32,8 @@ const CHECK_OK = { ok: true, providerId: 'ollama', model: 'nomic-embed-text', di
 
 let steps: Record<string, { done: boolean; detail: string }>;
 let advancedSettings: boolean;
+let onboarded: boolean;
+let statusFails: boolean;
 
 function ChatProbe() {
   const location = useLocation();
@@ -65,8 +67,13 @@ beforeEach(() => {
   mockPatch.mockReset();
   steps = { provider: DONE, persona: DONE, memory: NOT_DONE, connectors: NOT_DONE };
   advancedSettings = true;
+  onboarded = true;
+  statusFails = false;
   mockGet.mockImplementation(async (url: string) => {
-    if (url === `${BASE}/status`) return { ok: true, onboarded: true, profiles: [], steps };
+    if (url === `${BASE}/status` && statusFails) {
+      throw { response: { status: 502, data: { ok: false, error: "the gateway didn't answer" } } };
+    }
+    if (url === `${BASE}/status`) return { ok: true, onboarded, profiles: [], steps };
     if (url === `${BASE}/permissions`) return { permissions: { advancedSettings } };
     if (url === `${BASE}/models`) return { presets: [], providers: [], models: [] };
     if (url === `${BASE}/config`) return { config: {}, etag: '"e1"' };
@@ -463,6 +470,19 @@ describe('connectors step', () => {
     expect(within(reminder).queryByRole('link')).toBeNull();
   });
 
+  it('keeps the restart reminder for a single connector', async () => {
+    mockPost.mockResolvedValue({ ok: true });
+    mockPatch.mockResolvedValue({ ok: true, changed: ['channels'], restartRequired: true });
+    await openTelegram();
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_done_title' });
+    expect(screen.getByTestId('ms-onb-finish-restart')).toHaveTextContent(
+      /^com_mindstone_onb_finish_restart com_mindstone_onb_connector_telegram$/,
+    );
+  });
+
   it('shows no restart reminder when the save needed none', async () => {
     mockPost.mockResolvedValue({ ok: true });
     await openTelegram();
@@ -619,6 +639,145 @@ describe('about step and finish', () => {
     expect(postsTo('permissions/advanced')).toEqual([
       [`${BASE}/permissions/advanced`, { enabled: false }],
     ]);
+  });
+});
+
+describe('a failed status read after a save', () => {
+  it('stays on Finish with the error and a Check again that reads the status again', async () => {
+    steps.memory = DONE;
+    onboarded = false;
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/onboarding/complete`) statusFails = true;
+      return { ok: true };
+    });
+    renderAt('about');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    expect(
+      await screen.findByRole('heading', { name: 'com_mindstone_onb_not_done_title' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent("the gateway didn't answer");
+    expect(button('com_mindstone_onb_start_chat')).toBeDisabled();
+
+    statusFails = false;
+    onboarded = true;
+    fireEvent.click(button('com_mindstone_onb_check_again'));
+    expect(
+      await screen.findByRole('heading', { name: 'com_mindstone_onb_done_title' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(button('com_mindstone_onb_start_chat')).toBeEnabled();
+  });
+});
+
+describe('advanced settings running out mid-setup', () => {
+  const EXPIRED = {
+    response: {
+      status: 403,
+      data: { ok: false, error: 'these settings need the advanced-settings permission' },
+    },
+  };
+
+  it('offers them again from the refused step, then resumes it with its check kept', async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/permissions/advanced`) {
+        advancedSettings = true;
+        return { ok: true };
+      }
+      return CHECK_OK;
+    });
+    mockPatch.mockImplementationOnce(async () => {
+      advancedSettings = false;
+      throw EXPIRED;
+    });
+    renderAt('memory');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    await waitFor(() => expect(button('com_mindstone_onb_save_next')).toBeEnabled());
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    expect(
+      await screen.findByText('these settings need the advanced-settings permission'),
+    ).toBeInTheDocument();
+
+    fireEvent.click(button('com_mindstone_onb_regrant'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_access_title' });
+    fireEvent.change(await screen.findByLabelText('com_mindstone_confirmation'), {
+      target: { value: 'enable advanced settings' },
+    });
+    fireEvent.click(button('com_mindstone_turn_on'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    // The passed check is still there: no need to run it again.
+    expect(button('com_mindstone_onb_save_next')).toBeEnabled();
+    expect(postsTo('memory/check')).toHaveLength(1);
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    expect(
+      await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' }),
+    ).toBeInTheDocument();
+    expect(mockPatch).toHaveBeenCalledTimes(2);
+  });
+
+  it('resumes the step that was refused, not the one setup was opened at', async () => {
+    steps.memory = DONE;
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/permissions/advanced`) {
+        advancedSettings = true;
+        return { ok: true };
+      }
+      return CHECK_OK;
+    });
+    mockPatch.mockImplementationOnce(async () => {
+      advancedSettings = false;
+      throw EXPIRED;
+    });
+    renderAt('connectors');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' });
+    fireEvent.click(button('com_mindstone_onb_back'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    await waitFor(() => expect(button('com_mindstone_onb_save_next')).toBeEnabled());
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    fireEvent.click(await screen.findByRole('button', { name: 'com_mindstone_onb_regrant' }));
+    fireEvent.change(await screen.findByLabelText('com_mindstone_confirmation'), {
+      target: { value: 'enable advanced settings' },
+    });
+    fireEvent.click(button('com_mindstone_turn_on'));
+    expect(
+      await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' }),
+    ).toBeInTheDocument();
+  });
+
+  it('offers them again when a model download is refused', async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/memory/pull`) throw EXPIRED;
+      return { ok: false, error: 'model not found', missingModel: true };
+    });
+    renderAt('memory');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'com_mindstone_onb_memory_download' }),
+    );
+    expect(
+      await screen.findByRole('button', { name: 'com_mindstone_onb_regrant' }),
+    ).toBeInTheDocument();
+  });
+
+  it('offers nothing for other refusals, or for a 403 the gateway did not explain', async () => {
+    steps.memory = DONE;
+    mockPost.mockRejectedValueOnce({
+      response: { status: 409, data: { ok: false, error: 'choose a persona first' } },
+    });
+    renderAt('about');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_about_title' });
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByText('choose a persona first');
+    expect(screen.queryByRole('button', { name: 'com_mindstone_onb_regrant' })).toBeNull();
+
+    // The Console's own capability check answers 403 without a gateway reason.
+    mockPost.mockRejectedValueOnce({ response: { status: 403, data: { message: 'Forbidden' } } });
+    fireEvent.click(button('com_mindstone_onb_save_next'));
+    await screen.findByText('com_mindstone_not_saved');
+    expect(screen.queryByRole('button', { name: 'com_mindstone_onb_regrant' })).toBeNull();
   });
 });
 
