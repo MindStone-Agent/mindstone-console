@@ -7,8 +7,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
+import { CONFIRMATION, confirmationMatches, normalizeConfirmation } from './confirmation';
 import SystemStatus, { type SystemStatusData } from './SystemStatus';
 import { useAuthContext, useLocalize } from '~/hooks';
+import RestartGateway from './RestartGateway';
 
 type Step = { done: boolean; detail: string };
 type Status = { onboarded: boolean; steps: Record<string, Step>; system?: SystemStatusData };
@@ -38,7 +40,6 @@ const SECTIONS = [
   'packs',
   'workspace',
 ];
-const CONFIRMATION = 'enable advanced settings';
 
 function errorBody(error: unknown): { error?: string; errors?: FieldError[] } {
   const data = (error as { response?: { data?: unknown } })?.response?.data;
@@ -62,6 +63,7 @@ export default function MindStoneSettingsView() {
     text: string;
     errors?: FieldError[];
   } | null>(null);
+  const [restartNeeded, setRestartNeeded] = useState(false);
   const [secretName, setSecretName] = useState('');
   const [secretValue, setSecretValue] = useState('');
   const [secretResult, setSecretResult] = useState<string | null>(null);
@@ -127,6 +129,7 @@ export default function MindStoneSettingsView() {
         changed: string[];
         restartRequired: boolean;
       };
+      if (result.restartRequired) setRestartNeeded(true);
       setSaveResult({
         ok: true,
         text: result.changed.length
@@ -169,7 +172,7 @@ export default function MindStoneSettingsView() {
     try {
       await request.post(
         `${BASE}/permissions/advanced`,
-        enabled ? { enabled, confirm: confirmText } : { enabled },
+        enabled ? { enabled, confirm: normalizeConfirmation(confirmText) } : { enabled },
       );
       setConfirmText('');
       await load();
@@ -182,6 +185,8 @@ export default function MindStoneSettingsView() {
   };
 
   const card = 'rounded-xl border border-border-medium bg-surface-primary p-4';
+  const confirmOk = confirmationMatches(confirmText);
+  const confirmHint = confirmText !== '' && !confirmOk;
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-4xl flex-col gap-4 p-6 text-text-primary">
@@ -222,6 +227,9 @@ export default function MindStoneSettingsView() {
               }
             >
               {localize(status.onboarded ? 'com_mindstone_onb_rerun' : 'com_mindstone_onb_start')}
+            </Link>{' '}
+            <Link to="/mindstone/diagnostics" className="ml-3 mt-2 inline-block text-sm underline">
+              {localize('com_mindstone_diag_title')}
             </Link>{' '}
             <Link to="/mindstone/approvals" className="ml-3 mt-2 inline-block text-sm underline">
               {localize('com_mindstone_appr_title')}
@@ -384,20 +392,31 @@ export default function MindStoneSettingsView() {
                     value={confirmText}
                     onChange={(e) => setConfirmText(e.target.value)}
                     aria-label={localize('com_mindstone_confirmation')}
+                    aria-describedby={confirmHint ? 'ms-confirm-hint' : undefined}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                   />
                 </label>
                 <button
                   type="button"
                   className="rounded bg-red-600 px-3 py-1 text-white disabled:opacity-50"
-                  disabled={confirmText !== CONFIRMATION}
+                  disabled={!confirmOk}
                   onClick={() => void setAdvanced(true)}
                 >
                   {localize('com_mindstone_turn_on')}
                 </button>
+                {confirmHint && (
+                  <p id="ms-confirm-hint" className="w-full text-sm text-text-secondary">
+                    {localize('com_mindstone_confirmation_hint', { 0: CONFIRMATION })}
+                  </p>
+                )}
               </div>
             )}
           </section>
         )}
+
+        <RestartGateway needed={restartNeeded} />
       </div>
     </div>
   );

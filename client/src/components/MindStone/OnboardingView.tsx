@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { request } from 'librechat-data-provider';
 import { Link, useNavigate } from 'react-router-dom';
+import { CONFIRMATION, confirmationMatches, normalizeConfirmation } from './confirmation';
 import { useLocalize } from '~/hooks';
 
 type Preset = {
@@ -30,7 +31,6 @@ type Config = {
 };
 
 const BASE = '/api/mindstone/admin';
-const CONFIRMATION = 'enable advanced settings';
 const STEPS = ['access', 'provider', 'model', 'persona', 'finish'] as const;
 type Step = (typeof STEPS)[number];
 const STEP_LABELS = {
@@ -143,7 +143,10 @@ export default function MindStoneOnboardingView() {
   const turnOnAccess = async () => {
     setBusy(true);
     try {
-      await request.post(`${BASE}/permissions/advanced`, { enabled: true, confirm: confirmText });
+      await request.post(`${BASE}/permissions/advanced`, {
+        enabled: true,
+        confirm: normalizeConfirmation(confirmText),
+      });
       setConfirmText('');
       await load();
       goTo('provider');
@@ -266,6 +269,8 @@ export default function MindStoneOnboardingView() {
   const secondary = 'rounded border border-border-medium px-3 py-1';
   const input = 'rounded border border-border-medium bg-surface-secondary p-2';
   const stepIndex = STEPS.indexOf(step);
+  const confirmOk = confirmationMatches(confirmText);
+  const confirmHint = confirmText !== '' && !confirmOk;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -321,16 +326,25 @@ export default function MindStoneOnboardingView() {
                     value={confirmText}
                     onChange={(e) => setConfirmText(e.target.value)}
                     aria-label={localize('com_mindstone_confirmation')}
+                    aria-describedby={confirmHint ? 'ms-onb-confirm-hint' : undefined}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                   />
                 </label>
                 <button
                   type="button"
                   className={primary}
-                  disabled={busy || confirmText !== CONFIRMATION}
+                  disabled={busy || !confirmOk}
                   onClick={() => void turnOnAccess()}
                 >
                   {localize('com_mindstone_turn_on')}
                 </button>
+                {confirmHint && (
+                  <p id="ms-onb-confirm-hint" className="w-full text-sm text-text-secondary">
+                    {localize('com_mindstone_confirmation_hint', { 0: CONFIRMATION })}
+                  </p>
+                )}
               </div>
             )}
           </section>
