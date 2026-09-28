@@ -1334,18 +1334,23 @@ test('J11 enterprise endpoint (Azure OpenAI / Foundry): saved, tested and chatte
     await attachText(testInfo, 'reply.txt', replyLog(reply));
     await shot(page, testInfo, 'chat-reply');
     await gatewayExcerpt(testInfo, 40);
-    expectAnswer(reply, 'the chat through the enterprise endpoint');
-    expect(reply.text, "the reply is the stub's (its per-run token)").toContain(stub.token);
-    await expectOnScreen(page, stub.token, "the stub's token in the reply", { role: 'assistant', messageId: reply.messageId });
+    // Everything that says where the reply came from, gathered before any assertion, so a failure names it:
+    // the stub's log (did the chat reach it?) and the gateway transcript (which provider and model Pi called).
     const proof = await waitForStubProof(page, stub.log, { sinceMs: since, nonce });
-    proofs.chat = { nonce, matched: proof.matched, sinceTheMessage: proof.recent, reasons: proof.reasons };
-    expect(proof.reasons, "the stub logged the chat: an authenticated, streamed POST <endpoint>/responses?api-version=v1 carrying the chat's own message").toEqual([]);
     const answered = answeredBy(reply.text);
+    const calledBy = `${answered?.provider ?? '?'}/${answered?.model ?? '?'}${answered?.modelFallbackMessage ? ` (fallback: ${answered.modelFallbackMessage})` : ''}`;
+    proofs.chat = { nonce, matched: proof.matched, sinceTheMessage: proof.recent, reasons: proof.reasons, answeredBy: answered ?? { found: false } };
+    await attachText(testInfo, 'stub-proof.json', JSON.stringify(proofs, null, 2));
     note(
       testInfo,
-      `chat ${reply.conversationId}: "${reply.text.slice(0, 120)}"; stub call #${proof.matched?.n}; ` +
-        `answered by (Pi session): ${answered?.provider ?? '?'} / ${answered?.model ?? '?'}`,
+      `chat ${reply.conversationId}: "${reply.text.slice(0, 120)}"; the stub ${proof.matched ? `answered it (call #${proof.matched.n})` : 'got no request for it'}; ` +
+        `the Pi session called ${calledBy}`,
     );
+    const where = `the saved route is ${model}; the Pi session called ${calledBy}; the stub: ${proof.reasons.join('; ') || 'answered it'}`;
+    expectAnswer(reply, 'the chat through the enterprise endpoint');
+    expect(proof.reasons, `the stub logged the chat: an authenticated, streamed POST <endpoint>/responses?api-version=v1 carrying the chat's own message (${where})`).toEqual([]);
+    expect(reply.text, `the reply is the stub's, with its per-run token (${where})`).toContain(stub.token);
+    await expectOnScreen(page, stub.token, "the stub's token in the reply", { role: 'assistant', messageId: reply.messageId });
   });
 
   await test.step('settings: the Model providers page lists it', async () => {
