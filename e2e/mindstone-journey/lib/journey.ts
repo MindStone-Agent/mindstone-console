@@ -943,11 +943,24 @@ const enterprise = require('./enterprise-evidence.js') as {
   ENDPOINT_PATH: string;
   RESPONSES_PATH: string;
   API_VERSION: string;
-  j11Decision: (arg: { kindOffered: boolean; formPresent: boolean; expectEnterprise: boolean }) => { verdict: 'run' | 'pending' | 'fail'; why: string };
+  j11Decision: (arg: { kindOffered: boolean; formPresent: boolean; expectEnterprise: boolean; gatewayOffers?: boolean }) => {
+    verdict: 'run' | 'pending' | 'fail';
+    why: string;
+  };
   readStubLog: (file: string) => { entries: StubEntry[]; unreadable: number; missing: boolean };
-  stubProof: (entries: StubEntry[], opts: { sinceMs?: number; nonce?: string; path?: string; apiVersion?: string }) => { matched?: StubEntry; recent: string[]; reasons: string[] };
+  stubProof: (
+    entries: StubEntry[],
+    opts: { sinceMs?: number; nonce?: string; requestN?: number; path?: string; apiVersion?: string },
+  ) => { matched?: StubEntry; recent: string[]; reasons: string[] };
+  stubLeaks: (entries: StubEntry[]) => string[];
+  expectedStatusLinks: (arg: { links: string[]; today: string[]; expectEnterprise: boolean }) => { expected: string[]; note?: string };
 };
-export const { j11Decision } = enterprise;
+export const { j11Decision, expectedStatusLinks } = enterprise;
+
+/** J11's last check, on every path that doesn't FAIL: no request in the stub's whole log leaked a credential or the key. */
+export function stubLeakReasons(log: string): string[] {
+  return enterprise.stubLeaks(enterprise.readStubLog(log).entries);
+}
 
 /** One request the stub Azure endpoint recorded (lib/azure-stub.mjs): no key, no credential values, no body. */
 export type StubEntry = {
@@ -956,6 +969,7 @@ export type StubEntry = {
   method: string;
   path: string;
   apiVersion: string | null;
+  queryNames?: string[];
   auth: 'ok' | 'wrong' | 'missing';
   status: number;
   answered: string;
@@ -1002,7 +1016,7 @@ export async function stubHealth(url: string): Promise<number> {
 export async function waitForStubProof(
   page: Page,
   log: string,
-  opts: { sinceMs: number; nonce?: string },
+  opts: { sinceMs: number; nonce?: string; requestN?: number },
   timeoutMs = 15_000,
 ): Promise<ReturnType<typeof enterprise.stubProof> & { entries: StubEntry[] }> {
   const started = Date.now();

@@ -40,6 +40,7 @@ import {
   ensureMindStoneModel,
   ensureSignedIn,
   enterpriseStub,
+  expectedStatusLinks,
   expectOnScreen,
   fillSecret,
   formationEvidence,
@@ -64,6 +65,7 @@ import {
   personaForConversation,
   j11Decision,
   stubHealth,
+  stubLeakReasons,
   waitForStubProof,
 } from './lib/journey';
 import type { FlowName, Reply, StoredMessage } from './lib/journey';
@@ -89,25 +91,6 @@ const TODAY_STATUS_LINKS = ['Run guided setup again', 'Diagnostics', 'Approvals'
  * own "set it up" link), and the #105 Personas link, which J8 checks.
  */
 const IGNORED_STATUS_LINKS = ['Set up memory', 'Tell the agent about you', 'Personas'];
-
-/** The MindStone-Agent #126 link to the Model providers page (J11), right after Skills. */
-const PROVIDERS_LINK = 'Model providers';
-
-/**
- * The links /mindstone must show, exactly: with UAT_EXPECT_ENTERPRISE=1, today's
- * plus Model providers right after Skills (required). Without it, today's with or
- * without that one link in that one place (a Console with or without #126);
- * everything else stays strict.
- */
-function expectedStatusLinks(links: string[], testInfo: TestInfo): string[] {
-  const withProviders = [...TODAY_STATUS_LINKS, PROVIDERS_LINK];
-  if (process.env.UAT_EXPECT_ENTERPRISE === '1') return withProviders;
-  if (JSON.stringify(links) === JSON.stringify(withProviders)) {
-    note(testInfo, `"${PROVIDERS_LINK}" (#126) is there after Skills; accepted without UAT_EXPECT_ENTERPRISE (J11 checks it)`);
-    return withProviders;
-  }
-  return TODAY_STATUS_LINKS;
-}
 
 /** Steps that judge the state after setup: when J2 failed they report "blocked by J2", not "state changed". */
 const NEEDS_SETUP = /^J[789] /;
@@ -148,6 +131,11 @@ test.beforeAll(async ({ browser }) => {
   page = await context.newPage();
 });
 
+// GUARD: Playwright charges an error in this hook to the worker's LAST test, which is J11 (checked: the
+// json report puts it in J11's result, located at this hook's line). Where J11 isn't counted (no
+// UAT_EXPECT_ENTERPRISE, and always for the DEMO SUBSET), J11's excuse must not cover it: lib/gate-rows.mjs
+// excuses a failure only when every error is located inside the test's own lines, so an error from here (or
+// from afterEach) still fails the verdicts. Keep hooks above the tests, and J11 last. Never swallow an error here.
 test.afterAll(async () => {
   await context?.close();
 });
@@ -750,7 +738,11 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
     await expect(page.getByRole('heading', { name: 'MindStone settings' })).toBeVisible();
     const links = await statusLinks(page);
     note(testInfo, `links: ${links.join(', ')}`);
-    expect(links, 'the links on /mindstone').toEqual(expectedStatusLinks(links, testInfo));
+    // #126 adds "Model providers" right after Skills: required with UAT_EXPECT_ENTERPRISE=1, accepted there (only
+    // there) without it; every other link stays strict (lib/enterprise-evidence.js, self-tested).
+    const rule = expectedStatusLinks({ links, today: TODAY_STATUS_LINKS, expectEnterprise: process.env.UAT_EXPECT_ENTERPRISE === '1' });
+    if (rule.note) note(testInfo, rule.note);
+    expect(links, 'the links on /mindstone').toEqual(rule.expected);
     await page
       .locator('section[aria-labelledby="ms-onboarding"]')
       .getByRole('link', { name: 'Skills' })
@@ -1237,7 +1229,7 @@ test('J11 enterprise endpoint (Azure OpenAI / Foundry): saved, tested and chatte
   const listed = await consoleApi<{ enterprise?: { kind: string }[] }>(page, 'GET', '/api/mindstone/admin/models');
   const gatewayKinds = (listed.json?.enterprise ?? []).map((k) => k.kind);
   note(testInfo, `provider step: ${choices.join(', ')}; the gateway lists enterprise kinds: ${gatewayKinds.join(', ') || 'none'}`);
-  const decision = j11Decision({ kindOffered, formPresent, expectEnterprise });
+  const decision = j11Decision({ kindOffered, formPresent, expectEnterprise, gatewayOffers: gatewayKinds.includes('azure-openai') });
   if (decision.verdict === 'pending') {
     test.fixme(
       true,
@@ -1258,12 +1250,22 @@ test('J11 enterprise endpoint (Azure OpenAI / Foundry): saved, tested and chatte
   expect(await stubHealth(stub.url), 'the stub Azure endpoint answers its health route').toBe(200);
   const model = `enterprise-azure/${stub.deployment}`;
   const proofs: Record<string, unknown> = {};
+  /** The last check on every path that doesn't FAIL: nothing in the stub's whole log leaked, including after the last proof. */
+  const expectNoLeaks = async (when: string) => {
+    const leaks = stubLeakReasons(stub.log);
+    proofs.finalLeakCheck = { when, leaks };
+    await attachText(testInfo, 'stub-proof.json', JSON.stringify(proofs, null, 2));
+    expect(leaks, `${when}: no request in the stub's whole log carried a gateway credential, or the key outside api-key`).toEqual([]);
+  };
 
   await test.step('save the endpoint: Endpoint, Deployment names, API key (the fake per-run key)', async () => {
     const form = page.getByTestId(AZURE_FORM);
     await form.getByLabel(/^Endpoint/).fill(stub.endpoint);
     await form.getByLabel(/^Deployment names/).fill(stub.deployment);
-    await fillSecret(form.getByLabel(/^API key/), readSecretFile('UAT_ENT_KEY_FILE'));
+    const keyInput = form.getByLabel(/^API key/);
+    await fillSecret(keyInput, readSecretFile('UAT_ENT_KEY_FILE'));
+    // The screenshot must show dots, not the key.
+    await expect(keyInput, 'the API key field is a password field (masked in the screenshot)').toHaveAttribute('type', 'password');
     await shot(page, testInfo, 'form');
     await form.getByRole('button', { name: 'Save endpoint' }).click();
     const done = page.getByTestId('ms-onb-enterprise-done');
@@ -1285,8 +1287,11 @@ test('J11 enterprise endpoint (Azure OpenAI / Foundry): saved, tested and chatte
     note(testInfo, `Test: "${text}"`);
     expect(text, 'the Test result is a success ("<model> answered in N ms: <reply>")').toMatch(/ answered in \d+ ms: /);
     expect(text, "the Test's reply is the stub's (its per-run token)").toContain(stub.token);
-    // UI text alone is not proof: the stub must have answered an authenticated Responses API call.
-    const proof = await waitForStubProof(page, stub.log, { sinceMs: since });
+    // UI text alone is not proof: the stub must have answered an authenticated Responses API call, and the
+    // request number the result shows must be that logged request.
+    const requestN = Number(text.match(/\(request #(\d+)/)?.[1] ?? NaN);
+    expect(requestN, 'the Test result names the stub request that answered it ("request #<n>")').toBeGreaterThan(0);
+    const proof = await waitForStubProof(page, stub.log, { sinceMs: since, requestN });
     proofs.test = { matched: proof.matched, sinceTheClick: proof.recent, reasons: proof.reasons };
     expect(proof.reasons, 'the stub logged the Test: an authenticated POST <endpoint>/responses?api-version=v1, streamed, answered with the token').toEqual([]);
     note(testInfo, `stub: Test call #${proof.matched?.n} ${proof.matched?.method} ${proof.matched?.path}?api-version=${proof.matched?.apiVersion}, key ok`);
@@ -1315,7 +1320,7 @@ test('J11 enterprise endpoint (Azure OpenAI / Foundry): saved, tested and chatte
     return { values, chosen: wanted };
   });
   if (!offered.chosen) {
-    await attachText(testInfo, 'stub-proof.json', JSON.stringify(proofs, null, 2));
+    await expectNoLeaks('before the chat part goes PENDING');
     test.fixme(
       true,
       `PENDING ${ISSUES.enterprise} (chat part): the endpoint was saved and its Test proved against the stub, but the Model step doesn't offer ${model} ` +
@@ -1328,15 +1333,17 @@ test('J11 enterprise endpoint (Azure OpenAI / Foundry): saved, tested and chatte
   await test.step("a chat is answered through the endpoint: the stub's token on screen, the chat's message in the stub's log", async () => {
     await navigate(page, '/c/new');
     await ensureMindStoneModel(page, testInfo);
+    // The stub echoes a [nonce:<value>] marker's value, and its own request number, in its reply.
     const nonce = `ent-${Date.now().toString(36)}`;
     const since = Date.now();
-    const reply = await sendAndWaitForReply(page, `Enterprise endpoint check ${nonce}: please reply in one short sentence.`);
+    const reply = await sendAndWaitForReply(page, `Enterprise endpoint check [nonce:${nonce}]: please reply in one short sentence.`);
     await attachText(testInfo, 'reply.txt', replyLog(reply));
     await shot(page, testInfo, 'chat-reply');
     await gatewayExcerpt(testInfo, 40);
     // Everything that says where the reply came from, gathered before any assertion, so a failure names it:
     // the stub's log (did the chat reach it?) and the gateway transcript (which provider and model Pi called).
-    const proof = await waitForStubProof(page, stub.log, { sinceMs: since, nonce });
+    const requestN = Number(reply.text.match(/\(request #(\d+)/)?.[1] ?? NaN);
+    const proof = await waitForStubProof(page, stub.log, { sinceMs: since, nonce, requestN: requestN > 0 ? requestN : undefined });
     const answered = answeredBy(reply.text);
     const calledBy = `${answered?.provider ?? '?'}/${answered?.model ?? '?'}${answered?.modelFallbackMessage ? ` (fallback: ${answered.modelFallbackMessage})` : ''}`;
     proofs.chat = { nonce, matched: proof.matched, sinceTheMessage: proof.recent, reasons: proof.reasons, answeredBy: answered ?? { found: false } };
@@ -1350,7 +1357,12 @@ test('J11 enterprise endpoint (Azure OpenAI / Foundry): saved, tested and chatte
     expectAnswer(reply, 'the chat through the enterprise endpoint');
     expect(proof.reasons, `the stub logged the chat: an authenticated, streamed POST <endpoint>/responses?api-version=v1 carrying the chat's own message (${where})`).toEqual([]);
     expect(reply.text, `the reply is the stub's, with its per-run token (${where})`).toContain(stub.token);
+    expect(
+      reply.text,
+      "the reply is the stub's answer to this exact request: the logged request's number and the chat's own nonce",
+    ).toContain(`request #${proof.matched?.n}, nonce ${nonce}`);
     await expectOnScreen(page, stub.token, "the stub's token in the reply", { role: 'assistant', messageId: reply.messageId });
+    await expectOnScreen(page, nonce, "the chat's nonce, echoed by the stub, in the reply", { role: 'assistant', messageId: reply.messageId });
   });
 
   await test.step('settings: the Model providers page lists it', async () => {
@@ -1360,5 +1372,5 @@ test('J11 enterprise endpoint (Azure OpenAI / Foundry): saved, tested and chatte
     await expect(page.getByTestId('ms-provider-enterprise-azure'), 'the Model providers page lists enterprise-azure').toBeVisible({ timeout: 30_000 });
     await shot(page, testInfo, 'providers');
   });
-  await attachText(testInfo, 'stub-proof.json', JSON.stringify(proofs, null, 2));
+  await expectNoLeaks('at the end of J11');
 });

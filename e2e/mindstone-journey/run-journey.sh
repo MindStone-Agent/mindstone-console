@@ -51,20 +51,21 @@ INSTALL_STATUS_TMP="/tmp/mindstone-agent-install-status.txt" # older install.sh'
 
 STEPS_TSV="${EVIDENCE}/harness-steps.tsv"
 LOG_DIR="${EVIDENCE}/logs"
+# The gate's step lists and J11's wiring live in lib/gate.sh (self-tested by lib/enterprise.selftest.mjs).
+# shellcheck source=lib/gate.sh
+source "${HERE}/lib/gate.sh"
+# J11 (an enterprise Azure OpenAI endpoint, MindStone-Agent #126) is in the gate only with
+# UAT_EXPECT_ENTERPRISE=1 (like UAT_EXPECT_FLOW for J2), and never in the DEMO SUBSET.
+EXPECT_ENTERPRISE="${UAT_EXPECT_ENTERPRISE:-0}"
 # Every row the gate needs, each exactly once and each PASS.
-REQUIRED_STEPS="S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 J9 X1 X2 X3 X4 X5"
+REQUIRED_STEPS="$(gate_required_steps "${EXPECT_ENTERPRISE}")"
 # The demo subset: everything but the features still being built (J7 Skill Builder, J8 persona drafting).
 # J9 (memory recall across chats) is on the demo path, so it stays in: while it is PENDING, the subset is NOT PASSED.
-DEMO_STEPS="${REQUIRED_STEPS/ J7 J8/}"
-# J11 (an enterprise Azure OpenAI endpoint, MindStone-Agent #126) always runs and always has its row, but it is
-# in the gate only with UAT_EXPECT_ENTERPRISE=1 (like UAT_EXPECT_FLOW for J2), and never in the DEMO SUBSET:
-# a J11 PENDING, FAIL or stall doesn't change either line unless the flag puts it in the gate.
-OPTIONAL_STEPS="J11"
-EXPECT_ENTERPRISE="${UAT_EXPECT_ENTERPRISE:-0}"
-[[ "${EXPECT_ENTERPRISE}" == 1 ]] && REQUIRED_STEPS="${REQUIRED_STEPS} J11"
-# The steps each verdict leaves out, Playwright's exit and stalls included (lib/gate-rows.mjs).
-GATE_UNCOUNTED="$([[ "${EXPECT_ENTERPRISE}" == 1 ]] || echo J11)"
-DEMO_UNCOUNTED="J11"
+DEMO_STEPS="$(gate_demo_steps)"
+OPTIONAL_STEPS="${GATE_OPTIONAL_STEPS}"
+# The steps each verdict leaves out, Playwright's exit and stalls included.
+GATE_UNCOUNTED="$(gate_uncounted "${EXPECT_ENTERPRISE}")"
+DEMO_UNCOUNTED="${GATE_DEMO_UNCOUNTED}"
 T0=$(date +%s)
 GW_PORT=""
 CONSOLE_PORT=""
@@ -441,14 +442,10 @@ summary() {
     [[ " ${REQUIRED_STEPS} ${OPTIONAL_STEPS} " == *" ${id} "* ]] || common+=("unknown row ${id}")
   done <"${STEPS_TSV}"
   # Playwright's exit: a non-zero exit counts against a verdict unless every failed test is a step that verdict
-  # leaves out (J11 for the DEMO SUBSET, and for the gate without UAT_EXPECT_ENTERPRISE=1; lib/gate-rows.mjs).
-  pw_explained_by() {
-    [[ $# -gt 0 && "${PW_RC}" == 1 ]] || return 1
-    node "${HERE}/lib/gate-rows.mjs" "${EVIDENCE}/playwright/results.json" "$@" >>"${LOG_DIR}/gate-rows.log" 2>&1
-  }
+  # leaves out, failed on its own errors (J11 for the DEMO SUBSET, and for the gate without UAT_EXPECT_ENTERPRISE=1).
   if [[ "${PW_RC}" != 0 ]]; then
-    pw_explained_by ${GATE_UNCOUNTED} || gate_only+=("playwright exit ${PW_RC}")
-    pw_explained_by ${DEMO_UNCOUNTED} || demo_only+=("playwright exit ${PW_RC}")
+    pw_explained_by "${PW_RC}" "${EVIDENCE}/playwright/results.json" "${LOG_DIR}/gate-rows.log" ${GATE_UNCOUNTED} || gate_only+=("playwright exit ${PW_RC}")
+    pw_explained_by "${PW_RC}" "${EVIDENCE}/playwright/results.json" "${LOG_DIR}/gate-rows.log" ${DEMO_UNCOUNTED} || demo_only+=("playwright exit ${PW_RC}")
   fi
   [[ "${rc}" == 0 ]] || common+=("harness exit ${rc}${FATAL:+ (${FATAL})}")
   [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" != 0 ]] && common+=("self-test sabotage on (UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES})")
@@ -459,9 +456,9 @@ summary() {
   if [[ -s "${EVIDENCE}/stalls.tsv" ]]; then
     stalls_n=$(grep -c . "${EVIDENCE}/stalls.tsv")
     stalls_line="${stalls_n}: $(awk -F'\t' '{printf "%s%s %s", (NR>1 ? "; " : ""), $1, $2}' "${EVIDENCE}/stalls.tsv")"
-    n=$(awk -F'\t' -v skip=" ${GATE_UNCOUNTED} " 'NF && index(skip, " " $1 " ") == 0' "${EVIDENCE}/stalls.tsv" | wc -l | tr -d ' ')
+    n=$(stalls_counted "${EVIDENCE}/stalls.tsv" ${GATE_UNCOUNTED})
     [[ "${n}" == 0 ]] || gate_only+=("${n} stall(s)")
-    n=$(awk -F'\t' -v skip=" ${DEMO_UNCOUNTED} " 'NF && index(skip, " " $1 " ") == 0' "${EVIDENCE}/stalls.tsv" | wc -l | tr -d ' ')
+    n=$(stalls_counted "${EVIDENCE}/stalls.tsv" ${DEMO_UNCOUNTED})
     [[ "${n}" == 0 ]] || demo_only+=("${n} stall(s)")
   fi
 
