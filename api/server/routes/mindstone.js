@@ -45,6 +45,7 @@ const ALLOWED = [
   { method: 'POST', path: /^onboarding\/complete$/ },
   { method: 'POST', path: /^memory\/check$/ },
   { method: 'POST', path: /^memory\/pull$/ },
+  { method: 'GET', path: /^personas$/ },
 ];
 
 /**
