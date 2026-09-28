@@ -86,10 +86,28 @@ const TODAY_STATUS_LINKS = ['Run guided setup again', 'Diagnostics', 'Approvals'
 
 /**
  * Left out of the comparison: links inside the #102 checklist items (a step's
- * own "set it up" link), the #105 Personas link, which J8 checks, and the
- * MindStone-Agent #126 Model providers link, which J11 checks.
+ * own "set it up" link), and the #105 Personas link, which J8 checks.
  */
-const IGNORED_STATUS_LINKS = ['Set up memory', 'Tell the agent about you', 'Personas', 'Model providers'];
+const IGNORED_STATUS_LINKS = ['Set up memory', 'Tell the agent about you', 'Personas'];
+
+/** The MindStone-Agent #126 link to the Model providers page (J11), right after Skills. */
+const PROVIDERS_LINK = 'Model providers';
+
+/**
+ * The links /mindstone must show, exactly: with UAT_EXPECT_ENTERPRISE=1, today's
+ * plus Model providers right after Skills (required). Without it, today's with or
+ * without that one link in that one place (a Console with or without #126);
+ * everything else stays strict.
+ */
+function expectedStatusLinks(links: string[], testInfo: TestInfo): string[] {
+  const withProviders = [...TODAY_STATUS_LINKS, PROVIDERS_LINK];
+  if (process.env.UAT_EXPECT_ENTERPRISE === '1') return withProviders;
+  if (JSON.stringify(links) === JSON.stringify(withProviders)) {
+    note(testInfo, `"${PROVIDERS_LINK}" (#126) is there after Skills; accepted without UAT_EXPECT_ENTERPRISE (J11 checks it)`);
+    return withProviders;
+  }
+  return TODAY_STATUS_LINKS;
+}
 
 /** Steps that judge the state after setup: when J2 failed they report "blocked by J2", not "state changed". */
 const NEEDS_SETUP = /^J[789] /;
@@ -732,7 +750,7 @@ test('J7 Skill Builder from the Console and from chat', async ({}, testInfo) => 
     await expect(page.getByRole('heading', { name: 'MindStone settings' })).toBeVisible();
     const links = await statusLinks(page);
     note(testInfo, `links: ${links.join(', ')}`);
-    expect(links, 'the links on /mindstone').toEqual(TODAY_STATUS_LINKS);
+    expect(links, 'the links on /mindstone').toEqual(expectedStatusLinks(links, testInfo));
     await page
       .locator('section[aria-labelledby="ms-onboarding"]')
       .getByRole('link', { name: 'Skills' })
