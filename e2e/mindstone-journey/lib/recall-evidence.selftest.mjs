@@ -4,13 +4,19 @@
 // memory_recall_injected event with hits, a hit's chunk holds the token, and
 // the token is in no other entry. Every way that can fail must fail with a
 // reason; the negative control and the invariant-file rule are checked too.
-// No dependencies.
+// Last, the out-of-process recall-index reader (lib/recall-index.js) runs in
+// a child node against a WAL-mode test database, with the writer still open.
+// No dependencies (node:sqlite, Node 22.13+).
 //
 //   node recall-evidence.selftest.mjs
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { RECALL_EVENT, sessionLines, recallEvidence, controlEvidence, isInvariantMarkdown } = require('./recall-evidence.js');
+const { queryRecallIndex } = require('./recall-index.js');
 
 const CHAT3 = 'c3c3c3c3-0000-4000-8000-000000000003';
 const CHAT2 = 'c2c2c2c2-0000-4000-8000-000000000002';
@@ -170,5 +176,60 @@ report(
   'sessionLines matches only a key ending in `:<conversationId>`',
   sessionLines(stray.join('\n'), CHAT2).length === 0 && sessionLines(user(CHAT2, 'x'), '').length === 0 ? [] : ['it matched a different session, or an empty id'],
 );
+// The recall-index reader, in a child process, on a WAL-mode database whose writer is still open (like the live gateway).
+{
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'j9-recall-index-'));
+  const { DatabaseSync } = require('node:sqlite');
+  const withUpdatedAt = path.join(tmp, 'memory.sqlite');
+  const writer = new DatabaseSync(withUpdatedAt);
+  const noUpdatedAt = path.join(tmp, 'old.sqlite');
+  const old = new DatabaseSync(noUpdatedAt);
+  try {
+    writer.exec('PRAGMA journal_mode=WAL; CREATE TABLE memory_chunks (chunk_id TEXT PRIMARY KEY, text TEXT NOT NULL, embedding_json TEXT, kind TEXT, path TEXT, updated_at TEXT NOT NULL)');
+    const insert = writer.prepare('INSERT INTO memory_chunks VALUES (?, ?, ?, ?, ?, ?)');
+    insert.run('chunk-dog', `My dog's name is ${TOKEN.toUpperCase()}.`, '[0.1,0.2]', 'transcript', 'transcripts/x.jsonl', '2026-09-28T12:00:00.000Z');
+    insert.run('chunk-pending', `Still embedding: ${TOKEN}`, null, 'transcript', null, '2026-09-28T12:00:01.000Z');
+    insert.run('chunk-j6', 'my project codename is amber-heron-4242', '[0.3]', 'transcript', null, '2026-09-28T11:00:00.000Z');
+    old.exec('PRAGMA journal_mode=WAL; CREATE TABLE memory_chunks (chunk_id TEXT PRIMARY KEY, text TEXT NOT NULL, embedding_json TEXT, kind TEXT, path TEXT)');
+    old.prepare('INSERT INTO memory_chunks VALUES (?, ?, ?, ?, ?)').run('chunk-old', `dog ${TOKEN}`, '[1]', 'custom', null);
+    const walThere = fs.existsSync(`${withUpdatedAt}-wal`);
+
+    const embedded = queryRecallIndex(withUpdatedAt, 'embedded', [TOKEN]);
+    report('reader (child process): only embedded chunks holding the token, any case, count as ready', walThere && JSON.stringify(embedded.map((r) => r.chunk_id)) === '["chunk-dog"]' ? [] : [`got ${JSON.stringify(embedded)} (WAL present: ${walThere})`]);
+
+    const rows = queryRecallIndex(withUpdatedAt, 'chunks', ['chunk-dog', 'chunk-j6', 'chunk-missing']);
+    const byId = Object.fromEntries(rows.map((r) => [r.chunk_id, r]));
+    report(
+      'reader (child process): chunk lookup returns text and updated_at',
+      rows.length === 2 && byId['chunk-dog']?.text.includes(TOKEN.toUpperCase()) && byId['chunk-dog']?.updated_at === '2026-09-28T12:00:00.000Z' ? [] : [`got ${JSON.stringify(rows)}`],
+    );
+    const oldRows = queryRecallIndex(noUpdatedAt, 'chunks', ['chunk-old']);
+    report('reader (child process): an index without updated_at returns no updated_at', oldRows.length === 1 && !('updated_at' in oldRows[0]) ? [] : [`got ${JSON.stringify(oldRows)}`]);
+
+    // Wired through recallEvidence the way journey.ts does it: proven, and a missing chunk text is not.
+    const chunks = Object.fromEntries(rows.map((r) => [r.chunk_id, { text: r.text, updatedAt: r.updated_at }]));
+    const proven = recallEvidence(sessionLines([user(CHAT2, ask, 'r2'), recall(CHAT2, 'r2', [hit]), assistant(CHAT2, TOKEN, 'r2')].join('\n'), CHAT2), TOKEN, chunks);
+    report('reader rows feed the recall check (proven)', proven.reasons.length === 0 ? [] : proven.reasons);
+
+    let threw = '';
+    try {
+      queryRecallIndex(path.join(tmp, 'absent.sqlite'), 'embedded', [TOKEN]);
+    } catch (error) {
+      threw = error.message;
+    }
+    report('reader (child process): an unreadable index throws, with the reader\'s message', /^the recall index reader failed: \S/.test(threw) ? [] : [`threw "${threw}"`]);
+    let badMode = '';
+    try {
+      queryRecallIndex(withUpdatedAt, 'drop', []);
+    } catch (error) {
+      badMode = error.message;
+    }
+    report('reader (child process): an unknown mode throws', /unknown mode/.test(badMode) ? [] : [`threw "${badMode}"`]);
+  } finally {
+    writer.close();
+    old.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
 console.log(failed ? `recall-evidence self-test: ${failed} of ${count} FAILED` : `recall-evidence self-test: all ${count} passed`);
 process.exit(failed ? 1 : 0);

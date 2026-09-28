@@ -683,35 +683,21 @@ export function recallIndexExists(): boolean {
   return fs.existsSync(recallIndexPath());
 }
 
-type SqliteDb = { prepare(sql: string): { all(...params: unknown[]): Record<string, unknown>[] }; close(): void };
-
-/**
- * Runs `read` on the recall index, opened read-only with node:sqlite (Node
- * 22.13+; the harness needs 22.19). undefined when there's no index yet.
- */
-function readRecallIndex<T>(read: (db: SqliteDb) => T): T | undefined {
-  const file = recallIndexPath();
-  if (!fs.existsSync(file)) return undefined;
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (file: string, options?: { readOnly?: boolean }) => SqliteDb };
-  const db = new DatabaseSync(file, { readOnly: true });
-  try {
-    return read(db);
-  } finally {
-    db.close();
-  }
-}
+// Out of process: Playwright's loader hook can't load node:sqlite in the test process (lib/recall-index.js).
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { queryRecallIndex } = require('./recall-index.js') as {
+  queryRecallIndex: (dbPath: string, mode: 'embedded' | 'chunks', args: string[]) => Record<string, unknown>[];
+};
 
 /** Recall-index chunks whose text holds `token` and that are embedded (embedding_json set): the fact is ready to recall. */
 export function embeddedChunksWith(token: string): { chunkId: string; kind: string; path: string | null }[] {
-  return (
-    readRecallIndex((db) =>
-      db
-        .prepare('SELECT chunk_id, kind, path FROM memory_chunks WHERE instr(lower(text), ?) > 0 AND embedding_json IS NOT NULL')
-        .all(token.toLowerCase())
-        .map((r) => ({ chunkId: String(r.chunk_id), kind: String(r.kind), path: r.path === null ? null : String(r.path) })),
-    ) ?? []
-  );
+  const file = recallIndexPath();
+  if (!fs.existsSync(file)) return [];
+  return queryRecallIndex(file, 'embedded', [token]).map((r) => ({
+    chunkId: String(r.chunk_id),
+    kind: String(r.kind),
+    path: r.path === null || r.path === undefined ? null : String(r.path),
+  }));
 }
 
 /**
@@ -758,17 +744,15 @@ export function recallForConversation(conversationId: string, token: string): Re
   let chunks: Record<string, { text: string; updatedAt?: string }> | undefined;
   let indexError: string | undefined;
   try {
+    const file = recallIndexPath();
+    if (chunkIds.length && !fs.existsSync(file)) throw new Error('no recall index (vectors/memory.sqlite)');
     chunks = chunkIds.length
-      ? readRecallIndex((db) => {
-          // updated_at, when the index has the column: a chunk written after the recall event can't be what it injected.
-          const hasUpdatedAt = db.prepare('PRAGMA table_info(memory_chunks)').all().some((c) => c.name === 'updated_at');
-          return Object.fromEntries(
-            db
-              .prepare(`SELECT chunk_id, text${hasUpdatedAt ? ', updated_at' : ''} FROM memory_chunks WHERE chunk_id IN (${chunkIds.map(() => '?').join(', ')})`)
-              .all(...chunkIds)
-              .map((r) => [String(r.chunk_id), { text: String(r.text), ...(hasUpdatedAt ? { updatedAt: String(r.updated_at) } : {}) }]),
-          );
-        })
+      ? Object.fromEntries(
+          queryRecallIndex(file, 'chunks', chunkIds).map((r) => [
+            String(r.chunk_id),
+            { text: String(r.text), ...(r.updated_at === undefined ? {} : { updatedAt: String(r.updated_at) }) },
+          ]),
+        )
       : {};
   } catch (error) {
     indexError = error instanceof Error ? error.message : String(error);
