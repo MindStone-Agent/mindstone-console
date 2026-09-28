@@ -5,7 +5,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { expect } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import type { Locator, Page, TestInfo } from '@playwright/test';
 
 export const EVIDENCE = process.env.UAT_EVIDENCE_DIR ?? path.resolve(__dirname, '..', 'evidence', 'manual');
@@ -99,6 +99,26 @@ export function note(testInfo: TestInfo, text: string) {
   testInfo.annotations.push({ type: 'note', description: text });
 }
 
+/**
+ * Types a secret into an input without it being recorded anywhere: Playwright
+ * puts `fill()`'s value in the step title ("Fill \"…\""), which reports and
+ * traces keep. This sets the value in the page (React's value setter, then
+ * input and change events), under a step whose title carries no value.
+ */
+export async function fillSecret(locator: Locator, value: string): Promise<void> {
+  await test.step('type a secret (value not recorded)', async () => {
+    await locator.waitFor({ state: 'visible' });
+    await locator.evaluate((element, secret) => {
+      const input = element as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      input.focus();
+      setter?.call(input, secret);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }, value);
+  });
+}
+
 export function readSecretFile(envName: string): string {
   const file = process.env[envName];
   if (!file) throw new Error(`${envName} is not set`);
@@ -125,7 +145,7 @@ export async function ensureSignedIn(page: Page, options: { stayIfSignedIn?: boo
 export async function signIn(page: Page): Promise<void> {
   if (!page.url().includes('/login')) await page.goto('/login');
   await page.getByLabel('Email').fill(process.env.UAT_ADMIN_EMAIL ?? '');
-  await page.getByLabel('Password').fill(readSecretFile('UAT_ADMIN_PASSWORD_FILE'));
+  await fillSecret(page.getByLabel('Password'), readSecretFile('UAT_ADMIN_PASSWORD_FILE'));
   await page.getByTestId('login-button').click();
   await page.waitForURL(/\/c\//, { timeout: 60_000 });
 }
@@ -275,6 +295,134 @@ export async function sendAndWaitForReply(
     await page.waitForTimeout(1_500);
   }
   throw new Error(`no finished reply to "${text}" within ${Math.round(timeoutMs / 1000)}s`);
+}
+
+/** The gateway admin API's onboarding checklist keys today (GET /admin/status `steps`). */
+export const TODAY_STATUS_STEPS = ['connectors', 'memory', 'persona', 'provider'];
+/** Guided setup's steps today (the "Setup steps" list). */
+export const TODAY_SETUP_STEPS = ['Access', 'Model provider', 'Model', 'Persona', 'Finish'];
+
+/** GET /admin/status through the Console's admin proxy: `onboarded` and the checklist keys. */
+export async function adminStatus(page: Page): Promise<{ onboarded: unknown; stepKeys: string[]; steps: Record<string, unknown> }> {
+  const { status, json } = await consoleApi<{ onboarded?: unknown; steps?: Record<string, unknown> }>(
+    page,
+    'GET',
+    '/api/mindstone/admin/status',
+  );
+  expect(status, 'GET /api/mindstone/admin/status').toBe(200);
+  const steps = json.steps ?? {};
+  return { onboarded: json.onboarded, stepKeys: Object.keys(steps).sort(), steps };
+}
+
+function headerFromFile(envName: string): [string, string] {
+  const line = readSecretFile(envName);
+  const at = line.indexOf(':');
+  return [line.slice(0, at).trim(), line.slice(at + 1).trim()];
+}
+
+/**
+ * GET a gateway admin route directly (a detection probe, not part of the
+ * journey), with the service token and admin credential from the harness's
+ * header files. Returns the status and the error text; never a header value.
+ */
+export async function probeGatewayAdmin(route: string): Promise<{ route: string; status: number; error: string }> {
+  const base = process.env.UAT_GATEWAY_URL;
+  if (!base) throw new Error('UAT_GATEWAY_URL is not set (run through run-journey.sh)');
+  const headers = Object.fromEntries([
+    headerFromFile('UAT_GATEWAY_AUTH_HEADER_FILE'),
+    headerFromFile('UAT_GATEWAY_ADMIN_HEADER_FILE'),
+    ['x-mindstone-user-id', 'uat-harness'],
+    ['x-mindstone-user-role', 'admin'],
+  ]);
+  const response = await fetch(`${base}${route}`, { headers });
+  const body = (await response.json().catch(() => ({}))) as { error?: string };
+  return { route, status: response.status, error: String(body.error ?? '') };
+}
+
+type TranscriptLine = {
+  role?: string;
+  text?: string;
+  metadata?: {
+    model?: string;
+    provider?: string;
+    providerDiagnostics?: { piSession?: { sessionFile?: string; modelFallbackMessage?: string } };
+  };
+};
+
+export type AnsweredBy = {
+  /** The gateway's own ids (for a Pi session, provider "pi-session" and model "mindstone/<agent>"). */
+  gatewayProvider?: string;
+  gatewayModel?: string;
+  /** What the Pi session actually called: the last provider/model pair its session file records. */
+  provider?: string;
+  model?: string;
+  modelFallbackMessage?: string;
+  transcriptFile?: string;
+  sessionFile?: string;
+};
+
+/** The last {provider, model|modelId} pair anywhere in a JSONL file. */
+function lastModelPair(file: string): { provider?: string; model?: string } {
+  let last: { provider?: string; model?: string } = {};
+  const visit = (value: unknown, depth: number) => {
+    if (!value || typeof value !== 'object' || depth > 6) return;
+    const record = value as Record<string, unknown>;
+    const model = typeof record.model === 'string' ? record.model : typeof record.modelId === 'string' ? record.modelId : undefined;
+    if (typeof record.provider === 'string' && model) last = { provider: record.provider, model };
+    for (const child of Object.values(record)) visit(child, depth + 1);
+  };
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      visit(JSON.parse(line), 0);
+    } catch {
+      // not JSON
+    }
+  }
+  return last;
+}
+
+/**
+ * Which model answered: the gateway transcript's assistant entry whose text
+ * starts like the reply, and the Pi session file it points to, which records
+ * the provider and model that were actually called.
+ */
+export function answeredBy(replyText: string): AnsweredBy | undefined {
+  const dir = process.env.UAT_TRANSCRIPT_DIR;
+  if (!dir || !fs.existsSync(dir)) return undefined;
+  const head = replyText.trim().slice(0, 40);
+  const files: string[] = [];
+  const walk = (d: string) => {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/\.jsonl?$/.test(entry.name)) files.push(full);
+    }
+  };
+  walk(dir);
+  for (const file of files) {
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      let entry: TranscriptLine;
+      try {
+        entry = JSON.parse(line) as TranscriptLine;
+      } catch {
+        continue;
+      }
+      if (entry.role !== 'assistant' || !head || !(entry.text ?? '').trim().startsWith(head)) continue;
+      const pi = entry.metadata?.providerDiagnostics?.piSession;
+      const result: AnsweredBy = {
+        gatewayProvider: entry.metadata?.provider,
+        gatewayModel: entry.metadata?.model,
+        modelFallbackMessage: pi?.modelFallbackMessage,
+        transcriptFile: path.relative(dir, file),
+        sessionFile: pi?.sessionFile ? path.basename(pi.sessionFile) : undefined,
+      };
+      if (pi?.sessionFile && fs.existsSync(pi.sessionFile)) Object.assign(result, lastModelPair(pi.sessionFile));
+      return result;
+    }
+  }
+  return undefined;
 }
 
 /** Text that means the Console showed an error, not an answer. */

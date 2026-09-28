@@ -1,8 +1,10 @@
 /**
- * Turns each journey test into one PASS / FAIL / PENDING line with its
- * evidence, for run-journey.sh's summary (journey-results.tsv) and for people
- * (journey-results.md). PENDING is a test.fixme(): a step whose feature hasn't
- * landed; its annotation says what "done" looks like.
+ * Turns each journey test into one PASS / FAIL / PENDING / MOCK / SKIPPED
+ * line with its evidence, for run-journey.sh's summary (journey-results.tsv)
+ * and for people (journey-results.md). PENDING is a test.fixme(): a step
+ * whose feature hasn't landed; its annotation says what "done" looks like.
+ * MOCK is a step that passed against the gateway's mock route (no real model);
+ * the gate counts it, like PENDING and SKIPPED, as not passed.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,8 +31,9 @@ export default class SummaryReporter implements Reporter {
     const notes = test.annotations.filter((a) => a.type === 'note').map((a) => a.description ?? '');
     const label = test.annotations.find((a) => a.type === 'label')?.description;
     const fixme = test.annotations.find((a) => a.type === 'fixme');
+    const mock = test.annotations.some((a) => a.type === 'mock');
     let status: string;
-    if (result.status === 'passed') status = 'PASS';
+    if (result.status === 'passed') status = mock ? 'MOCK' : 'PASS';
     else if (result.status === 'skipped' && fixme) status = 'PENDING';
     else if (result.status === 'skipped') status = 'SKIPPED';
     else status = 'FAIL';
