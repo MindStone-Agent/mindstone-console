@@ -172,6 +172,62 @@ export function readSecretFile(envName: string): string {
   return fs.readFileSync(file, 'utf8').trim();
 }
 
+// Shared with lib/stall.selftest.mjs, so the self-test runs the same timeouts and labels.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const stall = require('./stall.js') as {
+  apiTimeoutMs: () => number;
+  callTimeoutMs: (deadline: number) => number;
+  isStall: (error: unknown) => boolean;
+  fetchInPage: (
+    page: Page,
+    request: { method: string; url: string; headers?: Record<string, string>; body?: string; timeoutMs?: number },
+  ) => Promise<{ status: number; text: string }>;
+  gotoOrStall: (page: Page, url: string, options?: Parameters<Page['goto']>[1], defaultTimeoutMs?: number) => ReturnType<Page['goto']>;
+};
+export const isStall = stall.isStall;
+/** Each harness request's timeout (UAT_API_TIMEOUT_MS, default 30 s): a request with no answer by then is a STALL. */
+export const API_TIMEOUT_MS = stall.apiTimeoutMs();
+/** Every STALL of the run, one `<step>\t<message>` line each, for SUMMARY's stalls line. */
+const STALLS_FILE = path.join(EVIDENCE, 'stalls.tsv');
+
+/**
+ * Records a stall: a `stall` annotation on the running step (the summary
+ * reporter makes that step FAIL, even if the stall was caught) and a line in
+ * stalls.tsv (SUMMARY lists every stall of the run).
+ */
+export function recordStall(message: string): void {
+  let step = 'J?';
+  try {
+    const info = test.info();
+    step = info.title.match(/^(J\d+)/)?.[1] ?? step;
+    info.annotations.push({ type: 'stall', description: message });
+  } catch {
+    // not inside a test: stalls.tsv still gets it
+  }
+  fs.mkdirSync(EVIDENCE, { recursive: true });
+  fs.appendFileSync(STALLS_FILE, `${step}\t${message.replace(/\s+/g, ' ').trim()}\n`);
+}
+
+/** Records a StallError (anything else passes through) and rethrows it. */
+function stallRecorded(error: unknown): never {
+  if (stall.isStall(error)) recordStall((error as Error).message);
+  throw error;
+}
+
+/**
+ * page.goto with Playwright's own timeout, but a timeout is named: "STALL:
+ * navigation to <path> didn't load in Ns" (and recorded as a stall).
+ */
+export async function navigate(page: Page, url: string, options?: Parameters<Page['goto']>[1]): ReturnType<Page['goto']> {
+  let navigationTimeout = 60_000;
+  try {
+    navigationTimeout = test.info().project.use.navigationTimeout || navigationTimeout;
+  } catch {
+    // not inside a test: the config's 60 s
+  }
+  return stall.gotoOrStall(page, url, options, navigationTimeout).catch(stallRecorded);
+}
+
 /**
  * Signs in on /login unless the session is still good. With stayIfSignedIn, a
  * page already inside the app (not /login, not blank) is left where it is.
@@ -179,7 +235,7 @@ export function readSecretFile(envName: string): string {
 export async function ensureSignedIn(page: Page, options: { stayIfSignedIn?: boolean } = {}): Promise<void> {
   const url = page.url();
   if (options.stayIfSignedIn && /^https?:/.test(url) && !url.includes('/login')) return;
-  await page.goto('/c/new');
+  await navigate(page, '/c/new');
   await page.waitForLoadState('domcontentloaded');
   const onLogin = await page
     .waitForURL(/\/login/, { timeout: 5_000 })
@@ -190,55 +246,75 @@ export async function ensureSignedIn(page: Page, options: { stayIfSignedIn?: boo
 }
 
 export async function signIn(page: Page): Promise<void> {
-  if (!page.url().includes('/login')) await page.goto('/login');
+  if (!page.url().includes('/login')) await navigate(page, '/login');
   await page.getByLabel('Email').fill(process.env.UAT_ADMIN_EMAIL ?? '');
   await fillSecret(page.getByLabel('Password'), readSecretFile('UAT_ADMIN_PASSWORD_FILE'));
   await page.getByTestId('login-button').click();
   await page.waitForURL(/\/c\//, { timeout: 60_000 });
 }
 
+/**
+ * One request from inside the page (the Console's own origin and cookies),
+ * with a timeout: API_TIMEOUT_MS, or less so as not to pass `deadline` (a
+ * polling loop's own limit). No answer in time throws "STALL: <method>
+ * <path> no response in Ns", recorded as a stall.
+ */
+function pageRequest(
+  page: Page,
+  request: { method: string; url: string; headers: Record<string, string>; body?: string },
+  deadline?: number,
+): Promise<{ status: number; text: string }> {
+  const timeoutMs = deadline === undefined ? API_TIMEOUT_MS : stall.callTimeoutMs(deadline);
+  return stall.fetchInPage(page, { ...request, timeoutMs }).catch(stallRecorded);
+}
+
 /** The Console's own access token (from its refresh cookie), for reading what the UI shows. */
-export async function accessToken(page: Page): Promise<string> {
-  const token = await page.evaluate(async () => {
-    const response = await fetch('/api/auth/refresh', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: '{}',
-    });
-    const body = (await response.json().catch(() => ({}))) as { token?: string };
-    return body.token ?? '';
-  });
+export async function accessToken(page: Page, options: { deadline?: number } = {}): Promise<string> {
+  const { text } = await pageRequest(
+    page,
+    { method: 'POST', url: '/api/auth/refresh', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+    options.deadline,
+  );
+  let token = '';
+  try {
+    token = (JSON.parse(text) as { token?: string }).token ?? '';
+  } catch {
+    // not JSON: no token
+  }
   if (!token) throw new Error('no access token from /api/auth/refresh: not signed in?');
   return token;
 }
 
+/**
+ * A Console API call as the signed-in admin. Each request (the token refresh
+ * and the call) times out as a STALL (see pageRequest); `deadline` keeps a
+ * polling loop's calls inside its own limit.
+ */
 export async function consoleApi<T = unknown>(
   page: Page,
   method: string,
   url: string,
   body?: unknown,
+  options: { deadline?: number } = {},
 ): Promise<{ status: number; json: T }> {
-  const token = await accessToken(page);
-  return page.evaluate(
-    async ({ method, url, body, token }) => {
-      const response = await fetch(url, {
-        method,
-        credentials: 'include',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      const text = await response.text();
-      let json: unknown = null;
-      try {
-        json = JSON.parse(text);
-      } catch {
-        json = text;
-      }
-      return { status: response.status, json: json as never };
+  const token = await accessToken(page, options);
+  const { status, text } = await pageRequest(
+    page,
+    {
+      method,
+      url,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
     },
-    { method, url, body, token },
+    options.deadline,
   );
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = text;
+  }
+  return { status, json: json as T };
 }
 
 export type StoredMessage = {
@@ -329,19 +405,33 @@ export type Reply = {
 export async function waitForReplyTo(page: Page, text: string | undefined, timeoutMs = 240_000): Promise<Reply> {
   await page.waitForURL((url) => conversationId(url.toString()) !== undefined, { timeout: 60_000 });
   const convo = conversationId(page.url())!;
-  const deadline = Date.now() + timeoutMs;
+  const started = Date.now();
+  const deadline = started + timeoutMs;
+  const turn = text === undefined ? 'the first turn' : `"${text}"`;
   let lastSeen = '';
   let stableSince = 0;
+  // What the last poll saw, for the timeout's message: a reply that never finished isn't a missing one.
+  let lastState = 'no poll answered';
   while (Date.now() < deadline) {
+    // Each call is bounded by the loop's own deadline, so a stalled request can't outlive the reply limit.
     const { status, json } = await consoleApi<StoredMessage[]>(
       page,
       'GET',
       `/api/messages/${encodeURIComponent(convo)}`,
-    );
+      undefined,
+      { deadline },
+    ).catch((error: unknown) => {
+      if (!isStall(error)) throw error;
+      throw new Error(
+        `${(error as Error).message}, polling for the reply to ${turn} (${Math.round((Date.now() - started) / 1000)}s into its ${Math.round(timeoutMs / 1000)}s limit)`,
+      );
+    });
+    lastState = `GET /api/messages answered ${status}`;
     if (status === 200 && Array.isArray(json)) {
       const users = json.filter((m) => m.isCreatedByUser && (text === undefined || messageText(m) === text));
       const user = text === undefined ? users[0] : users[users.length - 1];
       const reply = user && json.find((m) => !m.isCreatedByUser && m.parentMessageId === user.messageId);
+      lastState = !user ? 'the user turn not stored' : !reply ? 'no reply stored' : reply.unfinished ? 'the reply stored but still unfinished' : 'the reply finished, waiting for it to settle';
       if (user && reply && !reply.unfinished) {
         const replyText = messageText(reply);
         const errorText = messageError(reply);
@@ -370,9 +460,9 @@ export async function waitForReplyTo(page: Page, text: string | undefined, timeo
         }
       }
     }
-    await page.waitForTimeout(1_500);
+    await page.waitForTimeout(Math.max(0, Math.min(1_500, deadline - Date.now())));
   }
-  throw new Error(`no finished reply to ${text === undefined ? 'the first turn' : `"${text}"`} within ${Math.round(timeoutMs / 1000)}s`);
+  throw new Error(`no finished reply to ${turn} within ${Math.round(timeoutMs / 1000)}s (last poll: ${lastState})`);
 }
 
 /** Text as it reads on screen: markdown markers and list bullets gone, whitespace collapsed. */

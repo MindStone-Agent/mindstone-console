@@ -9,7 +9,7 @@ import path from 'node:path';
 export default function globalSetup() {
   const evidence = process.env.UAT_EVIDENCE_DIR;
   if (!evidence) throw new Error('UAT_EVIDENCE_DIR is not set: give each run its own, empty evidence dir');
-  const stale = ['journey-state.json', 'journey-results.tsv', 'journey-results.md', 'screens']
+  const stale = ['journey-state.json', 'journey-results.tsv', 'journey-results.md', 'stalls.tsv', 'screens']
     .map((name) => path.join(evidence, name))
     .filter((file) => fs.existsSync(file) && !(fs.statSync(file).isDirectory() && fs.readdirSync(file).length === 0));
   if (stale.length) {

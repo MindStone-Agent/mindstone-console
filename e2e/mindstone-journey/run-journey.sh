@@ -404,6 +404,14 @@ summary() {
   [[ "${PW_RC}" == 0 ]] || common+=("playwright exit ${PW_RC}")
   [[ "${rc}" == 0 ]] || common+=("harness exit ${rc}${FATAL:+ (${FATAL})}")
   [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" != 0 ]] && common+=("self-test sabotage on (UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES})")
+  # Stalls (lib/journey.ts recordStall): a request or page load that never answered. Their steps are
+  # FAIL already; this says, at a glance, that the run hit the environment, and never lets it pass.
+  local stalls_n=0 stalls_line="none"
+  if [[ -s "${EVIDENCE}/stalls.tsv" ]]; then
+    stalls_n=$(grep -c . "${EVIDENCE}/stalls.tsv")
+    stalls_line="${stalls_n}: $(awk -F'\t' '{printf "%s%s %s", (NR>1 ? "; " : ""), $1, $2}' "${EVIDENCE}/stalls.tsv")"
+    common+=("${stalls_n} stall(s)")
+  fi
 
   # Provenance, checked again at the end: the harness must not change during the run either.
   local hash_end status_end
@@ -428,6 +436,11 @@ summary() {
   echo
   log "cleanup: $(tr '\n' ';' <"${EVIDENCE}/cleanup.txt" 2>/dev/null)"
   log "setup flow: $(cut -f2 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo 'not detected')"
+  if [[ "${stalls_n}" == 0 ]]; then
+    log "stalls: none"
+  else
+    log "${c_red}stalls: ${stalls_line}${c_reset} (environment stalls, not wrong answers; each is still a FAIL)"
+  fi
   log "harness: $(git -C "${CONSOLE_HARNESS_ROOT}" rev-parse --short HEAD 2>/dev/null) sha256 ${hash_end:0:16}… $([[ "${HARNESS_DIRTY}" == 1 ]] && echo DIRTY || echo clean)"
   log "evidence: ${EVIDENCE}"
   local gate demo override=""
@@ -460,6 +473,12 @@ summary() {
     echo "**DEMO SUBSET (J1–J6, J9 + S/C/X): ${demo}**"
     echo
     echo "Setup flow driven: **$(cut -f2 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo 'not detected (J2 did not get that far)')** (\`$(cut -f1 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo none)\`)."
+    echo
+    if [[ "${stalls_n}" == 0 ]]; then
+      echo "Stalls: none."
+    else
+      echo "**Stalls: ${stalls_line}** (a request or page load that never answered: an environment stall, not a wrong answer; each is still a FAIL)"
+    fi
     if [[ "${HARNESS_DIRTY}" == 1 && "${UAT_ALLOW_DIRTY_HARNESS:-0}" == 1 ]]; then
       echo
       echo "**UAT_ALLOW_DIRTY_HARNESS=1: this run used a MODIFIED harness (see Provenance). Its result is not evidence for #106.**"
@@ -963,18 +982,26 @@ fi
 interruptible env NODE_PATH="${PW_NODE_PATH}" "${PW_BIN}" "${PW_INSTALL_ARGS[@]}" >>"${LOG_DIR}/playwright-install.log" 2>&1 \
   || die "playwright ${PW_INSTALL_ARGS[*]} failed (${LOG_DIR}/playwright-install.log)"
 
-# X5: the on-screen check's own controls, in a real Chromium page (no Console needed).
+# X5: the on-screen check's own controls, in a real Chromium page (no Console needed), and the
+# stall detection's (console #30): a request or page load that never answers must fail as a named STALL.
 CURRENT_STEP=X5
-if NODE_PATH="${PW_NODE_PATH}" node "${HERE}/lib/screen-check.selftest.mjs" >"${LOG_DIR}/screen-check-selftest.log" 2>&1; then
-  record X5 PASS "the on-screen check's self-test (a reply only in the user's bubble, or hidden, is not found)" "${LOG_DIR}/screen-check-selftest.log" "$(tail -n 1 "${LOG_DIR}/screen-check-selftest.log")"
+x5_screen=0; x5_stall=0
+NODE_PATH="${PW_NODE_PATH}" node "${HERE}/lib/screen-check.selftest.mjs" >"${LOG_DIR}/screen-check-selftest.log" 2>&1 || x5_screen=$?
+NODE_PATH="${PW_NODE_PATH}" UAT_PORT_MIN="${PORT_MIN}" UAT_PORT_MAX="${PORT_MAX}" \
+  node "${HERE}/lib/stall.selftest.mjs" >"${LOG_DIR}/stall-selftest.log" 2>&1 || x5_stall=$?
+x5_notes="$(tail -n 1 "${LOG_DIR}/screen-check-selftest.log"); $(tail -n 1 "${LOG_DIR}/stall-selftest.log")"
+if [[ "${x5_screen}" == 0 && "${x5_stall}" == 0 ]]; then
+  record X5 PASS "the on-screen check's self-test (a reply only in the user's bubble, or hidden, is not found) and the stall self-test (no answer is a named STALL, within its timeout)" \
+    "$(rel "${LOG_DIR}/screen-check-selftest.log"), $(rel "${LOG_DIR}/stall-selftest.log")" "${x5_notes}"
 else
-  record X5 FAIL "the on-screen check failed its self-test" "${LOG_DIR}/screen-check-selftest.log" "$(tail -n 1 "${LOG_DIR}/screen-check-selftest.log")"
+  record X5 FAIL "$([[ "${x5_screen}" == 0 ]] || echo "the on-screen check failed its self-test")$([[ "${x5_screen}" != 0 && "${x5_stall}" != 0 ]] && echo "; ")$([[ "${x5_stall}" == 0 ]] || echo "the stall detection failed its self-test")" \
+    "$(rel "${LOG_DIR}/screen-check-selftest.log"), $(rel "${LOG_DIR}/stall-selftest.log")" "${x5_notes}"
 fi
 CURRENT_STEP=J
 
 provider_key_file=""
 [[ "${PROVIDER}" == ollama-cloud ]] && provider_key_file="${UAT_PROVIDER_KEY_FILE}"
-rm -f "${EVIDENCE}/journey-results.tsv" "${EVIDENCE}/journey-state.json" "${EVIDENCE}/journey-flow.txt"
+rm -f "${EVIDENCE}/journey-results.tsv" "${EVIDENCE}/journey-state.json" "${EVIDENCE}/journey-flow.txt" "${EVIDENCE}/stalls.tsv"
 set +e
 (cd "${PW_DIR}" && \
   UAT_CONSOLE_URL="${CONSOLE_URL}" \
