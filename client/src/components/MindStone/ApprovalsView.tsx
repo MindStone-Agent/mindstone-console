@@ -1,20 +1,26 @@
 /**
  * MindStone approvals (MindStone-Agent #84): the Console side of
  * `mindstone approvals`. Lists proposed actions (a connector send, a
- * connector mutation or a memory write held for a decision), shows the full
- * draft, and approves or rejects it through the gateway admin API, which
- * applies the same guards as the CLI. The draft text is only held in this
- * page's state; nothing here writes it to browser storage or the console.
+ * connector mutation, a memory write or a persona the agent drafted, held for
+ * a decision), shows the full draft, and approves or rejects it through the
+ * gateway admin API, which applies the same guards as the CLI. The draft text
+ * is only held in this page's state; nothing here writes it to browser storage
+ * or the console. A persona proposal (MindStone-Agent #105) is shown field by
+ * field as plain text, never as HTML or markdown, with any non-printing
+ * character shown as \u{XXXX}. Approving one only saves it to the personas;
+ * making it active is a separate switch on the Personas page.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
+import type { TranslationKeys } from '~/hooks';
 import { useLocalize } from '~/hooks';
+import { visibleText } from './visibleText';
 
 type Summary = {
   id: string;
   status: 'pending' | 'approved' | 'rejected';
-  kind: 'connector_send' | 'connector_mutation' | 'memory_write';
+  kind: 'connector_send' | 'connector_mutation' | 'memory_write' | 'persona_create';
   connectorId: string;
   summary: string;
   createdAt?: string;
@@ -26,10 +32,26 @@ type Detail = Summary & {
   send?: { text?: string; chatId?: string };
   memory?: { path: string; content: string };
   mutation?: { operation: string; resource: string; connectorId: string; data: unknown };
+  persona?: Persona;
+};
+/** A persona the agent proposed (the gateway's PersonaProposalPayload). */
+type Persona = {
+  id: string;
+  name: string;
+  description?: string;
+  voice?: string;
+  workingStyle?: string;
+  boundaries?: string[];
 };
 type Counts = { pending: number; approved: number; rejected: number };
 
 const BASE = '/api/mindstone/admin';
+
+/** What approving does, by kind; a send or a mutation is queued for its connector. */
+const CONFIRM_APPROVE: Partial<Record<Summary['kind'], TranslationKeys>> = {
+  memory_write: 'com_mindstone_appr_confirm_memory',
+  persona_create: 'com_mindstone_appr_persona_effect',
+};
 
 function errorBody(error: unknown): { error?: string; code?: string } {
   const data = (error as { response?: { data?: { error?: unknown; code?: unknown } } })?.response
@@ -48,6 +70,51 @@ function payloadText(detail: Detail): string {
   return '';
 }
 
+/** A persona approval's summary carries the proposed name, so it is shown the same way. */
+function summaryText(action: Summary): string {
+  return action.kind === 'persona_create' ? visibleText(action.summary) : action.summary;
+}
+
+/** The proposed persona, field by field. React renders every value as text. */
+function PersonaFields({ persona }: { persona: Persona }) {
+  const localize = useLocalize();
+  const row = (label: string, value: string | undefined) =>
+    value ? (
+      <div>
+        <dt className="text-xs font-medium text-text-secondary">{label}</dt>
+        <dd className="overflow-hidden whitespace-pre-wrap break-words text-sm">
+          {visibleText(value)}
+        </dd>
+      </div>
+    ) : null;
+  return (
+    <dl
+      className="flex flex-col gap-2 rounded bg-surface-secondary p-2"
+      data-testid="ms-appr-persona"
+    >
+      {row(localize('com_mindstone_appr_persona_name'), persona.name)}
+      {row(localize('com_mindstone_appr_persona_id'), persona.id)}
+      {row(localize('com_mindstone_appr_persona_description'), persona.description)}
+      {row(localize('com_mindstone_appr_persona_voice'), persona.voice)}
+      {row(localize('com_mindstone_appr_persona_working_style'), persona.workingStyle)}
+      {persona.boundaries?.length ? (
+        <div>
+          <dt className="text-xs font-medium text-text-secondary">
+            {localize('com_mindstone_appr_persona_boundaries')}
+          </dt>
+          <dd className="overflow-hidden break-words">
+            <ul className="list-disc pl-5 text-sm">
+              {persona.boundaries.map((item, index) => (
+                <li key={index}>{visibleText(item)}</li>
+              ))}
+            </ul>
+          </dd>
+        </div>
+      ) : null}
+    </dl>
+  );
+}
+
 export default function MindStoneApprovalsView() {
   const localize = useLocalize();
   const [actions, setActions] = useState<Summary[]>([]);
@@ -60,6 +127,8 @@ export default function MindStoneApprovalsView() {
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  // After a persona is approved, the Personas page is where to make it active.
+  const [personasLink, setPersonasLink] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -80,6 +149,7 @@ export default function MindStoneApprovalsView() {
 
   const open = async (id: string) => {
     setMessage(null);
+    setPersonasLink(false);
     setConfirming(null);
     setNeedsForce(false);
     setNote('');
@@ -105,12 +175,18 @@ export default function MindStoneApprovalsView() {
       if (decision === 'approve' && force) body.force = true;
       if (decision === 'reject' && note.trim()) body.note = note;
       await request.post(`${BASE}/approvals/${encodeURIComponent(detail.id)}/${decision}`, body);
+      const persona = decision === 'approve' ? detail.persona : undefined;
       setMessage({
         ok: true,
-        text: localize(
-          decision === 'approve' ? 'com_mindstone_appr_approved' : 'com_mindstone_appr_rejected',
-        ),
+        text: persona
+          ? localize('com_mindstone_appr_persona_saved', { 0: visibleText(persona.name) })
+          : localize(
+              decision === 'approve'
+                ? 'com_mindstone_appr_approved'
+                : 'com_mindstone_appr_rejected',
+            ),
       });
+      setPersonasLink(Boolean(persona));
       setDetail(null);
       setConfirming(null);
       setNeedsForce(false);
@@ -120,6 +196,10 @@ export default function MindStoneApprovalsView() {
       const { error: text, code } = errorBody(error);
       // An existing memory file is only overwritten on a second, explicit click.
       setNeedsForce(decision === 'approve' && code === 'memory_exists');
+      // A persona id that exists (persona_exists) is never overwritten, and
+      // one the config already uses (persona_referenced) is never saved: the
+      // gateway's text says to ask for a new name or reject.
+      setPersonasLink(false);
       setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') });
     } finally {
       setBusy(false);
@@ -148,6 +228,14 @@ export default function MindStoneApprovalsView() {
         {message && (
           <p role="status" className={message.ok ? 'text-green-600' : 'text-red-600'}>
             {message.text}
+            {personasLink && (
+              <>
+                {' '}
+                <Link to="/mindstone/personas" className="underline">
+                  {localize('com_mindstone_appr_personas_link')}
+                </Link>
+              </>
+            )}
           </p>
         )}
 
@@ -182,7 +270,7 @@ export default function MindStoneApprovalsView() {
                       [{action.status}] {action.kind} · {action.connectorId}
                     </span>
                     <br />
-                    <span className="text-sm">{action.summary}</span>
+                    <span className="text-sm">{summaryText(action)}</span>
                   </button>
                 </li>
               ))}
@@ -193,7 +281,7 @@ export default function MindStoneApprovalsView() {
         {detail && (
           <section className={card} aria-labelledby="ms-appr-detail">
             <h2 id="ms-appr-detail" className="mb-1 text-lg font-medium">
-              {detail.summary}
+              {summaryText(detail)}
             </h2>
             <p className="mb-2 text-xs text-text-secondary">
               {detail.kind} · {detail.connectorId} · {detail.status}
@@ -205,9 +293,28 @@ export default function MindStoneApprovalsView() {
                 {localize('com_mindstone_appr_memory_path', { 0: detail.memory.path })}
               </p>
             )}
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded bg-surface-secondary p-2 text-sm">
-              {payloadText(detail)}
-            </pre>
+            {detail.persona ? (
+              <>
+                <PersonaFields persona={detail.persona} />
+                {detail.status === 'pending' && (
+                  <>
+                    {/* The approve confirmation says the same, so it isn't shown twice. */}
+                    {confirming !== 'approve' && (
+                      <p className="mt-2 text-sm">
+                        {localize('com_mindstone_appr_persona_effect')}
+                      </p>
+                    )}
+                    <p className="mt-1 text-sm text-text-secondary">
+                      {localize('com_mindstone_persona_routes_note')}
+                    </p>
+                  </>
+                )}
+              </>
+            ) : (
+              <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded bg-surface-secondary p-2 text-sm">
+                {payloadText(detail)}
+              </pre>
+            )}
             {detail.status === 'pending' && confirming === null && (
               <div className="mt-3 flex gap-2">
                 <button type="button" className={primary} onClick={() => setConfirming('approve')}>
@@ -221,11 +328,7 @@ export default function MindStoneApprovalsView() {
             {confirming === 'approve' && (
               <div className="mt-3 flex flex-col gap-2">
                 <p className="text-sm">
-                  {localize(
-                    detail.kind === 'memory_write'
-                      ? 'com_mindstone_appr_confirm_memory'
-                      : 'com_mindstone_appr_confirm_send',
-                  )}
+                  {localize(CONFIRM_APPROVE[detail.kind] ?? 'com_mindstone_appr_confirm_send')}
                 </p>
                 <div className="flex gap-2">
                   <button
