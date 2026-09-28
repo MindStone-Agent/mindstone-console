@@ -52,7 +52,7 @@ Needs: git, Node 22.19 or newer, npm, Docker with Compose v2, curl, openssl, and
 | J4 | Start a chat | Listen for chat requests, then click **Start a chat** and watch for 15 s: this records whether the agent spoke first. Send a message. The Console stores a finished reply that isn't an error and has text. The saved route is `pi-session` with the chosen model. The gateway transcript's entry for the reply points to its Pi session file, which must record the chosen provider and model as the one called, with no model fallback. | PASS |
 | J5 | Identity formation | The agent speaks first with the identity-formation conversation, and the checklist has an identity step. | **PENDING** (#102) |
 | J6 | Recall in the conversation | Plant a codeword, ask an unrelated question, then ask for the codeword. The reply must contain it. It works today, so a miss is a regression and **FAILs**. | PASS |
-| J7 | Skill Builder | Built from the Console and from chat, approved, installed and used. | **PENDING** (#104). It checks that `/mindstone` and Approvals load. |
+| J7 | Skill Builder | Advanced settings are on (J2). The **Skills** link on `/mindstone` opens the Skills page, which lists the built-in Integration Builder. From the built-in: a draft with a goal, reviewed, then discarded. From scratch: a draft with an id, label, description, goal, when-to-use and instructions naming a codeword, reviewed (its SKILL.md holds the codeword), then installed: it moves to **Active** and the status panel's skills row says `1 installed`. In a new chat, the agent is asked to create a second skill with its own codeword and propose it for install. The reply is not an error and doesn't show the proposal block. Approvals has a pending `install skill <id>` whose detail holds that codeword; approving it installs it, and the Skills page lists it as **Active**. Then a fresh chat for each codeword: the reply must contain it. With the mock provider the message carries the proposal block itself (the mock echoes it), and the last check is MOCK. | PASS once #104 lands |
 | J8 | Persona drafted by the agent | Proposed in chat, approved on Approvals, active in the next chat, and listed and switchable in the Console. | **PENDING** (#105) |
 
 **How PENDING works.** A PENDING step first asserts today's *exact* state, not a guess from names:
@@ -61,8 +61,7 @@ Needs: git, Node 22.19 or newer, npm, Docker with Compose v2, curl, openssl, and
 |---|---|
 | J3 | The setup steps are exactly `[Access, Model provider, Model, Persona, Finish]`, and the `/admin/status` checklist keys are exactly `{connectors, memory, persona, provider}`. |
 | J5 | The same checklist keys, and the agent didn't speak first. |
-| J7 | The links on `/mindstone`'s status section are exactly `[Run guided setup again, Diagnostics, Approvals]`. `GET /admin/skills`, `/admin/skills/builder`, `/admin/skills/drafts` and `/admin/skills/build` on the gateway each return 404. |
-| J8 | The same links. `GET /admin/personas`, `/admin/personas/proposals` and `/admin/persona` each return 404. |
+| J8 | The links on `/mindstone`'s status section are exactly `[Run guided setup again, Diagnostics, Approvals, Skills]`. `GET /admin/personas`, `/admin/personas/proposals` and `/admin/persona` each return 404. |
 
 Only if that state is unchanged does the step call `test.fixme()` with the issue's "done when". **Any change FAILs the step** with "state changed: … review this PENDING test". A landed or half-landed feature therefore can't sit unnoticed as PENDING. Write the real assertions from the "done when" text in the step.
 
