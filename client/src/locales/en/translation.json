@@ -3085,7 +3085,7 @@
   "com_mindstone_appr_persona_voice": "Voice",
   "com_mindstone_appr_persona_working_style": "Working style",
   "com_mindstone_appr_persona_boundaries": "Boundaries",
-  "com_mindstone_appr_persona_effect": "Approving saves this persona to your Personas list. It won't be active until you switch to it there. It changes voice and working style only; the core identity and safety rules still govern.",
+  "com_mindstone_appr_persona_effect": "Approving saves this persona to your Personas list. It won't be active until you switch to it there. Once active, it's used in every chat, including other people's chats and connectors, so it shouldn't hold private details about you. It changes voice and working style only; the core identity and safety rules still govern.",
   "com_mindstone_appr_persona_saved": "{{0}} is saved to your personas. Make it active on the Personas page.",
   "com_mindstone_appr_personas_link": "Go to Personas",
   "com_mindstone_per_title": "Personas",

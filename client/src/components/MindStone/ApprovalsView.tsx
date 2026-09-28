@@ -82,7 +82,9 @@ function PersonaFields({ persona }: { persona: Persona }) {
     value ? (
       <div>
         <dt className="text-xs font-medium text-text-secondary">{label}</dt>
-        <dd className="whitespace-pre-wrap text-sm">{visibleText(value)}</dd>
+        <dd className="overflow-hidden whitespace-pre-wrap break-words text-sm">
+          {visibleText(value)}
+        </dd>
       </div>
     ) : null;
   return (
@@ -100,7 +102,7 @@ function PersonaFields({ persona }: { persona: Persona }) {
           <dt className="text-xs font-medium text-text-secondary">
             {localize('com_mindstone_appr_persona_boundaries')}
           </dt>
-          <dd>
+          <dd className="overflow-hidden break-words">
             <ul className="list-disc pl-5 text-sm">
               {persona.boundaries.map((item, index) => (
                 <li key={index}>{visibleText(item)}</li>
@@ -194,7 +196,8 @@ export default function MindStoneApprovalsView() {
       const { error: text, code } = errorBody(error);
       // An existing memory file is only overwritten on a second, explicit click.
       setNeedsForce(decision === 'approve' && code === 'memory_exists');
-      // A persona id that exists (persona_exists) is never overwritten: the
+      // A persona id that exists (persona_exists) is never overwritten, and
+      // one the config already uses (persona_referenced) is never saved: the
       // gateway's text says to ask for a new name or reject.
       setPersonasLink(false);
       setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') });

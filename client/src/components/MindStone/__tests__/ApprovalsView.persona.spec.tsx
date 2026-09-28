@@ -161,6 +161,29 @@ describe('MindStone approvals: a persona proposal (MindStone-Agent #105)', () =>
     expect(within(section).getByTestId('ms-appr-persona')).toBeInTheDocument();
   });
 
+  it("shows the gateway's text when the config already uses the persona id", async () => {
+    const section = await openDetail(personaAction());
+    const text =
+      'the config already uses the persona id "wren", so approving it would make it active without a switch; ask the agent for a new name, or reject this proposal';
+    mockPost.mockRejectedValue({
+      response: { status: 409, data: { ok: false, error: text, code: 'persona_referenced' } },
+    });
+    fireEvent.click(within(section).getByRole('button', { name: 'com_mindstone_appr_approve' }));
+    fireEvent.click(
+      within(section).getByRole('button', { name: 'com_mindstone_appr_confirm_approve' }),
+    );
+    expect(await screen.findByRole('status')).toHaveTextContent(text);
+    expect(screen.queryByRole('link', { name: 'com_mindstone_appr_personas_link' })).toBeNull();
+    expect(within(section).getByTestId('ms-appr-persona')).toBeInTheDocument();
+  });
+
+  it("clips each field to its row, so stacked marks can't draw over the card", async () => {
+    const section = await openDetail(personaAction());
+    const rows = within(section).getByTestId('ms-appr-persona').querySelectorAll('dd');
+    expect(rows.length).toBeGreaterThan(0);
+    rows.forEach((row) => expect(row).toHaveClass('overflow-hidden'));
+  });
+
   it('says on the pending card that a persona route rule still wins for its chats', async () => {
     const section = await openDetail(personaAction());
     expect(within(section).getByText('com_mindstone_persona_routes_note')).toBeInTheDocument();
