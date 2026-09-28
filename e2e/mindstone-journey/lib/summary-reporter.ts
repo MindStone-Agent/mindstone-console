@@ -16,9 +16,9 @@ function evidenceDir(): string {
   return process.env.UAT_EVIDENCE_DIR ?? path.resolve(__dirname, '..', 'evidence', 'manual');
 }
 
-function oneLine(text: string, max = 400): string {
-  const flat = text.replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+/** One line (tabs and newlines would break the TSV), never truncated: a cut error hides what failed. */
+function oneLine(text: string): string {
+  return text.replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+/g, ' ').trim();
 }
 
 export default class SummaryReporter implements Reporter {
@@ -39,7 +39,7 @@ export default class SummaryReporter implements Reporter {
     else status = 'FAIL';
     const note: string[] = [];
     if (status === 'PENDING' && fixme?.description) note.push(fixme.description);
-    if (status === 'FAIL' && result.error?.message) note.push(`error: ${oneLine(result.error.message, 300)}`);
+    if (status === 'FAIL' && result.error?.message) note.push(`error: ${oneLine(result.error.message)}`);
     note.push(...notes);
     // The copies in evidence/screens and evidence/logs (Playwright's own copies have hashed names).
     const files = [
@@ -50,11 +50,14 @@ export default class SummaryReporter implements Reporter {
       status,
       title: label ? `${title} [${label}]` : title,
       evidence: files.join(', '),
-      note: oneLine(note.join(' | '), 900),
+      note: oneLine(note.join(' | ')),
     });
   }
 
   onEnd(_result: FullResult) {
+    // No test ran (for example, global setup refused a stale evidence dir):
+    // write nothing, so an earlier run's results are never replaced by an empty file.
+    if (this.rows.length === 0) return;
     const dir = evidenceDir();
     fs.mkdirSync(dir, { recursive: true });
     const clean = (s: string) => s.replace(/[\t\n]/g, ' ');

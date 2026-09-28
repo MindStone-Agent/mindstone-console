@@ -1,101 +1,148 @@
-// Fails if any generated secret appears anywhere under the evidence dir:
-// in plain text, base64-encoded, inside a .zip (Playwright traces and
-// reports), or inside a base64 zip embedded in a text file.
+// Fails if any generated secret appears anywhere under the evidence dir.
 //
 //   node secret-check.mjs <evidence-dir> <secret source>...
 //
+// Each file is scanned as raw bytes and through every decoding the evidence
+// could hide a secret behind:
+// - encodings of the secret itself: UTF-8, UTF-16LE/BE, hex (either case),
+//   base64 and base64url at any byte alignment;
+// - a "flattened" text view with \uXXXX / \xNN escapes decoded, ANSI codes
+//   removed and line breaks (real or escaped) removed, so a secret split
+//   across lines or coloured by a terminal is still found;
+// - containers: zips (anywhere in the file, not only at byte 0), gzip
+//   streams (anywhere), and base64 runs, decoded and scanned recursively.
 // Prints the files and the kind of match, never a value. Exit 0: clean;
 // 1: a secret was found; 2: no secrets to look for (the check can't vouch).
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { pathToFileURL } from 'node:url';
 import { collectSecrets, needles } from './secrets.mjs';
 
-const [evidence, ...sources] = process.argv.slice(2);
-const secrets = collectSecrets(sources);
-if (!secrets.length) {
-  console.log('secret-check: no secrets found in the sources, nothing to check against');
-  process.exit(2);
-}
-const patterns = secrets.map((secret, i) => ({ i, needles: needles(secret) }));
-const hits = [];
-let scanned = 0;
+const MAX_DEPTH = 5;
+const LENIENT = { finishFlush: zlib.constants.Z_SYNC_FLUSH };
 
-function scanBuffer(buffer, where, depth = 0) {
-  scanned += 1;
-  const text = buffer.toString('latin1');
-  for (const { i, needles: list } of patterns) {
-    list.forEach((needle, n) => {
-      if (text.includes(needle)) hits.push(`${where}: secret #${i + 1} (${n === 0 ? 'plain' : 'base64'})`);
-    });
-  }
-  if (depth > 4) return;
-  // A zip (a trace, a report archive) or a zip nested in one.
-  if (buffer.length > 22 && buffer.readUInt32LE(0) === 0x04034b50) {
-    for (const entry of unzip(buffer)) scanBuffer(entry.data, `${where}!${entry.name}`, depth + 1);
-  }
-  // A zip embedded as base64 in a text file (Playwright's html report does this).
-  for (const m of text.matchAll(/UEsDB[A-Za-z0-9+/=]{40,}/g)) {
-    try {
-      const inner = Buffer.from(m[0], 'base64');
-      scanBuffer(inner, `${where}#base64zip@${m.index}`, depth + 1);
-    } catch {
-      // not decodable
-    }
+/** \uXXXX and \xNN escapes decoded, ANSI escape codes and line breaks (real or escaped) removed. */
+export function flatten(text) {
+  return text
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\\[rn]/g, '')
+    .replace(/[\r\n]/g, '');
+}
+
+function* signatures(buffer, sig) {
+  let i = buffer.indexOf(sig);
+  while (i !== -1) {
+    yield i;
+    i = buffer.indexOf(sig, i + 1);
   }
 }
 
-/** Entries of a zip, from its central directory (handles data descriptors). */
-function unzip(buffer) {
+/** Entries of every zip local header in the buffer, wherever it starts. */
+function zipEntries(buffer) {
   const entries = [];
-  let eocd = -1;
-  for (let i = buffer.length - 22; i >= Math.max(0, buffer.length - 65557); i -= 1) {
-    if (buffer.readUInt32LE(i) === 0x06054b50) {
-      eocd = i;
-      break;
-    }
-  }
-  if (eocd < 0) return entries;
-  const count = buffer.readUInt16LE(eocd + 10);
-  let p = buffer.readUInt32LE(eocd + 16);
-  for (let n = 0; n < count && p + 46 <= buffer.length; n += 1) {
-    if (buffer.readUInt32LE(p) !== 0x02014b50) break;
-    const method = buffer.readUInt16LE(p + 10);
-    const size = buffer.readUInt32LE(p + 20);
-    const nameLength = buffer.readUInt16LE(p + 28);
-    const extraLength = buffer.readUInt16LE(p + 30);
-    const commentLength = buffer.readUInt16LE(p + 32);
-    const local = buffer.readUInt32LE(p + 42);
-    const name = buffer.toString('utf8', p + 46, p + 46 + nameLength);
-    p += 46 + nameLength + extraLength + commentLength;
-    if (buffer.readUInt32LE(local) !== 0x04034b50) continue;
-    const start = local + 30 + buffer.readUInt16LE(local + 26) + buffer.readUInt16LE(local + 28);
-    const raw = buffer.subarray(start, start + size);
+  for (const at of signatures(buffer, Buffer.from([0x50, 0x4b, 0x03, 0x04]))) {
+    if (at + 30 > buffer.length) continue;
+    const flags = buffer.readUInt16LE(at + 6);
+    const method = buffer.readUInt16LE(at + 8);
+    const size = buffer.readUInt32LE(at + 18);
+    const nameLength = buffer.readUInt16LE(at + 26);
+    const extraLength = buffer.readUInt16LE(at + 28);
+    const start = at + 30 + nameLength + extraLength;
+    if (start > buffer.length) continue;
+    const name = buffer.toString('utf8', at + 30, at + 30 + nameLength);
+    const sized = size > 0 && !(flags & 8);
+    let raw = sized ? buffer.subarray(start, start + size) : buffer.subarray(start);
     try {
-      entries.push({ name, data: method === 8 ? zlib.inflateRawSync(raw) : raw });
-    } catch {
+      if (method === 8) raw = zlib.inflateRawSync(raw, LENIENT);
+      else if (!sized) {
+        const next = buffer.indexOf(Buffer.from([0x50, 0x4b]), start);
+        raw = buffer.subarray(start, next === -1 ? buffer.length : next);
+      }
       entries.push({ name, data: raw });
+    } catch {
+      // not a readable entry
     }
   }
   return entries;
 }
 
-function walk(dir) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(full);
-    else if (entry.isFile()) scanBuffer(fs.readFileSync(full), path.relative(evidence, full));
+function gzipStreams(buffer) {
+  const out = [];
+  for (const at of signatures(buffer, Buffer.from([0x1f, 0x8b, 0x08]))) {
+    try {
+      out.push({ at, data: zlib.gunzipSync(buffer.subarray(at), LENIENT) });
+    } catch {
+      // not a gzip stream
+    }
   }
+  return out;
 }
 
-if (!evidence || !fs.existsSync(evidence)) {
-  console.log(`secret-check: no evidence dir ${evidence}`);
-  process.exit(2);
+function base64Runs(text) {
+  const out = [];
+  for (const m of text.matchAll(/[A-Za-z0-9+/_-]{24,}={0,2}/g)) {
+    const decoded = Buffer.from(m[0].replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    if (decoded.length >= 12) out.push({ at: m.index, data: decoded });
+  }
+  return out;
 }
-walk(evidence);
-if (hits.length) {
-  console.log(`secret-check: FOUND ${hits.length} occurrence(s) of ${secrets.length} secrets in ${scanned} files/entries:`);
-  for (const hit of [...new Set(hits)]) console.log(`  ${hit}`);
-  process.exit(1);
+
+/** Scans a directory for the given secrets; returns the hits (file and kind, never values). */
+export function scan(dir, secrets) {
+  const patterns = secrets.map((secret, i) => ({ i, secret, list: needles(secret) }));
+  const hits = new Set();
+  let scanned = 0;
+
+  const scanBuffer = (buffer, where, depth) => {
+    scanned += 1;
+    for (const { i, secret, list } of patterns) {
+      for (const { kind, bytes } of list) {
+        if (buffer.includes(bytes)) hits.add(`${where}: secret #${i + 1} (${kind})`);
+      }
+      const flat = flatten(buffer.toString('latin1'));
+      if (flat.includes(secret) || flat.includes(Buffer.from(secret, 'utf8').toString('latin1'))) {
+        hits.add(`${where}: secret #${i + 1} (escaped/split)`);
+      }
+    }
+    if (depth >= MAX_DEPTH) return;
+    for (const entry of zipEntries(buffer)) scanBuffer(entry.data, `${where}!${entry.name}`, depth + 1);
+    for (const gz of gzipStreams(buffer)) scanBuffer(gz.data, `${where}#gzip@${gz.at}`, depth + 1);
+    const text = buffer.toString('latin1');
+    for (const b64 of base64Runs(text)) scanBuffer(b64.data, `${where}#base64@${b64.at}`, depth + 1);
+  };
+
+  const walk = (d) => {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile()) scanBuffer(fs.readFileSync(full), path.relative(dir, full), 0);
+    }
+  };
+  walk(dir);
+  return { hits: [...hits], scanned };
 }
-console.log(`secret-check: clean (${secrets.length} secrets, ${scanned} files/entries scanned, zips and base64 decoded)`);
+
+function main() {
+  const [evidence, ...sources] = process.argv.slice(2);
+  const secrets = collectSecrets(sources);
+  if (!secrets.length) {
+    console.log('secret-check: no secrets found in the sources, nothing to check against');
+    process.exit(2);
+  }
+  if (!evidence || !fs.existsSync(evidence)) {
+    console.log('secret-check: no evidence dir');
+    process.exit(2);
+  }
+  const { hits, scanned } = scan(evidence, secrets);
+  if (hits.length) {
+    console.log(`secret-check: FOUND ${hits.length} occurrence(s) of ${secrets.length} secrets in ${scanned} files/entries:`);
+    for (const hit of hits) console.log(`  ${hit}`);
+    process.exit(1);
+  }
+  console.log(`secret-check: clean (${secrets.length} secrets, ${scanned} files/entries scanned, decoded: zip, gzip, base64, hex, utf-16, escapes, split lines, ANSI)`);
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) main();
