@@ -1,7 +1,8 @@
 /**
  * MindStone approvals (MindStone-Agent #84): the Console side of
  * `mindstone approvals`. Lists proposed actions (a connector send, a
- * connector mutation or a memory write held for a decision), shows the full
+ * connector mutation, a memory write or a skill the agent proposed in chat,
+ * held for a decision), shows the full
  * draft, and approves or rejects it through the gateway admin API, which
  * applies the same guards as the CLI. The draft text is only held in this
  * page's state; nothing here writes it to browser storage or the console.
@@ -9,12 +10,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
+import type { TranslationKeys } from '~/hooks';
 import { useLocalize } from '~/hooks';
 
 type Summary = {
   id: string;
   status: 'pending' | 'approved' | 'rejected';
-  kind: 'connector_send' | 'connector_mutation' | 'memory_write';
+  kind: 'connector_send' | 'connector_mutation' | 'memory_write' | 'skill_install';
   connectorId: string;
   summary: string;
   createdAt?: string;
@@ -26,10 +28,26 @@ type Detail = Summary & {
   send?: { text?: string; chatId?: string };
   memory?: { path: string; content: string };
   mutation?: { operation: string; resource: string; connectorId: string; data: unknown };
+  skill?: {
+    id: string;
+    label: string;
+    description: string;
+    goal?: string;
+    whenToUse?: string[];
+    outputs?: string[];
+    safetyNotes?: string[];
+    instructions?: string;
+  };
 };
 type Counts = { pending: number; approved: number; rejected: number };
 
 const BASE = '/api/mindstone/admin';
+
+/** What approving does, by kind; a send or a mutation is queued for its connector. */
+const CONFIRM_TEXT: Partial<Record<Summary['kind'], TranslationKeys>> = {
+  memory_write: 'com_mindstone_appr_confirm_memory',
+  skill_install: 'com_mindstone_appr_confirm_skill',
+};
 
 function errorBody(error: unknown): { error?: string; code?: string } {
   const data = (error as { response?: { data?: { error?: unknown; code?: unknown } } })?.response
@@ -40,11 +58,28 @@ function errorBody(error: unknown): { error?: string; code?: string } {
   };
 }
 
+/** A proposed skill as the admin reads it: every field that will be installed. */
+function skillText(skill: NonNullable<Detail['skill']>): string {
+  const list = (title: string, items?: string[]) =>
+    items && items.length ? [`${title}:`, ...items.map((item) => `- ${item}`), ''] : [];
+  return [
+    `${skill.label} (${skill.id})`,
+    skill.description,
+    '',
+    ...(skill.goal ? [`Goal: ${skill.goal}`, ''] : []),
+    ...list('When to use it', skill.whenToUse),
+    ...list('What it produces', skill.outputs),
+    ...list('Safety notes', skill.safetyNotes),
+    ...(skill.instructions ? ['Instructions:', skill.instructions] : []),
+  ].join('\n');
+}
+
 /** What the admin is about to approve or reject, as plain text. */
 function payloadText(detail: Detail): string {
   if (detail.send) return detail.send.text ?? '';
   if (detail.memory) return detail.memory.content;
   if (detail.mutation) return JSON.stringify(detail.mutation, null, 2);
+  if (detail.skill) return skillText(detail.skill);
   return '';
 }
 
@@ -118,8 +153,10 @@ export default function MindStoneApprovalsView() {
       await load();
     } catch (error) {
       const { error: text, code } = errorBody(error);
-      // An existing memory file is only overwritten on a second, explicit click.
-      setNeedsForce(decision === 'approve' && code === 'memory_exists');
+      // An existing memory file or installed skill is only replaced on a second, explicit click.
+      setNeedsForce(
+        decision === 'approve' && (code === 'memory_exists' || code === 'skill_exists'),
+      );
       setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') });
     } finally {
       setBusy(false);
@@ -221,11 +258,7 @@ export default function MindStoneApprovalsView() {
             {confirming === 'approve' && (
               <div className="mt-3 flex flex-col gap-2">
                 <p className="text-sm">
-                  {localize(
-                    detail.kind === 'memory_write'
-                      ? 'com_mindstone_appr_confirm_memory'
-                      : 'com_mindstone_appr_confirm_send',
-                  )}
+                  {localize(CONFIRM_TEXT[detail.kind] ?? 'com_mindstone_appr_confirm_send')}
                 </p>
                 <div className="flex gap-2">
                   <button
@@ -243,7 +276,11 @@ export default function MindStoneApprovalsView() {
                       disabled={busy}
                       onClick={() => void decide('approve', true)}
                     >
-                      {localize('com_mindstone_appr_overwrite')}
+                      {localize(
+                        detail.kind === 'skill_install'
+                          ? 'com_mindstone_appr_skill_replace'
+                          : 'com_mindstone_appr_overwrite',
+                      )}
                     </button>
                   )}
                   <button

@@ -74,6 +74,12 @@ const ENDPOINTS = [
   { method: 'post', path: 'approvals/0b5e7c1a/reject', write: true },
   { method: 'get', path: 'secrets', write: false },
   { method: 'delete', path: 'secrets/telegram-token', write: true },
+  { method: 'get', path: 'skills', write: false },
+  { method: 'get', path: 'skills/weekly-report', write: false },
+  { method: 'get', path: 'skills/integration-builder', write: false },
+  { method: 'post', path: 'skills/drafts', write: true },
+  { method: 'delete', path: 'skills/drafts/weekly-report', write: true },
+  { method: 'post', path: 'skills/weekly-report/install', write: true },
 ];
 
 /** What each caller should get from an allowlisted endpoint. */
@@ -268,6 +274,38 @@ describe('MindStone admin proxy', () => {
       ['delete', 'config/memory'],
       ['delete', 'permissions/advanced'],
       ['patch', 'config/mem.ory'],
+      // Skills: lowercase ids of up to 64 characters; list, show, draft, discard, install.
+      ['get', 'skillsx'],
+      ['get', 'skills/'],
+      ['get', 'skills/Weekly-Report'],
+      ['get', 'skills/-weekly'],
+      ['get', 'skills/weekly_report'],
+      ['get', 'skills/weekly.report'],
+      ['get', `skills/${'a'.repeat(65)}`],
+      ['get', 'skills/..%2Fconfig'],
+      ['get', 'skills/a%2F..%2F..%2Fconfig'],
+      ['get', 'skills/weekly-report/install'],
+      ['get', 'skills/drafts/weekly-report'],
+      ['get', 'x/skills'],
+      ['post', 'skills'],
+      ['post', 'skills/weekly-report'],
+      ['post', 'skills/drafts/weekly-report'],
+      ['post', 'skills/drafts/x/install'],
+      ['post', 'skills/weekly-report/install/x'],
+      ['post', 'skills/Weekly/install'],
+      ['post', 'skills/..%2Fconfig/install'],
+      ['post', 'skills/weekly-report/installx'],
+      ['patch', 'skills/drafts'],
+      ['patch', 'skills/weekly-report'],
+      ['delete', 'skills'],
+      ['delete', 'skills/weekly-report'],
+      ['delete', 'skills/drafts'],
+      ['delete', 'skills/drafts/'],
+      ['delete', 'skills/drafts/..'],
+      ['delete', 'skills/drafts/a%2F..%2F..%2Fconfig'],
+      ['delete', 'skills/drafts/a/b'],
+      ['delete', `skills/drafts/${'a'.repeat(65)}`],
+      ['delete', 'skills/weekly-report/install'],
     ];
     for (const [method, path] of outside) {
       const response = await call('manage', { method, path });
@@ -311,6 +349,49 @@ describe('MindStone admin proxy', () => {
       fetchMock.mockClear();
       await request(app).get(`/api/mindstone/admin/${path}`).set('x-test-caller', 'manage');
       expect([path, fetchMock.mock.calls[0]?.[0]]).toEqual([path, expected]);
+    }
+  });
+
+  it('forwards only a known source, and only on reading one skill', async () => {
+    const cases = [
+      ['skills/weekly-report', 'http://gateway.test:19790/admin/skills/weekly-report'],
+      [
+        'skills/weekly-report?source=draft',
+        'http://gateway.test:19790/admin/skills/weekly-report?source=draft',
+      ],
+      [
+        'skills/weekly-report?source=installed&x=1',
+        'http://gateway.test:19790/admin/skills/weekly-report?source=installed',
+      ],
+      [
+        'skills/integration-builder?source=builtin',
+        'http://gateway.test:19790/admin/skills/integration-builder?source=builtin',
+      ],
+      ['skills?source=draft', 'http://gateway.test:19790/admin/skills'],
+      ['status?source=draft', 'http://gateway.test:19790/admin/status'],
+      ['approvals?source=draft', 'http://gateway.test:19790/admin/approvals'],
+    ];
+    for (const [path, expected] of cases) {
+      fetchMock.mockClear();
+      await request(app).get(`/api/mindstone/admin/${path}`).set('x-test-caller', 'manage');
+      expect([path, fetchMock.mock.calls[0]?.[0]]).toEqual([path, expected]);
+    }
+    // A write never carries it.
+    for (const write of ['skills/drafts', 'skills/weekly-report/install']) {
+      fetchMock.mockClear();
+      await request(app)
+        .post(`/api/mindstone/admin/${write}?source=draft`)
+        .set('x-test-caller', 'manage')
+        .send({});
+      expect(fetchMock.mock.calls[0]?.[0]).toBe(`http://gateway.test:19790/admin/${write}`);
+    }
+    for (const bad of ['Draft', 'drafts', '', 'x', '%2F..', 'draft&source=builtin']) {
+      fetchMock.mockClear();
+      const response = await request(app)
+        .get(`/api/mindstone/admin/skills/weekly-report?source=${bad}`)
+        .set('x-test-caller', 'manage');
+      expect([bad, response.status]).toEqual([bad, 400]);
+      expect(fetchMock).not.toHaveBeenCalled();
     }
   });
 

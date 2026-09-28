@@ -42,6 +42,11 @@ const ALLOWED = [
   { method: 'POST', path: /^approvals\/[0-9a-f-]{8,36}\/(approve|reject)$/ },
   { method: 'GET', path: /^secrets$/ },
   { method: 'DELETE', path: /^secrets\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/ },
+  { method: 'GET', path: /^skills$/ },
+  { method: 'GET', path: /^skills\/[a-z0-9][a-z0-9-]{0,63}$/ },
+  { method: 'POST', path: /^skills\/drafts$/ },
+  { method: 'DELETE', path: /^skills\/drafts\/[a-z0-9][a-z0-9-]{0,63}$/ },
+  { method: 'POST', path: /^skills\/[a-z0-9][a-z0-9-]{0,63}\/install$/ },
 ];
 
 /** Gateway base URL: MINDSTONE_GATEWAY_URL is the OpenAI base (…/v1); the admin API sits at the root. */
@@ -97,10 +102,23 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
     }
     headers['if-match'] = ifMatch;
   }
-  // Two queries reach the gateway, each on one path only: all=1 on the
-  // approvals list (decided actions too) and lines on the log tail; nothing
-  // else from the browser's query string does.
+  // Three queries reach the gateway, each on one path only: all=1 on the
+  // approvals list (decided actions too), lines on the log tail and source on
+  // one skill; nothing else from the browser's query string does.
   let query = path === 'approvals' && req.query?.all === '1' ? '?all=1' : '';
+  if (
+    req.method === 'GET' &&
+    /^skills\/[a-z0-9-]+$/.test(path) &&
+    req.query?.source !== undefined
+  ) {
+    const source = req.query.source;
+    if (source !== 'installed' && source !== 'draft' && source !== 'builtin') {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'source must be installed, draft or builtin' });
+    }
+    query = `?source=${source}`;
+  }
   // lines: digits only here; the gateway checks the 1 to 500 range.
   if (path === 'logs' && req.query?.lines !== undefined) {
     const lines = req.query.lines;

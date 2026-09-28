@@ -466,7 +466,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
               </Row>
             )}
             {skills && (
-              <Row label={localize('com_mindstone_sys_skills')}>
+              <Row label={localize('com_mindstone_sys_skills')} testId="ms-sys-skills">
                 {localize('com_mindstone_sys_skills_detail', {
                   0: n(skills.builtinCount),
                   1: n(skills.installedCount),

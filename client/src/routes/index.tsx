@@ -14,6 +14,7 @@ import MindStoneOnboardingView from '~/components/MindStone/OnboardingView';
 import MindStoneApprovalsView from '~/components/MindStone/ApprovalsView';
 import MindStoneSettingsView from '~/components/MindStone/SettingsView';
 import MindStoneSecretsView from '~/components/MindStone/SecretsView';
+import MindStoneSkillsView from '~/components/MindStone/SkillsView';
 import AgentMarketplace from '~/components/Agents/Marketplace';
 import { OAuthSuccess, OAuthError } from '~/components/OAuth';
 import { AuthContextProvider } from '~/hooks/AuthContext';
@@ -168,6 +169,11 @@ export const router = createBrowserRouter(
               /** MindStone stored secrets (MindStone-Agent #88). The server route enforces admin. */
               path: 'mindstone/secrets',
               element: <MindStoneSecretsView />,
+            },
+            {
+              /** MindStone Skill Builder (MindStone-Agent #104). The server route enforces admin. */
+              path: 'mindstone/skills',
+              element: <MindStoneSkillsView />,
             },
             {
               path: 'prompts',
