@@ -65,8 +65,11 @@ const TYPED_PHRASE = 'Enable advanced settings ';
 /** The links in /mindstone's status section today (the setup link reads "Run guided setup again" once set up). */
 const TODAY_STATUS_LINKS = ['Run guided setup again', 'Diagnostics', 'Approvals'];
 
-/** Links inside the #102 checklist items (a step's own "set it up" link), left out of the comparison. */
-const CHECKLIST_LINKS = ['Set up memory', 'Tell the agent about you'];
+/**
+ * Left out of the comparison: links inside the #102 checklist items (a step's
+ * own "set it up" link), and the #105 Personas link, which J8 checks.
+ */
+const IGNORED_STATUS_LINKS = ['Set up memory', 'Tell the agent about you', 'Personas'];
 
 /** Steps that judge the state after setup: when J2 failed they report "blocked by J2", not "state changed". */
 const NEEDS_SETUP = /^J[78] /;
@@ -150,7 +153,7 @@ async function statusLinks(p: Page): Promise<string[]> {
   await expect(section).toBeVisible();
   return (await section.getByRole('link').allTextContents())
     .map((s) => s.trim())
-    .filter((s) => !CHECKLIST_LINKS.includes(s));
+    .filter((s) => !IGNORED_STATUS_LINKS.includes(s));
 }
 
 async function probeAll(testInfo: TestInfo, routes: string[]) {

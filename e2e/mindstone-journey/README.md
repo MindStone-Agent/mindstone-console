@@ -109,7 +109,7 @@ Then Finish shows "MindStone is set up". After that, `GET /admin/status` (throug
 |---|---|
 | J3 (`pre-102`) | The setup steps are exactly `[Access, Model provider, Model, Persona, Finish]`, and the `/admin/status` checklist keys are exactly `{connectors, memory, persona, provider}`. |
 | J5 (`pre-102`) | The same checklist keys, and the agent didn't speak first. |
-| J7 | The status section's own links on `/mindstone` (not the checklist's) are exactly `[Run guided setup again, Diagnostics, Approvals]`. `GET /admin/skills`, `/admin/skills/builder`, `/admin/skills/drafts` and `/admin/skills/build` on the gateway each return 404. |
+| J7 | The status section's own links on `/mindstone` (not the checklist's, and not the #105 Personas link, which J8 checks) are exactly `[Run guided setup again, Diagnostics, Approvals]`. `GET /admin/skills`, `/admin/skills/builder`, `/admin/skills/drafts` and `/admin/skills/build` on the gateway each return 404. |
 | J8 | Without #105 (MindStone-Agent #112 and console #24): `GET /api/mindstone/admin/personas` returns 404, so J8 is PENDING. |
 
 Only if that state is unchanged does the step call `test.fixme()` with the issue's "done when". **Any change FAILs the step** with "state changed: … review this PENDING test". A landed or half-landed feature therefore can't sit unnoticed as PENDING. Write the real assertions from the "done when" text in the step.
