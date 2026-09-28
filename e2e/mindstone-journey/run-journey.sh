@@ -172,6 +172,19 @@ tail_to() { # tail_to <src> <dest> [lines]
   [[ -f "$1" ]] && tail -n "${3:-200}" "$1" >"$2" 2>/dev/null || true
 }
 
+# interruptible <cmd...>: runs a long child. Ctrl-C reaches the whole process group; a child
+# that catches it (docker compose, npm) exits 130 instead of dying on the signal, and then bash
+# doesn't run its own INT trap. So a 129/130/143 exit is treated as the interrupt it is.
+interruptible() {
+  local rc=0
+  "$@" || rc=$?
+  if [[ "${rc}" == 129 || "${rc}" == 130 || "${rc}" == 143 ]]; then
+    FATAL="interrupted"
+    exit 130
+  fi
+  return "${rc}"
+}
+
 elapsed() { local s=$(( $(date +%s) - $1 )); printf '%dm%02ds' $((s / 60)) $((s % 60)); }
 
 # new_secret <name> <openssl rand args...>: a generated secret, written straight to a 0600 file.
@@ -587,7 +600,7 @@ curl -fsSL "${MSA_RAW}/${MSA_REF}/install.sh" -o "${SCRATCH}/install.sh" \
 cp "${SCRATCH}/install.sh" "${EVIDENCE}/msa-install.sh"
 [[ -e "${INSTALL_STATUS_TMP}" ]] || TMP_STATUS_PREEXISTED=0
 log "  installing MindStone-Agent (npm install, Pi build, CLI build) - several minutes"
-if ! msa_env bash "${SCRATCH}/install.sh" --dir "${MSA_DIR}" --repo "${MSA_REPO}" --no-link --branch "${MSA_REF}" \
+if ! interruptible msa_env bash "${SCRATCH}/install.sh" --dir "${MSA_DIR}" --repo "${MSA_REPO}" --no-link --branch "${MSA_REF}" \
      >"${LOG_DIR}/msa-install.log" 2>&1; then
   tail_to "${LOG_DIR}/msa-install.log" "${LOG_DIR}/msa-install.tail.log" 60
   record S1 FAIL "MSA step 1: install.sh --dir --no-link --branch ${MSA_REF}" "${LOG_DIR}/msa-install.tail.log"
@@ -638,7 +651,8 @@ if [[ ! -f "${CONFIG}" ]]; then
   # COMPATIBILITY (MSA refs before #108): install.sh made no config, so step 5.3 would fail.
   # scripts/init-runtime.sh (not in those READMEs) creates the same not-onboarded config.
   log "  COMPAT: running scripts/init-runtime.sh (MSA refs before #108) to create a not-onboarded runtime"
-  (cd "${MSA_DIR}" && msa_env ./scripts/init-runtime.sh) >"${LOG_DIR}/msa-init-runtime.log" 2>&1 \
+  init_runtime() { (cd "${MSA_DIR}" && msa_env ./scripts/init-runtime.sh); }
+  interruptible init_runtime >"${LOG_DIR}/msa-init-runtime.log" 2>&1 \
     || die "scripts/init-runtime.sh failed"
   [[ -f "${CONFIG}" ]] || die "scripts/init-runtime.sh made no config.json"
   deviation "COMPATIBILITY (MSA refs before #108): install.sh made no runtime config, so the harness ran \`scripts/init-runtime.sh\` (not in the README) to get the same not-onboarded config (routing placeholder) and do setup in the Console."
@@ -815,7 +829,7 @@ log "  docker compose up -d --build (the first build takes several minutes)"
 t=$(date +%s)
 (cd "${COMPOSE_DIR}" && mkdir -p data-node uploads logs)
 COMPOSE_STARTED=1
-if ! compose up -d --build >"${LOG_DIR}/console-build.log" 2>&1; then
+if ! interruptible compose up -d --build >"${LOG_DIR}/console-build.log" 2>&1; then
   tail_to "${LOG_DIR}/console-build.log" "${LOG_DIR}/console-build.tail.log" 80
   record C3 FAIL "Console step 3: docker compose up -d --build" "${LOG_DIR}/console-build.tail.log"
   die "compose up failed"
@@ -887,7 +901,7 @@ else
     log "  installing @playwright/test@${PW_VERSION} into ${HERE}/.pw (once)"
     mkdir -p "${HERE}/.pw"
     printf '{ "private": true }\n' >"${HERE}/.pw/package.json"
-    (cd "${HERE}/.pw" && npm install --no-save --no-package-lock --no-audit --no-fund "@playwright/test@${PW_VERSION}") >"${LOG_DIR}/playwright-install.log" 2>&1 \
+    interruptible npm --prefix "${HERE}/.pw" install --no-save --no-package-lock --no-audit --no-fund "@playwright/test@${PW_VERSION}" >"${LOG_DIR}/playwright-install.log" 2>&1 \
       || die "couldn't install @playwright/test (${LOG_DIR}/playwright-install.log)"
   fi
   PW_BIN="${HERE}/.pw/node_modules/.bin/playwright"
@@ -897,7 +911,7 @@ PW_INSTALL_ARGS=(install chromium)
 if [[ "$(uname -s)" == Linux ]] && { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; }; then
   PW_INSTALL_ARGS=(install --with-deps chromium) # the browser's system libraries too (CI)
 fi
-NODE_PATH="${PW_NODE_PATH}" "${PW_BIN}" "${PW_INSTALL_ARGS[@]}" >>"${LOG_DIR}/playwright-install.log" 2>&1 \
+interruptible env NODE_PATH="${PW_NODE_PATH}" "${PW_BIN}" "${PW_INSTALL_ARGS[@]}" >>"${LOG_DIR}/playwright-install.log" 2>&1 \
   || die "playwright ${PW_INSTALL_ARGS[*]} failed (${LOG_DIR}/playwright-install.log)"
 
 provider_key_file=""
