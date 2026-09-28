@@ -12,6 +12,7 @@ import MindStoneDiagnosticsView from '~/components/MindStone/DiagnosticsView';
 import { MarketplaceProvider } from '~/components/Agents/MarketplaceContext';
 import MindStoneOnboardingView from '~/components/MindStone/OnboardingView';
 import MindStoneApprovalsView from '~/components/MindStone/ApprovalsView';
+import MindStoneProvidersView from '~/components/MindStone/ProvidersView';
 import MindStoneSettingsView from '~/components/MindStone/SettingsView';
 import MindStonePersonasView from '~/components/MindStone/PersonasView';
 import MindStoneSecretsView from '~/components/MindStone/SecretsView';
@@ -175,6 +176,11 @@ export const router = createBrowserRouter(
               /** MindStone Skill Builder (MindStone-Agent #104). The server route enforces admin. */
               path: 'mindstone/skills',
               element: <MindStoneSkillsView />,
+            },
+            {
+              /** MindStone model providers (MindStone-Agent #126). The server route enforces admin. */
+              path: 'mindstone/providers',
+              element: <MindStoneProvidersView />,
             },
             {
               /** MindStone personas (MindStone-Agent #105). The server route enforces admin. */

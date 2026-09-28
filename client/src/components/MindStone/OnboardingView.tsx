@@ -10,8 +10,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { request } from 'librechat-data-provider';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import type { EnterpriseKind, EnterpriseRegistered, ProviderTest } from './EnterpriseEndpointForm';
 import type { TranslationKeys } from '~/hooks';
 import type { StatusSteps } from './steps';
+import EnterpriseEndpointForm, { TestResult, testProvider } from './EnterpriseEndpointForm';
 import { CONFIRMATION, confirmationMatches, normalizeConfirmation } from './confirmation';
 import { linkableStep } from './steps';
 import { useLocalize } from '~/hooks';
@@ -25,7 +27,18 @@ type Preset = {
 };
 type PiProvider = { id: string; name: string; configured: boolean; availableModelCount: number };
 type PiModel = { id: string; provider: string; name?: string };
-type ModelsInfo = { presets: Preset[]; providers: PiProvider[]; models: PiModel[]; error?: string };
+type ModelsInfo = {
+  presets: Preset[];
+  providers: PiProvider[];
+  models: PiModel[];
+  /** Enterprise endpoints (MindStone-Agent #126): Azure OpenAI, Bedrock, Vertex AI, an enterprise gateway. */
+  enterprise?: EnterpriseKind[];
+  /** Providers in the gateway's models.json, by id. */
+  registered?: Array<{ providerId: string }>;
+  error?: string;
+};
+/** The provider step's choice for an enterprise endpoint: `enterprise:<kind>`. */
+const ENTERPRISE_PREFIX = 'enterprise:';
 type Profile = { id: string; label: string; description: string };
 type Status = { onboarded: boolean; profiles?: Profile[]; steps?: StatusSteps };
 type Permissions = { advancedSettings: boolean; expiresAt?: string };
@@ -34,7 +47,9 @@ type Config = {
   onboarding?: { profile?: { id?: string } };
   memory?: { embeddingProvider?: string; autoRecall?: boolean };
 };
-type EmbedKind = 'ollama' | 'openai' | 'openai-compatible';
+type EmbedKind = 'ollama' | 'openai' | 'openai-compatible' | EnterpriseEmbedKind;
+/** Embeddings through an enterprise endpoint registered in the provider step (MindStone-Agent #126). */
+type EnterpriseEmbedKind = 'enterprise-azure' | 'enterprise-openai';
 type Connector = 'telegram' | 'slack' | 'discord';
 type MemoryCheck = { spec: string; ok: boolean; text: string; missingModel?: boolean };
 type MemoryCheckResult = {
@@ -73,13 +88,23 @@ const EMBED_KINDS: Array<{ kind: EmbedKind; label: TranslationKeys }> = [
   { kind: 'openai', label: 'com_mindstone_onb_embed_openai' },
   { kind: 'openai-compatible', label: 'com_mindstone_onb_embed_compatible' },
 ];
+/** Offered when that enterprise endpoint is registered; its own address and key are used. */
+const ENTERPRISE_EMBED_KINDS: Array<{ kind: EnterpriseEmbedKind; label: TranslationKeys }> = [
+  { kind: 'enterprise-azure', label: 'com_mindstone_onb_embed_enterprise_azure' },
+  { kind: 'enterprise-openai', label: 'com_mindstone_onb_embed_enterprise_openai' },
+];
+const isEnterpriseEmbed = (kind: string): kind is EnterpriseEmbedKind =>
+  kind === 'enterprise-azure' || kind === 'enterprise-openai';
 const EMBED_MODELS: Record<EmbedKind, string[]> = {
   ollama: ['nomic-embed-text', 'mxbai-embed-large'],
   openai: ['text-embedding-3-small', 'text-embedding-3-large'],
   'openai-compatible': [],
+  'enterprise-azure': [],
+  'enterprise-openai': [],
 };
 const CUSTOM_MODEL = 'custom';
 const COMPATIBLE_MODEL = 'nomic-embed-text';
+const ENTERPRISE_EMBED_MODEL = 'text-embedding-3-small';
 /** The gateway builds vector recall for sqlite-vec only, so setup always saves it. */
 const VECTOR_STORE = 'sqlite-vec';
 
@@ -109,7 +134,7 @@ function parseEmbedding(
   const [provider, ...rest] = (spec ?? '').split(':');
   const model = rest.join(':').trim();
   if (!model) return undefined;
-  if (provider === 'openai-compatible')
+  if (provider === 'openai-compatible' || isEnterpriseEmbed(provider))
     return { kind: provider, choice: CUSTOM_MODEL, custom: model };
   if (provider !== 'ollama' && provider !== 'openai') return undefined;
   return EMBED_MODELS[provider].includes(model)
@@ -174,6 +199,10 @@ export default function MindStoneOnboardingView() {
   const [baseUrl, setBaseUrl] = useState('');
   const [manualModel, setManualModel] = useState('');
   const [listFailed, setListFailed] = useState(false);
+  // An enterprise endpoint registered in this step, and its live test.
+  const [enterpriseDone, setEnterpriseDone] = useState<EnterpriseRegistered | null>(null);
+  const [enterpriseTest, setEnterpriseTest] = useState<ProviderTest | null>(null);
+  const [testing, setTesting] = useState(false);
   // Model and persona steps.
   const [model, setModel] = useState('');
   const [profileId, setProfileId] = useState('');
@@ -274,6 +303,16 @@ export default function MindStoneOnboardingView() {
   };
 
   const preset = info?.presets.find((candidate) => candidate.presetId === presetId);
+  const enterpriseKind = presetId.startsWith(ENTERPRISE_PREFIX)
+    ? info?.enterprise?.find(
+        (candidate) => candidate.kind === presetId.slice(ENTERPRISE_PREFIX.length),
+      )
+    : undefined;
+  // A registration shown for one choice doesn't stay up under another.
+  useEffect(() => {
+    setEnterpriseDone(null);
+    setEnterpriseTest(null);
+  }, [presetId]);
   // A key entered for one preset never carries over to another.
   useEffect(() => {
     setBaseUrl(preset?.baseUrl ?? '');
@@ -321,7 +360,9 @@ export default function MindStoneOnboardingView() {
     const first = EMBED_MODELS[kind][0];
     setEmbedKind(kind);
     setEmbedChoice(first ?? CUSTOM_MODEL);
-    setEmbedCustom(first ? '' : COMPATIBLE_MODEL);
+    // An enterprise endpoint's embedding deployment is usually OpenAI's model.
+    const suggested = isEnterpriseEmbed(kind) ? ENTERPRISE_EMBED_MODEL : COMPATIBLE_MODEL;
+    setEmbedCustom(first ? '' : suggested);
   };
 
   /** A token typed for one connector never carries over to another. */
@@ -398,6 +439,30 @@ export default function MindStoneOnboardingView() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const enterpriseRegistered = async (result: EnterpriseRegistered) => {
+    setEnterpriseDone(result);
+    setEnterpriseTest(null);
+    await load();
+    if (result.models?.length) setModel(result.models[0]);
+    setMessage({
+      ok: true,
+      text: localize('com_mindstone_ent_registered', {
+        0: result.providerId,
+        1: String(result.models?.length ?? 0),
+        2: result.host,
+      }),
+    });
+  };
+
+  const testEnterprise = async () => {
+    if (!enterpriseDone) return;
+    setTesting(true);
+    // The chosen model when it is this provider's; otherwise the gateway tests its first model.
+    const own = model.startsWith(`${enterpriseDone.providerId}/`) ? model : undefined;
+    setEnterpriseTest(await testProvider(enterpriseDone.providerId, own));
+    setTesting(false);
   };
 
   const saveModel = async () => {
@@ -762,7 +827,60 @@ export default function MindStoneOnboardingView() {
                   {candidate.name}
                 </label>
               ))}
+              {(info.enterprise?.length ?? 0) > 0 && (
+                <span className="mt-2 text-sm text-text-secondary">
+                  {localize('com_mindstone_ent_title')}
+                </span>
+              )}
+              {info.enterprise?.map((candidate) => (
+                <label key={candidate.kind} className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="ms-onb-preset"
+                    value={`${ENTERPRISE_PREFIX}${candidate.kind}`}
+                    checked={presetId === `${ENTERPRISE_PREFIX}${candidate.kind}`}
+                    onChange={() => setPresetId(`${ENTERPRISE_PREFIX}${candidate.kind}`)}
+                  />
+                  {candidate.name}
+                </label>
+              ))}
             </fieldset>
+            {enterpriseKind && !enterpriseDone && (
+              <EnterpriseEndpointForm
+                kind={enterpriseKind}
+                disabled={busy}
+                onRegistered={enterpriseRegistered}
+                onError={showWriteError}
+              />
+            )}
+            {enterpriseKind && enterpriseDone && (
+              <div className="flex flex-col gap-2" data-testid="ms-onb-enterprise-done">
+                <p className="text-sm text-text-secondary">
+                  {localize('com_mindstone_ent_test_hint')}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className={secondary}
+                    disabled={testing}
+                    onClick={() => void testEnterprise()}
+                  >
+                    {localize(testing ? 'com_mindstone_ent_testing' : 'com_mindstone_ent_test')}
+                  </button>
+                  <button type="button" className={primary} onClick={() => goTo('model')}>
+                    {localize('com_mindstone_onb_save_next')}
+                  </button>
+                  <button
+                    type="button"
+                    className={secondary}
+                    onClick={() => setEnterpriseDone(null)}
+                  >
+                    {localize('com_mindstone_ent_change')}
+                  </button>
+                </div>
+                {enterpriseTest && <TestResult result={enterpriseTest} />}
+              </div>
+            )}
             {preset && (
               <div className="flex flex-col gap-2">
                 {preset.needsKey && (
@@ -959,7 +1077,12 @@ export default function MindStoneOnboardingView() {
                 <span id="ms-onb-embed-kind" className="text-sm text-text-secondary">
                   {localize('com_mindstone_onb_embed_provider')}
                 </span>
-                {EMBED_KINDS.map((candidate) => (
+                {[
+                  ...EMBED_KINDS,
+                  ...ENTERPRISE_EMBED_KINDS.filter((candidate) =>
+                    info?.registered?.some((provider) => provider.providerId === candidate.kind),
+                  ),
+                ].map((candidate) => (
                   <label key={candidate.kind} className="flex items-center gap-2">
                     <input
                       type="radio"
@@ -972,7 +1095,11 @@ export default function MindStoneOnboardingView() {
                 ))}
                 {embedKind !== 'ollama' && (
                   <p className="text-sm text-text-secondary">
-                    {localize('com_mindstone_onb_embed_host_note')}
+                    {localize(
+                      isEnterpriseEmbed(embedKind)
+                        ? 'com_mindstone_onb_embed_enterprise_note'
+                        : 'com_mindstone_onb_embed_host_note',
+                    )}
                   </p>
                 )}
               </div>
