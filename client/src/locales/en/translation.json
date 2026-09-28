@@ -3282,5 +3282,19 @@
   "com_mindstone_prov_remove": "Remove",
   "com_mindstone_prov_confirm": "Remove {{0}}? Its models and its stored settings go too; the secrets stay until you delete them.",
   "com_mindstone_prov_confirm_remove": "Remove provider",
-  "com_mindstone_prov_removed": "Removed {{0}}."
+  "com_mindstone_prov_removed": "Removed {{0}}.",
+  "com_mindstone_picker_none": "No skills selected",
+  "com_mindstone_picker_not_installed": "Not installed",
+  "com_mindstone_picker_remove": "Remove {{0}}",
+  "com_mindstone_picker_remove_short": "Remove",
+  "com_mindstone_picker_pending": "Drafted, not installed yet: install it to add it here.",
+  "com_mindstone_picker_pending_advanced": "Drafted, not installed yet: installing needs advanced settings.",
+  "com_mindstone_picker_choose": "Add an installed skill",
+  "com_mindstone_picker_all_added": "Every installed skill is listed",
+  "com_mindstone_picker_add": "Add",
+  "com_mindstone_picker_create": "Build a new skill",
+  "com_mindstone_picker_create_hint": "With the Skill Builder: the new skill is drafted, installed, then added here.",
+  "com_mindstone_picker_create_hint_advanced": "With the Skill Builder: the new skill is drafted here. Installing it needs advanced settings; once installed, it is added.",
+  "com_mindstone_picker_installed": "Installed {{0}} and added it.",
+  "com_mindstone_picker_drafted": "Drafted {{0}}. Install it (needs advanced settings) to add it here."
 }
