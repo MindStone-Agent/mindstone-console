@@ -7,13 +7,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
+import type { TranslationKeys } from '~/hooks';
+import type { StatusSteps } from './steps';
 import { CONFIRMATION, confirmationMatches, normalizeConfirmation } from './confirmation';
 import SystemStatus, { type SystemStatusData } from './SystemStatus';
 import { useAuthContext, useLocalize } from '~/hooks';
 import RestartGateway from './RestartGateway';
+import { linkableStep } from './steps';
 
-type Step = { done: boolean; detail: string };
-type Status = { onboarded: boolean; steps: Record<string, Step>; system?: SystemStatusData };
+type Status = { onboarded: boolean; steps: StatusSteps; system?: SystemStatusData };
 type Permissions = {
   advancedSettings: boolean;
   grantedBy?: string;
@@ -40,6 +42,20 @@ const SECTIONS = [
   'packs',
   'workspace',
 ];
+
+/** Checklist names; a step the gateway adds later shows its own name. */
+const STEP_LABELS: Partial<Record<string, TranslationKeys>> = {
+  provider: 'com_mindstone_step_provider',
+  persona: 'com_mindstone_step_persona',
+  memory: 'com_mindstone_step_memory',
+  connectors: 'com_mindstone_step_connectors',
+  identity: 'com_mindstone_step_identity',
+};
+/** Where guided setup picks up a checklist step that isn't done, once it can be opened. */
+const STEP_LINKS: Partial<Record<string, { step: string; label: TranslationKeys }>> = {
+  memory: { step: 'memory', label: 'com_mindstone_step_set_up_memory' },
+  identity: { step: 'about', label: 'com_mindstone_step_set_up_identity' },
+};
 
 function errorBody(error: unknown): { error?: string; errors?: FieldError[] } {
   const data = (error as { response?: { data?: unknown } })?.response?.data;
@@ -211,12 +227,32 @@ export default function MindStoneSettingsView() {
               )}
             </h2>
             <ul className="flex flex-col gap-1">
-              {Object.entries(status.steps).map(([name, step]) => (
-                <li key={name} data-testid={`ms-step-${name}`}>
-                  <span aria-hidden="true">{step.done ? '✓' : '○'}</span>{' '}
-                  <strong className="capitalize">{name}</strong>: {step.detail}
-                </li>
-              ))}
+              {Object.entries(status.steps).map(([name, step]) => {
+                const label = STEP_LABELS[name];
+                const target = step.done ? undefined : STEP_LINKS[name];
+                const link = target && linkableStep(target.step, status.steps) ? target : undefined;
+                return (
+                  <li key={name} data-testid={`ms-step-${name}`}>
+                    <span aria-hidden="true">{step.done ? '✓' : '○'}</span>{' '}
+                    <strong className="capitalize">{label ? localize(label) : name}</strong>:{' '}
+                    {/* A connector is optional, so none is not a gap. */}
+                    {name === 'connectors' && !step.done
+                      ? localize('com_mindstone_step_optional')
+                      : step.detail}
+                    {link && (
+                      <>
+                        {' '}
+                        <Link
+                          to={`/mindstone/onboarding?step=${link.step}`}
+                          className="text-sm underline"
+                        >
+                          {localize(link.label)}
+                        </Link>
+                      </>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
             <Link
               to="/mindstone/onboarding"
