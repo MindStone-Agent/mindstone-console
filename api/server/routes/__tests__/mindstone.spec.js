@@ -74,6 +74,9 @@ const ENDPOINTS = [
   { method: 'post', path: 'approvals/0b5e7c1a/reject', write: true },
   { method: 'get', path: 'secrets', write: false },
   { method: 'delete', path: 'secrets/telegram-token', write: true },
+  { method: 'post', path: 'onboarding/complete', write: true },
+  { method: 'post', path: 'memory/check', write: true },
+  { method: 'post', path: 'memory/pull', write: true },
 ];
 
 /** What each caller should get from an allowlisted endpoint. */
@@ -268,6 +271,26 @@ describe('MindStone admin proxy', () => {
       ['delete', 'config/memory'],
       ['delete', 'permissions/advanced'],
       ['patch', 'config/mem.ory'],
+      // Guided setup (MindStone-Agent #102): POST onboarding/complete, memory/check and memory/pull only.
+      ['get', 'onboarding/complete'],
+      ['delete', 'onboarding/complete'],
+      ['post', 'onboarding'],
+      ['post', 'onboarding/completex'],
+      ['post', 'onboarding/complete/x'],
+      ['post', 'x/onboarding/complete'],
+      ['get', 'memory/check'],
+      ['patch', 'memory/check'],
+      ['post', 'memory'],
+      ['post', 'memory/checkx'],
+      ['post', 'memory/check/x'],
+      ['post', 'memory/check%2F..%2F..%2Fv1'],
+      ['post', 'x/memory/check'],
+      ['get', 'memory/pull'],
+      ['delete', 'memory/pull'],
+      ['post', 'memory/pullx'],
+      ['post', 'memory/pull/x'],
+      ['post', 'x/memory/pull'],
+      ['post', 'memory/models/pull'],
     ];
     for (const [method, path] of outside) {
       const response = await call('manage', { method, path });
@@ -338,6 +361,35 @@ describe('MindStone admin proxy', () => {
       expect([bad, response.status]).toEqual([bad, 400]);
       expect(fetchMock).not.toHaveBeenCalled();
     }
+  });
+
+  it('gives a model download minutes to finish, and every other call 15 seconds', async () => {
+    const timeout = jest.spyOn(AbortSignal, 'timeout');
+    try {
+      for (const [method, path, expected] of [
+        ['post', 'memory/pull', 15 * 60_000],
+        ['post', 'memory/check', 15_000],
+        ['post', 'onboarding/complete', 15_000],
+        ['get', 'status', 15_000],
+      ]) {
+        timeout.mockClear();
+        await call('manage', { method, path });
+        expect([path, timeout.mock.calls]).toEqual([path, [[expected]]]);
+      }
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it('passes the setup body through as sent', async () => {
+    await request(app)
+      .post('/api/mindstone/admin/memory/check?embeddingProvider=x')
+      .set('x-test-caller', 'manage')
+      .send({ embeddingProvider: 'ollama:nomic-embed-text' });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('http://gateway.test:19790/admin/memory/check');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ embeddingProvider: 'ollama:nomic-embed-text' });
   });
 
   it("never forwards the browser's own If-Match header", async () => {
