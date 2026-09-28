@@ -34,6 +34,7 @@ const ALLOWED = [
   { method: 'GET', path: /^models$/ },
   { method: 'POST', path: /^providers\/[a-z][a-z-]{0,39}$/ },
   { method: 'POST', path: /^permissions\/advanced$/ },
+  { method: 'POST', path: /^restart$/ },
   { method: 'GET', path: /^doctor$/ },
   { method: 'GET', path: /^logs$/ },
   { method: 'GET', path: /^approvals$/ },

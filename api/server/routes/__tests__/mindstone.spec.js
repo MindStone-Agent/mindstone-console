@@ -64,6 +64,7 @@ const ENDPOINTS = [
   { method: 'post', path: 'permissions/advanced', write: true },
   { method: 'get', path: 'models', write: false },
   { method: 'post', path: 'providers/ollama-cloud', write: true },
+  { method: 'post', path: 'restart', write: true },
   { method: 'get', path: 'doctor', write: false },
   { method: 'get', path: 'logs', write: false },
   { method: 'get', path: 'approvals', write: false },
@@ -215,6 +216,12 @@ describe('MindStone admin proxy', () => {
       ['post', 'providers/ol.lama'],
       ['post', 'x/providers/ollama'],
       ['get', 'x/models'],
+      // Restart: POST only, exactly.
+      ['get', 'restart'],
+      ['post', 'restartx'],
+      ['post', 'restart/now'],
+      ['post', 'x/restart'],
+      ['delete', 'restart'],
       // Diagnostics: GET doctor and logs only.
       ['get', 'doctorx'],
       ['get', 'doctor/x'],
