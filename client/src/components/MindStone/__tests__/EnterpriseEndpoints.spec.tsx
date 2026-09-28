@@ -51,33 +51,33 @@ const BEDROCK: EnterpriseKind = {
   fields: [
     { name: 'region', label: 'Region', type: 'text', required: true },
     { name: 'models', label: 'Model ids', type: 'list', required: true },
+    { name: 'bearerTokenSecret', label: 'Bedrock API key', type: 'secret', required: true },
+  ],
+};
+const VERTEX: EnterpriseKind = {
+  kind: 'vertex',
+  providerId: 'enterprise-vertex',
+  name: 'Google Vertex AI',
+  listsModels: false,
+  fields: [
+    { name: 'models', label: 'Model ids', type: 'list', required: true },
     {
-      name: 'accessKeyIdSecret',
-      label: 'Access key id',
+      name: 'secret',
+      label: 'API key (express mode)',
       type: 'secret',
       required: 'one-of',
-      group: 'keys',
+      group: 'key',
     },
     {
-      name: 'secretAccessKeySecret',
-      label: 'Secret access key',
+      name: 'serviceAccountSecret',
+      label: 'Service account key (JSON)',
       type: 'secret',
       required: 'one-of',
-      group: 'keys',
+      group: 'adc',
+      multiline: true,
     },
-    {
-      name: 'sessionTokenSecret',
-      label: 'Session token (optional)',
-      type: 'secret',
-      required: false,
-    },
-    {
-      name: 'bearerTokenSecret',
-      label: 'Bedrock API key',
-      type: 'secret',
-      required: 'one-of',
-      group: 'bearer',
-    },
+    { name: 'project', label: 'Project id', type: 'text', required: 'one-of', group: 'adc' },
+    { name: 'location', label: 'Location', type: 'text', required: 'one-of', group: 'adc' },
   ],
 };
 const GATEWAY: EnterpriseKind = {
@@ -129,7 +129,7 @@ beforeEach(() => {
         providers: [],
         models: [],
         registered,
-        enterprise: [AZURE, BEDROCK, GATEWAY],
+        enterprise: [AZURE, BEDROCK, VERTEX, GATEWAY],
       };
     }
     if (url === `${BASE}/status`) return { ok: true, onboarded: false, profiles: [], steps };
@@ -172,23 +172,40 @@ describe('registrationPlan', () => {
 
   it('sends only the chosen credential group', () => {
     const values = {
-      region: 'us-east-1',
-      models: 'm',
-      accessKeyIdSecret: 'AKIA',
-      secretAccessKeySecret: 'SECRET',
-      bearerTokenSecret: 'BEARER',
+      models: 'gemini-2.5-flash',
+      secret: 'VERTEX-KEY',
+      serviceAccountSecret: '{"type":"service_account"}',
+      project: 'proj',
+      location: 'us-central1',
     };
-    const keys = registrationPlan(BEDROCK, values, 'keys', []);
-    expect(Object.keys(keys.body).sort()).toEqual([
-      'accessKeyIdSecret',
+    const key = registrationPlan(VERTEX, values, 'key', []);
+    expect(Object.keys(key.body).sort()).toEqual(['models', 'secret']);
+    expect(key.secrets.map((s) => s.value)).toEqual(['VERTEX-KEY']);
+    const adc = registrationPlan(VERTEX, values, 'adc', []);
+    expect(Object.keys(adc.body).sort()).toEqual([
+      'location',
       'models',
-      'region',
-      'secretAccessKeySecret',
+      'project',
+      'serviceAccountSecret',
     ]);
-    expect(keys.secrets.map((s) => s.value)).not.toContain('BEARER');
-    const bearer = registrationPlan(BEDROCK, values, 'bearer', []);
-    expect(Object.keys(bearer.body).sort()).toEqual(['bearerTokenSecret', 'models', 'region']);
-    expect(bearer.secrets.map((s) => s.value)).toEqual(['BEARER']);
+    expect(adc.secrets.map((s) => s.value)).not.toContain('VERTEX-KEY');
+  });
+
+  it('sends a Bedrock API key as a stored secret, with no credential group to choose', () => {
+    const plan = registrationPlan(
+      BEDROCK,
+      { region: 'us-east-1', models: 'm', bearerTokenSecret: 'BEDROCK-KEY' },
+      undefined,
+      [],
+    );
+    expect(plan.body).toEqual({
+      region: 'us-east-1',
+      models: ['m'],
+      bearerTokenSecret: 'enterprise-bedrock.bearerTokenSecret',
+    });
+    expect(missingFields(BEDROCK, { region: 'r', models: 'm' }, undefined)).toEqual([
+      'Bedrock API key',
+    ]);
   });
 
   it('stores a secret header and sends a plain one as text', () => {
@@ -215,12 +232,11 @@ describe('registrationPlan', () => {
   });
 
   it('asks for the chosen group, not the other one', () => {
-    expect(missingFields(BEDROCK, { region: 'r', models: 'm' }, 'bearer')).toEqual([
-      'Bedrock API key',
-    ]);
-    expect(missingFields(BEDROCK, { region: 'r', models: 'm' }, 'keys')).toEqual([
-      'Access key id',
-      'Secret access key',
+    expect(missingFields(VERTEX, { models: 'm' }, 'key')).toEqual(['API key (express mode)']);
+    expect(missingFields(VERTEX, { models: 'm' }, 'adc')).toEqual([
+      'Service account key (JSON)',
+      'Project id',
+      'Location',
     ]);
     expect(missingFields(GATEWAY, { baseUrl: 'u', secret: 'k' }, undefined)).toEqual([]);
   });
@@ -291,17 +307,34 @@ describe('the Providers page', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('endpoint must be a public host');
   });
 
-  it('switches Bedrock between access keys and an API key', async () => {
+  it('switches Vertex between an API key and a service account; Bedrock has no choice to make', async () => {
     renderProviders();
-    fireEvent.click(await screen.findByRole('radio', { name: 'Amazon Bedrock' }));
-    const form = screen.getByTestId('ms-ent-form-bedrock');
-    // The key fields, not the radios that choose between them.
-    const key = { selector: 'input[type=password]' };
-    expect(within(form).getByLabelText('Access key id', key)).toBeInTheDocument();
-    expect(within(form).queryByLabelText('Bedrock API key', key)).toBeNull();
-    fireEvent.click(within(form).getByRole('radio', { name: 'Bedrock API key' }));
-    expect(within(form).getByLabelText('Bedrock API key', key)).toBeInTheDocument();
-    expect(within(form).queryByLabelText('Access key id', key)).toBeNull();
+    fireEvent.click(await screen.findByRole('radio', { name: 'Google Vertex AI' }));
+    const form = screen.getByTestId('ms-ent-form-vertex');
+    expect(
+      within(form).getByLabelText('API key (express mode)', { selector: 'input[type=password]' }),
+    ).toBeInTheDocument();
+    expect(
+      within(form).queryByLabelText('Project id', { selector: 'input[type=text]' }),
+    ).toBeNull();
+    fireEvent.click(
+      within(form).getByRole('radio', {
+        name: 'Service account key (JSON) + Project id + Location',
+      }),
+    );
+    expect(
+      within(form).getByLabelText('Service account key (JSON)', { selector: 'textarea' }),
+    ).toBeInTheDocument();
+    expect(
+      within(form).getByLabelText('Project id', { selector: 'input[type=text]' }),
+    ).toBeInTheDocument();
+    expect(
+      within(form).queryByLabelText('API key (express mode)', { selector: 'input[type=password]' }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole('radio', { name: 'Amazon Bedrock' }));
+    const bedrock = screen.getByTestId('ms-ent-form-bedrock');
+    expect(within(bedrock).queryAllByRole('radio')).toHaveLength(0);
+    expect(within(bedrock).getByLabelText('Bedrock API key')).toHaveAttribute('type', 'password');
   });
 
   it('tests a provider and shows what it answered, or why not, with hidden characters shown', async () => {

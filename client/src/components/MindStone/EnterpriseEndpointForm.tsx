@@ -44,7 +44,7 @@ function errorText(error: unknown): string | undefined {
   return typeof data?.error === 'string' ? data.error : undefined;
 }
 
-/** The groups a kind asks the admin to choose between (Bedrock: access keys or an API key). */
+/** The groups a kind asks the admin to choose between (Vertex: an API key or a service account). */
 export function credentialGroups(kind: EnterpriseKind): string[] {
   return [...new Set(kind.fields.flatMap((field) => (field.group ? [field.group] : [])))];
 }
