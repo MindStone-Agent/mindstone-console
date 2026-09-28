@@ -1,0 +1,195 @@
+{
+  "ok": true,
+  "paths": {
+    "root": "/srv/mindstone",
+    "runtimeDir": "/srv/mindstone/.runtime",
+    "piAgentDir": "/srv/mindstone/.runtime/pi-agent",
+    "piSessionDir": "/srv/mindstone/.runtime/pi-sessions",
+    "dataDir": "/srv/mindstone/.runtime/mindstone",
+    "tokenDir": "/srv/mindstone/.runtime/mindstone/tokens",
+    "vectorDir": "/srv/mindstone/.runtime/mindstone/vectors",
+    "transcriptDir": "/srv/mindstone/.runtime/mindstone/transcripts",
+    "memoryDir": "/srv/mindstone/.runtime/mindstone/memory",
+    "journalDir": "/srv/mindstone/.runtime/mindstone/journals",
+    "logPath": "/srv/mindstone/.runtime/mindstone/LOG.md",
+    "memoryIndexPath": "/srv/mindstone/.runtime/mindstone/memory/MEMORY.md"
+  },
+  "config": {
+    "path": "/srv/mindstone/.runtime/mindstone/config.json",
+    "exists": true,
+    "agentCount": 1
+  },
+  "agents": [
+    {
+      "agentId": "default",
+      "configuredId": "default",
+      "identityPath": "/srv/mindstone/.runtime/mindstone/agents/default/IDENTITY.md",
+      "userPath": "/srv/mindstone/.runtime/mindstone/agents/default/USER.md",
+      "identityExists": true,
+      "userExists": true,
+      "name": "Default MindStone Agent"
+    }
+  ],
+  "transcripts": {
+    "dir": "/srv/mindstone/.runtime/mindstone/transcripts",
+    "sessionCount": 0,
+    "entryCount": 0
+  },
+  "handoff": {
+    "path": "/srv/mindstone/.runtime/mindstone/transcripts/.handoff.md",
+    "exists": false,
+    "bytes": 0
+  },
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 29789,
+    "baseUrl": "http://127.0.0.1:29789",
+    "auth": {
+      "mode": "token",
+      "required": true,
+      "source": "token env MINDSTONE_AGENT_GATEWAY_TOKEN"
+    },
+    "http": {
+      "modelsEnabled": true,
+      "chatCompletionsEnabled": true,
+      "responsesEnabled": false
+    },
+    "routes": {
+      "health": "/health",
+      "status": "/status",
+      "rpc": "/rpc",
+      "websocketRpc": "/rpc",
+      "websocketAlias": "/ws",
+      "webchat": "/webchat",
+      "chatCompletions": "/v1/chat/completions",
+      "responses": "/v1/responses"
+    }
+  },
+  "webchat": {
+    "enabled": true,
+    "path": "/webchat",
+    "url": "http://127.0.0.1:29789/webchat",
+    "apiAuthApplies": true,
+    "defaultSessionKey": "agent:default:main",
+    "source": {
+      "substrate": "gateway-rest",
+      "channel": "webchat",
+      "chatType": "internal"
+    }
+  },
+  "memory": {
+    "sqlite": {
+      "databasePath": "/srv/mindstone/.runtime/mindstone/vectors/memory.sqlite",
+      "sources": 0,
+      "chunks": 0,
+      "embeddedChunks": 0,
+      "duplicateTextChunks": 0,
+      "vectorBackend": "lexical",
+      "sqliteVec": {
+        "available": false,
+        "error": "database not present"
+      },
+      "present": false
+    }
+  },
+  "contextManagement": {
+    "mode": "sliding_window",
+    "ceilingPercent": 92,
+    "floorPercent": 70,
+    "minRecentMessages": 24,
+    "preserveTranscript": true
+  },
+  "routing": {
+    "mode": "placeholder",
+    "defaultAgentId": "default",
+    "defaultModel": "mindstone/default"
+  },
+  "piSessionSafety": {
+    "routingMode": "placeholder",
+    "active": false,
+    "isolatedAgentDir": "/srv/mindstone/.runtime/pi-agent",
+    "isolatedSessionDir": "/srv/mindstone/.runtime/pi-sessions",
+    "usesGlobalPiAgentDir": false,
+    "resumeCap": {
+      "enabled": true,
+      "maxEntries": 800,
+      "dropErrorTurns": true
+    },
+    "compaction": {
+      "reserveTokensFloor": 20000,
+      "safeguardFallback": false
+    }
+  },
+  "personas": {
+    "dir": "/srv/mindstone/.runtime/mindstone/personas",
+    "count": 0,
+    "brokenCount": 0,
+    "routeRules": 0
+  },
+  "skills": {
+    "dir": "/srv/mindstone/.runtime/mindstone/skills",
+    "builtinCount": 1,
+    "installedCount": 0,
+    "draftCount": 0,
+    "brokenCount": 0
+  },
+  "knowledgebases": {
+    "dir": "/srv/mindstone/.runtime/mindstone/knowledgebases",
+    "count": 0,
+    "indexedCount": 0,
+    "brokenCount": 0,
+    "entryCount": 0
+  },
+  "connectors": [
+    {
+      "connectorId": "discord",
+      "configured": true,
+      "enabled": false,
+      "credential": {
+        "configured": true,
+        "present": true,
+        "source": "file"
+      },
+      "sendPolicy": {
+        "effective": "auto",
+        "overridden": false
+      },
+      "runtime": {
+        "connectorId": "discord",
+        "state": "never_started"
+      },
+      "queue": {
+        "connectorId": "discord",
+        "pending": 0,
+        "delivered": 0,
+        "dead": 0
+      }
+    },
+    {
+      "connectorId": "telegram",
+      "configured": true,
+      "enabled": true,
+      "credential": {
+        "configured": true,
+        "present": false,
+        "error": "secret file not found: /srv/mindstone/.runtime/mindstone/secrets/telegram"
+      },
+      "sendPolicy": {
+        "effective": "auto",
+        "overridden": false
+      },
+      "runtime": {
+        "connectorId": "telegram",
+        "state": "error",
+        "lastError": "credential unresolved: secret file not found: /srv/mindstone/.runtime/mindstone/secrets/telegram",
+        "updatedAt": "2026-09-27T22:22:16.827Z"
+      },
+      "queue": {
+        "connectorId": "telegram",
+        "pending": 0,
+        "delivered": 0,
+        "dead": 0
+      }
+    }
+  ]
+}
