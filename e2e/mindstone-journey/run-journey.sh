@@ -22,6 +22,7 @@ MSA_REF="$1"
 CONSOLE_REF="$2"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONSOLE_HARNESS_ROOT="$(cd "${HERE}/../.." && pwd)"
+HARNESS_REL="e2e/mindstone-journey"
 
 MSA_REPO_DEFAULT="https://github.com/MindStone-Agent/MindStone-Agent.git"
 MSA_REPO="${UAT_MSA_REPO:-${MSA_REPO_DEFAULT}}"
@@ -43,15 +44,17 @@ MSA_DIR="${SCRATCH}/MindStone-Agent"
 CONSOLE_DIR="${SCRATCH}/mindstone-console"
 COMPOSE_DIR="${CONSOLE_DIR}/mindstone"
 SCRATCH_HOME="${SCRATCH}/home"           # HOME for everything MindStone-Agent does
-SECRETS_DIR="${SCRATCH}/harness-secrets" # admin password, curl header files; never printed
+SECRETS_DIR="${SCRATCH}/harness-secrets" # generated secrets, curl header files; never printed
 OVERRIDE_FILE="${SCRATCH}/compose.uat-override.yml"
 REAL_NPM_CACHE="${npm_config_cache:-${HOME}/.npm}"
-INSTALL_STATUS_TMP="/tmp/mindstone-agent-install-status.txt" # install.sh's fixed path (F-MSA-1)
+INSTALL_STATUS_TMP="/tmp/mindstone-agent-install-status.txt" # older install.sh's fixed path (F-MSA-1)
 
 STEPS_TSV="${EVIDENCE}/harness-steps.tsv"
 LOG_DIR="${EVIDENCE}/logs"
 # Every row the gate needs, each exactly once and each PASS.
-REQUIRED_STEPS="S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 X1"
+REQUIRED_STEPS="S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 X1 X2 X3 X4 X5"
+# The demo subset: everything but the features still being built (J7 Skill Builder, J8 persona drafting).
+DEMO_STEPS="${REQUIRED_STEPS/ J7 J8/}"
 T0=$(date +%s)
 GW_PORT=""
 CONSOLE_PORT=""
@@ -61,6 +64,9 @@ FATAL=""
 PW_RC="not run"
 TMP_STATUS_PREEXISTED=1
 STARTED=0
+HARNESS_DIRTY=0
+HARNESS_HASH_START=""
+EMBED_MODEL=""
 
 # ---------------------------------------------------------------- output ----
 c_reset=$'\033[0m'; c_green=$'\033[32m'; c_red=$'\033[31m'; c_yellow=$'\033[33m'; c_dim=$'\033[2m'; c_gold=$'\033[38;5;214m'; c_bold=$'\033[1m'
@@ -77,9 +83,13 @@ colour_for() {
   esac
 }
 
+# rel <path>: the path relative to the evidence dir (evidence rows never carry host paths).
+rel() { local p="${1:-}"; [[ -z "$p" ]] && return 0; printf '%s' "${p#"${EVIDENCE}"/}"; }
+
 # record <id> <STATUS> <title> <evidence> [note]
 record() {
-  local id="$1" status="$2" title="$3" ev="${4:-}" note="${5:-}"
+  local id="$1" status="$2" title="$3" ev note="${5:-}"
+  ev="$(rel "${4:-}")"
   printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$status" "$title" "$ev" "${note//$'\t'/ }" >>"${STEPS_TSV}"
   printf '  %s%-7s%s %-4s %s\n' "$(colour_for "$status")" "$status" "${c_reset}" "$id" "$title"
   [[ -n "$note" ]] && printf '               %s%s%s\n' "${c_dim}" "$note" "${c_reset}"
@@ -113,6 +123,11 @@ case "${SCRATCH}" in
   "${HOME}"/Projects/*|"${HOME}/.mindstone"*|"${HOME}/.openclaw"*|"${HOME}/.pi"*) die "refusing scratch dir ${SCRATCH}" ;;
 esac
 [[ -e "${SCRATCH}" ]] && die "scratch dir already exists: ${SCRATCH} (set UAT_RUN_ID to something new)"
+# NODE_OPTIONS can preload code into every node process the harness starts (the spec, the
+# checks, the gateway): a run with it set proves nothing. Recorded in provenance as empty.
+if [[ -n "${NODE_OPTIONS:-}" ]]; then
+  die "NODE_OPTIONS is set; unset it (the harness refuses to run with preloaded code)"
+fi
 # Each run gets its own, empty evidence dir: stale results must never count.
 if [[ -e "${EVIDENCE}" ]] && [[ -n "$(ls -A "${EVIDENCE}" 2>/dev/null)" ]]; then
   die "evidence dir is not empty: ${EVIDENCE} (use a new UAT_RUN_ID or UAT_EVIDENCE_DIR)"
@@ -164,7 +179,23 @@ tail_to() { # tail_to <src> <dest> [lines]
   [[ -f "$1" ]] && tail -n "${3:-200}" "$1" >"$2" 2>/dev/null || true
 }
 
+# interruptible <cmd...>: runs a long child. Ctrl-C reaches the whole process group; a child
+# that catches it (docker compose, npm) exits 130 instead of dying on the signal, and then bash
+# doesn't run its own INT trap. So a 129/130/143 exit is treated as the interrupt it is.
+interruptible() {
+  local rc=0
+  "$@" || rc=$?
+  if [[ "${rc}" == 129 || "${rc}" == 130 || "${rc}" == 143 ]]; then
+    FATAL="interrupted"
+    exit 130
+  fi
+  return "${rc}"
+}
+
 elapsed() { local s=$(( $(date +%s) - $1 )); printf '%dm%02ds' $((s / 60)) $((s % 60)); }
+
+# new_secret <name> <openssl rand args...>: a generated secret, written straight to a 0600 file.
+new_secret() { local name="$1"; shift; (umask 077; openssl rand "$@" >"${SECRETS_DIR}/${name}"); }
 
 # Curl header files, so no token is ever on a command line (ps shows argv).
 write_header_files() {
@@ -181,10 +212,36 @@ secret_sources() {
   return 0
 }
 
+# The harness's own provenance: commit, git status of its dir, and a hash of its files.
+harness_hash() { node "${HERE}/lib/harness-hash.mjs" "${CONSOLE_HARNESS_ROOT}" "${HARNESS_REL}" 2>/dev/null | cut -d' ' -f1; }
+
+# Host details the posted evidence must not carry: paths and names -> labels.
+write_redaction_pairs() {
+  local out="$1" p real
+  {
+    for p in "${SCRATCH}:<scratch>" "${EVIDENCE}:<evidence>" "${HERE}:<harness>" "${CONSOLE_HARNESS_ROOT}:<repo>" \
+             "${TMPDIR:-/nonexistent}:<tmp>" "${HOME}:~"; do
+      local value="${p%:*}" label="${p##*:}"
+      [[ -n "${value}" && "${value}" != / ]] || continue
+      printf '%s\t%s\n' "${value%/}" "${label}"
+      # macOS spells /tmp and /var as /private/tmp and /private/var too.
+      case "${value}" in /private/*) printf '%s\t%s\n' "${value#/private}" "${label}" ;; /tmp/*|/var/*) printf '/private%s\t%s\n' "${value%/}" "${label}" ;; esac
+      real=$(cd "${value}" 2>/dev/null && pwd -P) && [[ "${real}" != "${value}" ]] && printf '%s\t%s\n' "${real}" "${label}"
+    done
+    printf '%s\t%s\n' "$(hostname 2>/dev/null)" "<host>"
+    printf '%s\t%s\n' "$(hostname -s 2>/dev/null)" "<host>"
+    printf '%s\t%s\n' "${USER:-}" "<user>"
+    [[ "${LOGNAME:-}" != "${USER:-}" ]] && printf '%s\t%s\n' "${LOGNAME:-}" "<user>"
+  } | awk -F'\t' 'length($1) >= 3' >"${out}"
+}
+
 # ---------------------------------------------------------------- teardown ----
 teardown() {
   local rc=$?
   set +eu
+  # Back to the terminal: an exit inside a redirected command (interruptible) would otherwise
+  # send teardown's output into that command's log.
+  exec 1>&7 2>&8
   # Nothing interrupts cleanup: a second Ctrl-C (or a closed terminal) is ignored until it's done.
   trap '' INT TERM HUP
   trap - EXIT
@@ -199,7 +256,7 @@ teardown() {
     compose logs --no-color --timestamps mongodb >"${LOG_DIR}/mongodb.log" 2>&1
     compose down -v --remove-orphans --timeout 10 >>"${LOG_DIR}/teardown.log" 2>&1
   fi
-  # Belt and braces: anything still labelled with our project, and only that.
+  # Belt and braces: anything still labelled with our project (the X2 image check's container too), and only that.
   local ids
   ids=$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null)
   [[ -n "${ids}" ]] && docker rm -f ${ids} >>"${LOG_DIR}/teardown.log" 2>&1
@@ -218,7 +275,10 @@ teardown() {
     local pidfile="${MSA_DIR}/.runtime/mindstone/gateway/gateway.pid" pid
     if [[ -f "${pidfile}" ]]; then
       pid=$(cat "${pidfile}" 2>/dev/null)
-      [[ "${pid}" =~ ^[0-9]+$ ]] && kill "${pid}" 2>/dev/null
+      # Only if that PID is still our gateway: a stale file's PID may belong to anything by now.
+      if [[ "${pid}" =~ ^[0-9]+$ ]] && ps -o command= -p "${pid}" 2>/dev/null | grep -qF "${MSA_DIR}"; then
+        kill "${pid}" 2>/dev/null
+      fi
     fi
   fi
   # Any gateway still on our port that runs out of our scratch dir (a Console restart can respawn it).
@@ -227,24 +287,33 @@ teardown() {
       if ps -o command= -p "${pid}" 2>/dev/null | grep -qF "${SCRATCH}"; then kill "${pid}" 2>/dev/null; fi
     done
   fi
-  # install.sh's fixed-path status file: removed only if this run created it.
+  # COMPATIBILITY (MSA refs whose install.sh writes a fixed /tmp status file, F-MSA-1):
+  # removed only if this run created it.
   if [[ "${TMP_STATUS_PREEXISTED}" == 0 && -f "${INSTALL_STATUS_TMP}" ]]; then
     rm -f "${INSTALL_STATUS_TMP}" && echo "removed ${INSTALL_STATUS_TMP} (created by this run)" >>"${LOG_DIR}/teardown.log"
   fi
 
-  # The secret gate: nothing generated may appear anywhere in the evidence,
-  # plain, base64, or inside a zip. Checked before scrubbing, so a leak is a FAIL, not hidden.
   if [[ "${STARTED}" == 1 && -d "${EVIDENCE}" ]]; then
+    # X1, the secret gate: first the checker's own positive controls (a checker that can't find a
+    # planted secret can't vouch for anything), then the evidence, before scrubbing, so a leak is a
+    # FAIL, not hidden.
     local sources=() line
     while IFS= read -r line; do sources+=("$line"); done < <(secret_sources)
+    node "${HERE}/lib/secret-check.selftest.mjs" >"${LOG_DIR}/secret-check-selftest.log" 2>&1
+    local st_rc=$?
     node "${HERE}/lib/secret-check.mjs" "${EVIDENCE}" "${sources[@]}" >"${SCRATCH}/secret-check.out" 2>&1
     local sc_rc=$?
     cp "${SCRATCH}/secret-check.out" "${LOG_DIR}/secret-check.log" 2>/dev/null
-    case "${sc_rc}" in
-      0) record X1 PASS "no secret in the evidence (plain, base64, or inside zips)" "${LOG_DIR}/secret-check.log" "$(tail -n 1 "${SCRATCH}/secret-check.out")" ;;
-      1) record X1 FAIL "a secret was found in the evidence" "${LOG_DIR}/secret-check.log" "$(head -n 4 "${SCRATCH}/secret-check.out" | tr '\n' ' ')" ;;
-      *) record X1 FAIL "the secret check couldn't run" "${LOG_DIR}/secret-check.log" "$(tail -n 1 "${SCRATCH}/secret-check.out")" ;;
-    esac
+    if [[ "${st_rc}" != 0 ]]; then
+      record X1 FAIL "the secret checker failed its own self-test" "${LOG_DIR}/secret-check-selftest.log" "$(tail -n 1 "${LOG_DIR}/secret-check-selftest.log")"
+    else
+      case "${sc_rc}" in
+        0) record X1 PASS "no secret in the evidence (self-test controls all found; evidence clean)" "${LOG_DIR}/secret-check.log" \
+             "$(tail -n 1 "${LOG_DIR}/secret-check-selftest.log"); $(tail -n 1 "${SCRATCH}/secret-check.out")" ;;
+        1) record X1 FAIL "a secret was found in the evidence" "${LOG_DIR}/secret-check.log" "$(head -n 4 "${SCRATCH}/secret-check.out" | tr '\n' ' ')" ;;
+        *) record X1 FAIL "the secret check couldn't run" "${LOG_DIR}/secret-check.log" "$(tail -n 1 "${SCRATCH}/secret-check.out")" ;;
+      esac
+    fi
     node "${HERE}/lib/scrub.mjs" "${EVIDENCE}" "${sources[@]}" >>"${LOG_DIR}/teardown.log" 2>&1
   fi
 
@@ -255,15 +324,45 @@ teardown() {
   fi
 
   if [[ "${STARTED}" == 1 ]]; then
+    # X4: nothing left behind (what the run was asked to keep doesn't count).
+    local n_cont n_vol img scratch_left port_left leftovers=()
+    n_cont=$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null | wc -l | tr -d ' ')
+    n_vol=$(docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null | wc -l | tr -d ' ')
+    img=$(docker image inspect "${PROJECT}-console:local" >/dev/null 2>&1 && echo present || echo removed)
+    scratch_left=$([[ -e "${SCRATCH}" ]] && echo yes || echo no)
+    port_left=$([[ -n "${GW_PORT}" ]] && ! port_free "${GW_PORT}" && echo yes || echo no)
     {
-      echo "containers: $(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null | wc -l | tr -d ' ')"
-      echo "volumes: $(docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null | wc -l | tr -d ' ')"
-      echo "image ${PROJECT}-console:local: $(docker image inspect "${PROJECT}-console:local" >/dev/null 2>&1 && echo present || echo removed)"
-      echo "scratch exists: $([[ -e "${SCRATCH}" ]] && echo yes || echo no)"
-      echo "gateway port ${GW_PORT:-none} listening: $([[ -n "${GW_PORT}" ]] && ! port_free "${GW_PORT}" && echo yes || echo no)"
+      echo "containers: ${n_cont}"; echo "volumes: ${n_vol}"; echo "image ${PROJECT}-console:local: ${img}"
+      echo "scratch exists: ${scratch_left}"; echo "gateway port ${GW_PORT:-none} listening: ${port_left}"
     } >"${EVIDENCE}/cleanup.txt" 2>/dev/null
+    [[ "${n_cont}" == 0 ]] || leftovers+=("${n_cont} containers")
+    [[ "${n_vol}" == 0 ]] || leftovers+=("${n_vol} volumes")
+    [[ "${img}" == removed || "${UAT_KEEP_IMAGE:-0}" == 1 ]] || leftovers+=("the image")
+    [[ "${scratch_left}" == no || "${UAT_KEEP_SCRATCH:-0}" == 1 ]] || leftovers+=("the scratch dir")
+    [[ "${port_left}" == no ]] || leftovers+=("a listener on ${GW_PORT}")
+    if [[ ${#leftovers[@]} -eq 0 ]]; then
+      record X4 PASS "cleanup: nothing left behind" "${EVIDENCE}/cleanup.txt" "$(tr '\n' ';' <"${EVIDENCE}/cleanup.txt")"
+    else
+      record X4 FAIL "cleanup left: ${leftovers[*]}" "${EVIDENCE}/cleanup.txt"
+    fi
+
+    # X3: no host paths, user name or host name in the posted evidence.
+    local pairs
+    pairs=$(mktemp "${TMPDIR:-/tmp}/uat-redact.XXXXXX")
+    write_redaction_pairs "${pairs}"
+    if node "${HERE}/lib/redact-host.mjs" "${EVIDENCE}" "${pairs}" >"${LOG_DIR}/redact-host.log" 2>&1; then
+      record X3 PASS "no host paths, user or host name in the evidence (redacted)" "${LOG_DIR}/redact-host.log" "$(tail -n 1 "${LOG_DIR}/redact-host.log")"
+    else
+      record X3 FAIL "host details left in the evidence" "${LOG_DIR}/redact-host.log"
+    fi
     summary "${rc}"
-    rc=$?
+    local gate_rc=$?
+    # The summary itself goes through the same redaction (its rows already did).
+    node "${HERE}/lib/redact-host.mjs" "${EVIDENCE}" "${pairs}" >>"${LOG_DIR}/teardown.log" 2>&1
+    rm -f "${pairs}"
+    # An interrupted run exits 130, whatever the gate says.
+    [[ "${rc}" == 130 || "${FATAL}" == interrupted* ]] && exit 130
+    exit "${gate_rc}"
   fi
   exit "${rc}"
 }
@@ -276,26 +375,48 @@ summary() {
   echo
   printf '  %-7s %-4s %s\n' STATUS ID STEP
   if [[ -f "${STEPS_TSV}" ]]; then
-    while IFS=$'\t' read -r id status title ev note; do
+    while IFS=$'\t' read -r id status title ev note || [[ -n "${id}" ]]; do
       printf '  %s%-7s%s %-4s %s\n' "$(colour_for "$status")" "$status" "${c_reset}" "$id" "$title"
       [[ -n "$note" ]] && printf '               %s%s%s\n' "${c_dim}" "$note" "${c_reset}"
       [[ -n "$ev" ]] && printf '               %s%s%s\n' "${c_dim}" "$ev" "${c_reset}"
     done <"${STEPS_TSV}"
   fi
-  # The gate: every required row exactly once and PASS; no unknown rows; Playwright exit 0; run exit 0.
-  for id in ${REQUIRED_STEPS}; do
-    count=$(awk -F'\t' -v id="$id" '$1==id' "${STEPS_TSV}" 2>/dev/null | wc -l | tr -d ' ')
-    row_status=$(awk -F'\t' -v id="$id" '$1==id{print $2; exit}' "${STEPS_TSV}" 2>/dev/null)
-    if [[ "${count}" == 0 ]]; then reasons+=("${id} MISSING")
-    elif [[ "${count}" != 1 ]]; then reasons+=("${id} x${count}")
-    elif [[ "${row_status}" != PASS ]]; then reasons+=("${id} ${row_status}")
-    fi
-  done
-  while IFS=$'\t' read -r id _; do
-    [[ " ${REQUIRED_STEPS} " == *" ${id} "* ]] || reasons+=("unknown row ${id}")
+  # The gate: every required row exactly once and PASS; no unknown rows; Playwright exit 0; run exit 0;
+  # an unmodified harness (or an explicit, flagged override); no self-test sabotage.
+  # row_reasons <steps...>: why those rows don't all pass (missing, duplicated, or not PASS).
+  row_reasons() {
+    local rid cnt st
+    for rid in "$@"; do
+      cnt=$(awk -F'\t' -v id="$rid" '$1==id' "${STEPS_TSV}" 2>/dev/null | wc -l | tr -d ' ')
+      st=$(awk -F'\t' -v id="$rid" '$1==id{print $2; exit}' "${STEPS_TSV}" 2>/dev/null)
+      if [[ "${cnt}" == 0 ]]; then printf '%s\n' "${rid} MISSING"
+      elif [[ "${cnt}" != 1 ]]; then printf '%s\n' "${rid} x${cnt}"
+      elif [[ "${st}" != PASS ]]; then printf '%s\n' "${rid} ${st}"
+      fi
+    done
+  }
+  local common=() line
+  while IFS=$'\t' read -r id _ || [[ -n "${id}" ]]; do
+    [[ -z "${id}" ]] && continue
+    [[ " ${REQUIRED_STEPS} " == *" ${id} "* ]] || common+=("unknown row ${id}")
   done <"${STEPS_TSV}"
-  [[ "${PW_RC}" == 0 ]] || reasons+=("playwright exit ${PW_RC}")
-  [[ "${rc}" == 0 ]] || reasons+=("harness exit ${rc}${FATAL:+ (${FATAL})}")
+  [[ "${PW_RC}" == 0 ]] || common+=("playwright exit ${PW_RC}")
+  [[ "${rc}" == 0 ]] || common+=("harness exit ${rc}${FATAL:+ (${FATAL})}")
+  [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" != 0 ]] && common+=("self-test sabotage on (UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES})")
+
+  # Provenance, checked again at the end: the harness must not change during the run either.
+  local hash_end status_end
+  hash_end=$(harness_hash)
+  status_end=$(git -C "${CONSOLE_HARNESS_ROOT}" status --porcelain -- "${HARNESS_REL}" 2>/dev/null || echo "not a git checkout")
+  [[ -n "${status_end}" ]] && HARNESS_DIRTY=1
+  [[ "${hash_end}" == "${HARNESS_HASH_START}" ]] || { HARNESS_DIRTY=1; status_end="${status_end}${status_end:+$'\n'}(harness files changed during the run)"; }
+  if [[ "${HARNESS_DIRTY}" == 1 && "${UAT_ALLOW_DIRTY_HARNESS:-0}" != 1 ]]; then
+    common+=("harness tree dirty (set UAT_ALLOW_DIRTY_HARNESS=1 to override, flagged in SUMMARY)")
+  fi
+  local demo_reasons=()
+  while IFS= read -r line; do [[ -n "${line}" ]] && reasons+=("${line}"); done < <(row_reasons ${REQUIRED_STEPS})
+  while IFS= read -r line; do [[ -n "${line}" ]] && demo_reasons+=("${line}"); done < <(row_reasons ${DEMO_STEPS})
+  if [[ ${#common[@]} -gt 0 ]]; then reasons+=("${common[@]}"); demo_reasons+=("${common[@]}"); fi
 
   if [[ -f "${EVIDENCE}/findings.md" ]]; then
     echo; log "README findings (followed literally):"; sed 's/^/  /' "${EVIDENCE}/findings.md"
@@ -305,21 +426,64 @@ summary() {
   fi
   echo
   log "cleanup: $(tr '\n' ';' <"${EVIDENCE}/cleanup.txt" 2>/dev/null)"
+  log "setup flow: $(cut -f2 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo 'not detected')"
+  log "harness: $(git -C "${CONSOLE_HARNESS_ROOT}" rev-parse --short HEAD 2>/dev/null) sha256 ${hash_end:0:16}… $([[ "${HARNESS_DIRTY}" == 1 ]] && echo DIRTY || echo clean)"
   log "evidence: ${EVIDENCE}"
-  local gate
+  local gate demo override=""
+  [[ "${HARNESS_DIRTY}" == 1 && "${UAT_ALLOW_DIRTY_HARNESS:-0}" == 1 ]] && override=" (DIRTY HARNESS OVERRIDE)"
   if [[ ${#reasons[@]} -eq 0 ]]; then
-    gate="PASS"
-    log "${c_green}GATE: PASS${c_reset} (all ${REQUIRED_STEPS// /, } passed)"
+    gate="PASS${override}"
+    log "${c_green}GATE: PASS${override}${c_reset} (all ${REQUIRED_STEPS// /, } passed)"
   else
-    gate="NOT PASSED: ${reasons[*]}"
-    log "${c_red}GATE: NOT PASSED${c_reset} (${reasons[*]})"
+    gate="NOT PASSED${override}: ${reasons[*]}"
+    log "${c_red}GATE: NOT PASSED${override}${c_reset} (${reasons[*]})"
   fi
+  # The demo subset, on its own line: a J3/J5 regression can't hide behind the always-PENDING J7/J8.
+  if [[ ${#demo_reasons[@]} -eq 0 ]]; then
+    demo="PASS${override}"
+    log "${c_green}DEMO SUBSET (J1–J6 + S/C/X): PASS${override}${c_reset}"
+  else
+    demo="NOT PASSED${override}: ${demo_reasons[*]}"
+    log "${c_red}DEMO SUBSET (J1–J6 + S/C/X): NOT PASSED${override}${c_reset} (${demo_reasons[*]})"
+  fi
+  local ran_by="${UAT_RAN_BY:-unnamed (set UAT_RAN_BY)}"
+  local fingerprint
+  fingerprint=$(printf '%s@%s' "${USER:-?}" "$(hostname 2>/dev/null)" | shasum -a 256 2>/dev/null | cut -c1-12)
   {
     echo "# Journey UAT ${RUN_ID}"
     echo
     echo "MindStone-Agent \`${MSA_REF}\` ($(grep '^msa_sha=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2)), mindstone-console \`${CONSOLE_REF}\` ($(grep '^console_sha=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2)); provider $(grep '^provider=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2) $(grep '^provider_model=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2); duration $(elapsed "${T0}")."
     echo
     echo "**GATE: ${gate}**"
+    echo
+    echo "**DEMO SUBSET (J1–J6 + S/C/X): ${demo}**"
+    echo
+    echo "Setup flow driven: **$(cut -f2 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo 'not detected (J2 did not get that far)')** (\`$(cut -f1 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo none)\`)."
+    if [[ "${HARNESS_DIRTY}" == 1 && "${UAT_ALLOW_DIRTY_HARNESS:-0}" == 1 ]]; then
+      echo
+      echo "**UAT_ALLOW_DIRTY_HARNESS=1: this run used a MODIFIED harness (see Provenance). Its result is not evidence for #106.**"
+    fi
+    if [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" != 0 ]]; then
+      echo
+      echo "**UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES}: harness self-test run; message bodies were blanked on purpose.**"
+    fi
+    echo
+    echo "## Provenance"
+    echo
+    echo "- harness commit: \`$(git -C "${CONSOLE_HARNESS_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)\`"
+    echo "- NODE_OPTIONS: empty (the harness refuses to run with it set)"
+    [[ -n "${UAT_EXPECT_FLOW:-}" ]] && echo "- expected setup flow: \`${UAT_EXPECT_FLOW}\` (UAT_EXPECT_FLOW; J2 fails on a mismatch)"
+    [[ "${MSA_REPO}" != "${MSA_REPO_DEFAULT}" ]] && echo "- **MindStone-Agent repo overridden:** \`${MSA_REPO}\` (install.sh from \`${MSA_RAW}\`)"
+    [[ "${MSA_RAW}" != "https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent" && "${MSA_REPO}" == "${MSA_REPO_DEFAULT}" ]] && echo "- **install.sh source overridden:** \`${MSA_RAW}\`"
+    [[ "${CONSOLE_REPO}" != "https://github.com/MindStone-Agent/mindstone-console.git" ]] && echo "- **mindstone-console repo overridden:** \`${CONSOLE_REPO}\`"
+    echo "- harness sha256 (${HARNESS_REL}): \`${HARNESS_HASH_START}\` at start, \`${hash_end}\` at end"
+    if [[ "${HARNESS_DIRTY}" == 1 ]]; then
+      echo "- harness tree: **DIRTY**. \`git status --porcelain -- ${HARNESS_REL}\`:"
+      echo; echo '```'; printf '%s\n' "${HARNESS_STATUS_START}" "${status_end}" | awk 'NF && !seen[$0]++'; echo '```'
+    else
+      echo "- harness tree: clean (\`git status --porcelain -- ${HARNESS_REL}\` is empty)"
+    fi
+    echo "- ran by: ${ran_by}; user@host fingerprint \`${fingerprint}\` (sha256 prefix; the user and host names are redacted from the evidence)"
     echo
     echo "| Status | ID | Step | Evidence | Note |"
     echo "|---|---|---|---|---|"
@@ -333,6 +497,7 @@ summary() {
 
 # ------------------------------------------------------------------ start ----
 need git; need node; need npm; need docker; need curl; need openssl
+exec 7>&1 8>&2 # the original stdout/stderr, for teardown
 mkdir -p "${EVIDENCE}" "${LOG_DIR}" "${EVIDENCE}/screens"
 : >"${STEPS_TSV}"
 STARTED=1
@@ -340,6 +505,18 @@ trap teardown EXIT
 trap 'FATAL="interrupted"; exit 130' INT TERM HUP
 mkdir -p "${SCRATCH}" "${SCRATCH_HOME}" "${SCRATCH}/tmp"
 (umask 077; mkdir -p "${SECRETS_DIR}")
+
+# Provenance first: what harness is this?
+HARNESS_STATUS_START=$(git -C "${CONSOLE_HARNESS_ROOT}" status --porcelain -- "${HARNESS_REL}" 2>/dev/null || echo "not a git checkout")
+HARNESS_HASH_START=$(harness_hash)
+[[ -n "${HARNESS_STATUS_START}" ]] && HARNESS_DIRTY=1
+if [[ "${HARNESS_DIRTY}" == 1 ]]; then
+  if [[ "${UAT_ALLOW_DIRTY_HARNESS:-0}" == 1 ]]; then
+    log "${c_yellow}${c_bold}the harness has local changes; UAT_ALLOW_DIRTY_HARNESS=1, so the run goes on, flagged in SUMMARY${c_reset}"
+  else
+    log "${c_red}${c_bold}the harness has local changes: this run can't reach GATE: PASS (UAT_ALLOW_DIRTY_HARNESS=1 overrides, flagged)${c_reset}"
+  fi
+fi
 
 GW_PORT="$(pick_port)" || die "no free port in ${PORT_MIN}-${PORT_MAX}"
 CONSOLE_PORT="$(pick_port "${GW_PORT}")" || die "no second free port in ${PORT_MIN}-${PORT_MAX}"
@@ -358,7 +535,11 @@ CONSOLE_URL="http://localhost:${CONSOLE_PORT}"
   echo "msa_repo=${MSA_REPO}"; echo "console_repo=${CONSOLE_REPO}"
   echo "compose_project=${PROJECT}"; echo "scratch=${SCRATCH}"
   echo "gateway=${GW_URL}"; echo "console=${CONSOLE_URL}"
-  echo "harness_commit=$(git -C "${CONSOLE_HARNESS_ROOT}" rev-parse --short HEAD 2>/dev/null)"
+  echo "harness_commit=$(git -C "${CONSOLE_HARNESS_ROOT}" rev-parse HEAD 2>/dev/null)"
+  echo "harness_sha256=${HARNESS_HASH_START}"
+  echo "harness_dirty=${HARNESS_DIRTY}"
+  echo "node_options=${NODE_OPTIONS:-}"
+  echo "expect_flow=${UAT_EXPECT_FLOW:-}"
   echo "node=$(node --version)"; echo "docker=$(docker --version 2>/dev/null)"; echo "os=$(uname -sm)"
   echo "started=$(date -u +%FT%TZ)"
 } >"${EVIDENCE}/run.env"
@@ -367,10 +548,14 @@ log "journey UAT ${RUN_ID}: MindStone-Agent@${MSA_REF}, mindstone-console@${CONS
 log "gateway port ${GW_PORT}, Console port ${CONSOLE_PORT}, compose project ${PROJECT}"
 log "scratch ${SCRATCH}"
 log "evidence ${EVIDENCE}"
+if [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" != 0 ]]; then
+  log "${c_red}${c_bold}SELF-TEST: message bodies will be blanked on purpose (UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES}); J4 must FAIL${c_reset}"
+  deviation "SELF-TEST: \`UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES}\` hides $([[ "${UAT_SELFTEST_BLANK_MESSAGES}" == assistant ]] && echo "the agent's rendered replies (the user's bubbles stay)" || echo 'every rendered message body'), to prove J4/J6's on-screen checks fire. This run can't pass."
+fi
 deviation "Ports: the gateway listens on ${GW_PORT} (\`MINDSTONE_AGENT_GATEWAY_PORT\` in its environment, plus \`gateway.port\` **and \`gateway.host\` (${GW_HOST})** written to config.json so the CLI's health checks agree) and the Console on ${CONSOLE_PORT} (a compose override with its own container names and image tag), not 19789/3080; \`MINDSTONE_GATEWAY_URL\` in the Console's \`.env\` points at ${GW_PORT}."
 deviation "HOME is a scratch dir for every MindStone-Agent command, so the README's \`\$HOME/.mindstone-admin-credential\` lands in scratch; inherited MINDSTONE_*/PI_* variables are dropped."
 deviation "The README's \`curl … | bash\` runs \`install.sh\` downloaded from ${MSA_RAW}/${MSA_REF} with \`--dir <scratch> --no-link --branch ${MSA_REF} --repo ${MSA_REPO}\`$([[ "${MSA_REPO}" == "${MSA_REPO_DEFAULT}" ]] && echo ' (the default repo, passed explicitly)')."
-deviation "The README's curl checks put the token on the command line (\`-H \"Authorization: Bearer \$(cat …)\"\`); the harness sends the same headers from 0600 files (\`curl -H @file\`), so no token is in any process's argv."
+deviation "The READMEs put secrets on command lines (\`curl -H \"Authorization: Bearer \$(cat …)\"\`; the Console's \`sed \"s|^KEY=.*|KEY=\$(…)|\"\`). The harness sends curl headers from 0600 files (\`curl -H @file\`) and writes each \`.env\` secret with \`lib/env-set.mjs\`, which reads the value from a 0600 file, so no secret is in any process's argv."
 if [[ "$(uname -s)" == Linux ]]; then
   deviation "Linux: the gateway runs with \`MINDSTONE_AGENT_GATEWAY_HOST=${GW_HOST}\` (MSA README 5.5; \`UAT_GATEWAY_BRIDGE_HOST\`), on every start and restart."
 fi
@@ -380,9 +565,10 @@ fi
 PROVIDER="${UAT_PROVIDER:-auto}"
 PROVIDER_MODEL="${UAT_PROVIDER_MODEL:-}"
 ollama_tags() { curl -sf -m 5 "${OLLAMA_URL}/api/tags" 2>/dev/null; }
+tags="$(ollama_tags || true)"
 if [[ "${PROVIDER}" == auto ]]; then
-  if tags=$(ollama_tags) && [[ -n "${tags}" ]]; then
-    picked=$(printf '%s' "${tags}" | node "${HERE}/lib/pick-ollama-model.mjs" "${UAT_OLLAMA_ALLOW_LOCAL:-0}" "${UAT_OLLAMA_MAX_LOCAL_GB:-8}" 2>>"${LOG_DIR}/provider.log") || picked=""
+  if [[ -n "${tags}" ]]; then
+    picked=$(printf '%s' "${tags}" | node "${HERE}/lib/pick-ollama-model.mjs" chat "${UAT_OLLAMA_ALLOW_LOCAL:-0}" "${UAT_OLLAMA_MAX_LOCAL_GB:-8}" 2>>"${LOG_DIR}/provider.log") || picked=""
     if [[ -n "${picked}" ]]; then PROVIDER=ollama; PROVIDER_MODEL="${PROVIDER_MODEL:-${picked}}"; fi
   fi
   if [[ "${PROVIDER}" == auto ]]; then
@@ -397,7 +583,6 @@ fi
 case "${PROVIDER}" in
   ollama)
     [[ -n "${PROVIDER_MODEL}" ]] || die "UAT_PROVIDER=ollama needs UAT_PROVIDER_MODEL (auto picks one; an explicit provider doesn't)"
-    tags="${tags:-$(ollama_tags || true)}"
     [[ -n "${tags}" ]] || die "no Ollama answering at ${OLLAMA_URL} (UAT_OLLAMA_URL)"
     printf '%s' "${tags}" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const m=JSON.parse(s).models||[];process.exit(m.some(x=>x.name===process.argv[1])?0:1)})' "${PROVIDER_MODEL}" \
       || die "Ollama at ${OLLAMA_URL} doesn't list ${PROVIDER_MODEL}; the harness never pulls models"
@@ -413,8 +598,27 @@ esac
 if [[ "${PROVIDER}" == ollama && "${OLLAMA_URL}" != "http://127.0.0.1:11434" && "${OLLAMA_URL}" != "http://localhost:11434" ]]; then
   deviation "Ollama: the provider step's Server address is set to ${OLLAMA_URL}/v1 (UAT_OLLAMA_URL), not the preset's default."
 fi
-echo "provider=${PROVIDER}" >>"${EVIDENCE}/run.env"; echo "provider_model=${PROVIDER_MODEL}" >>"${EVIDENCE}/run.env"
-log "model provider: ${PROVIDER}${PROVIDER_MODEL:+ (${PROVIDER_MODEL})}"
+
+# The embedding model the #102 memory step will use: one that's already pulled (small,
+# read-only use, so no UAT_OLLAMA_ALLOW_LOCAL). Never pulled unless UAT_OLLAMA_ALLOW_PULL=1.
+pick_embed() { printf '%s' "${tags}" | node "${HERE}/lib/pick-ollama-model.mjs" embed 2>>"${LOG_DIR}/provider.log" || true; }
+if [[ -n "${UAT_OLLAMA_EMBED_MODEL:-}" ]]; then
+  EMBED_MODEL="${UAT_OLLAMA_EMBED_MODEL}"
+  printf '%s' "${tags}" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const m=JSON.parse(s||"{}").models||[];process.exit(m.some(x=>x.name===process.argv[1]||x.name===process.argv[1]+":latest")?0:1)})' "${EMBED_MODEL}" \
+    || { log "UAT_OLLAMA_EMBED_MODEL=${EMBED_MODEL} isn't pulled in ${OLLAMA_URL}"; EMBED_MODEL=""; }
+elif [[ -n "${tags}" ]]; then
+  EMBED_MODEL="$(pick_embed)"
+fi
+if [[ -z "${EMBED_MODEL}" && "${UAT_OLLAMA_ALLOW_PULL:-0}" == 1 && -n "${tags}" ]]; then
+  log "no embedding model pulled; UAT_OLLAMA_ALLOW_PULL=1, so pulling nomic-embed-text into ${OLLAMA_URL}"
+  deviation "UAT_OLLAMA_ALLOW_PULL=1: the harness pulled nomic-embed-text into the Ollama at ${OLLAMA_URL}."
+  curl -sf -m 900 -X POST "${OLLAMA_URL}/api/pull" -H 'Content-Type: application/json' -d '{"model":"nomic-embed-text","stream":false}' >>"${LOG_DIR}/provider.log" 2>&1 || true
+  tags="$(ollama_tags || true)"
+  EMBED_MODEL="$(pick_embed)"
+fi
+[[ -n "${EMBED_MODEL}" ]] || log "${c_yellow}no embedding model in Ollama: J3 will FAIL (pull nomic-embed-text first, or set UAT_OLLAMA_ALLOW_PULL=1)${c_reset}"
+{ echo "provider=${PROVIDER}"; echo "provider_model=${PROVIDER_MODEL}"; echo "embed_model=${EMBED_MODEL:-none}"; } >>"${EVIDENCE}/run.env"
+log "model provider: ${PROVIDER}${PROVIDER_MODEL:+ (${PROVIDER_MODEL})}; embedding model: ${EMBED_MODEL:-none}"
 
 # =============================================================================
 # MindStone-Agent README, "Install guide for AI agents"
@@ -438,7 +642,7 @@ curl -fsSL "${MSA_RAW}/${MSA_REF}/install.sh" -o "${SCRATCH}/install.sh" \
 cp "${SCRATCH}/install.sh" "${EVIDENCE}/msa-install.sh"
 [[ -e "${INSTALL_STATUS_TMP}" ]] || TMP_STATUS_PREEXISTED=0
 log "  installing MindStone-Agent (npm install, Pi build, CLI build) - several minutes"
-if ! msa_env bash "${SCRATCH}/install.sh" --dir "${MSA_DIR}" --repo "${MSA_REPO}" --no-link --branch "${MSA_REF}" \
+if ! interruptible msa_env bash "${SCRATCH}/install.sh" --dir "${MSA_DIR}" --repo "${MSA_REPO}" --no-link --branch "${MSA_REF}" \
      >"${LOG_DIR}/msa-install.log" 2>&1; then
   tail_to "${LOG_DIR}/msa-install.log" "${LOG_DIR}/msa-install.tail.log" 60
   record S1 FAIL "MSA step 1: install.sh --dir --no-link --branch ${MSA_REF}" "${LOG_DIR}/msa-install.tail.log"
@@ -460,23 +664,40 @@ else
 fi
 CURRENT_STEP=""
 
-# --- step 2: onboard (interactive) ---------------------------------------------
-# A demo user onboards in the Console, so the harness must reach a gateway that
-# is NOT onboarded without `mindstone onboard`. The README says step 5 needs
-# step 2 first; if it does, that's a FAIL finding, reported, not hidden.
+# --- step 2: onboard, or skip it for the Console (#108) ---------------------------
+# The demo path is Console-first: no `mindstone onboard`. Since #108 the README's
+# step 2 offers two paths, (a) `mindstone onboard` in a terminal and (b) skip it
+# and do guided setup in the Console, and install.sh creates a not-onboarded
+# runtime config (routing.mode placeholder). S2 checks exactly that: step 2(b)
+# exists, and the fresh config says placeholder.
 CURRENT_STEP=S2
 CONFIG="${MSA_DIR}/.runtime/mindstone/config.json"
+step2=$(awk '/^### 2\./{on=1; print; next} on && /^### /{exit} on' "${MSA_README}")
+printf '%s\n' "${step2}" >"${LOG_DIR}/msa-readme-step2.txt"
+s2_problems=()
+if printf '%s' "${step2}" | grep -q '(b)' && printf '%s' "${step2}" | grep -qi 'console'; then has_2b=1; else has_2b=0; s2_problems+=("README step 2 has no (b) Console-first path"); fi
+routing_mode="(no config)"
 if [[ -f "${CONFIG}" ]]; then
-  record S2 PASS "MSA step 2: a config exists without interactive onboarding" "${CONFIG#${SCRATCH}/}"
+  routing_mode=$(node -e 'try{const c=require(process.argv[1]);process.stdout.write(String(c.routing&&c.routing.mode||"(unset)"))}catch{process.stdout.write("(unreadable)")}' "${CONFIG}")
+  [[ "${routing_mode}" == placeholder ]] || s2_problems+=("the fresh config's routing.mode is ${routing_mode}, not placeholder")
 else
-  record S2 FAIL "MSA step 2: the README requires interactive \`mindstone onboard\` (a TTY) before step 5 can work" "${LOG_DIR}/msa-status.log" \
-    "install.sh leaves no .runtime/mindstone/config.json, and README step 5.3 reads it; only onboarding creates it per the README"
-  finding F-MSA-2 "MindStone-Agent README step 2 says an agent without a TTY must *stop and ask the human* to run \`mindstone onboard\`, and step 5 says the gateway side needs step 2 finished first. For a Console-only install (the #106 demo) there is no documented non-interactive path: \`install.sh\` does not create \`.runtime/mindstone/config.json\`, so step 5.3's \`node -e\` merge fails with ENOENT. The harness uses \`scripts/init-runtime.sh\` (undocumented in the README) to get a not-onboarded runtime."
-  log "  HARNESS: running scripts/init-runtime.sh (undocumented) to create a not-onboarded runtime"
-  (cd "${MSA_DIR}" && msa_env ./scripts/init-runtime.sh) >"${LOG_DIR}/msa-init-runtime.log" 2>&1 \
+  s2_problems+=("install.sh left no .runtime/mindstone/config.json")
+fi
+if [[ ${#s2_problems[@]} -eq 0 ]]; then
+  record S2 PASS "MSA step 2(b): skip onboarding for the Console; install.sh made a not-onboarded config (routing.mode placeholder)" "${LOG_DIR}/msa-readme-step2.txt"
+else
+  record S2 FAIL "MSA step 2(b): no Console-first path without \`mindstone onboard\`" "${LOG_DIR}/msa-readme-step2.txt" "$(IFS=';'; echo "${s2_problems[*]}")"
+  finding F-MSA-2 "MindStone-Agent README step 2 and install.sh don't give a Console-first install (MindStone-Agent #108): $(IFS=';'; echo "${s2_problems[*]}"). The README should offer step 2(b), skip \`mindstone onboard\` and do guided setup in the Console, and install.sh should create \`.runtime/mindstone/config.json\` with \`routing.mode: placeholder\`, so step 5.3's merge has a file to read."
+fi
+if [[ ! -f "${CONFIG}" ]]; then
+  # COMPATIBILITY (MSA refs before #108): install.sh made no config, so step 5.3 would fail.
+  # scripts/init-runtime.sh (not in those READMEs) creates the same not-onboarded config.
+  log "  COMPAT: running scripts/init-runtime.sh (MSA refs before #108) to create a not-onboarded runtime"
+  init_runtime() { (cd "${MSA_DIR}" && msa_env ./scripts/init-runtime.sh); }
+  interruptible init_runtime >"${LOG_DIR}/msa-init-runtime.log" 2>&1 \
     || die "scripts/init-runtime.sh failed"
   [[ -f "${CONFIG}" ]] || die "scripts/init-runtime.sh made no config.json"
-  deviation "MSA README step 2 (\`mindstone onboard\`, interactive) is replaced by \`scripts/init-runtime.sh\`, so the gateway starts *not onboarded* (routing placeholder) and setup happens in the Console."
+  deviation "COMPATIBILITY (MSA refs before #108): install.sh made no runtime config, so the harness ran \`scripts/init-runtime.sh\` (not in the README) to get the same not-onboarded config (routing placeholder) and do setup in the Console."
 fi
 CURRENT_STEP=""
 
@@ -498,7 +719,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 if [[ "${ok}" == 1 ]]; then
-  record S3 PASS "MSA step 3: \`mindstone gateway start\`; /health answers" "${LOG_DIR}/gateway-start.log" "${GW_URL}/health"
+  record S3 PASS "MSA step 3: \`mindstone gateway start\`; /health answers" "${LOG_DIR}/gateway-start.log" "gateway /health on port ${GW_PORT}"
 else
   tail_to "${MSA_DIR}/.runtime/mindstone/gateway/gateway.log" "${LOG_DIR}/gateway.tail.log" 80
   record S3 FAIL "MSA step 3: gateway /health" "${LOG_DIR}/gateway.tail.log"
@@ -534,13 +755,16 @@ s5_notes=""
 (umask 077; cp "${SCRATCH_HOME}/.mindstone-admin-credential" "${SECRETS_DIR}/admin-credential") # for probes and scrubbing; README deletes the original later
 write_header_files
 
-# 5.4 check the route
+# 5.4 check the route. The finding is about the README's step 5.4 text only.
 mindstone doctor >"${LOG_DIR}/msa-doctor.log" 2>&1 || true
 if grep -i routing "${LOG_DIR}/msa-doctor.log" | grep -qi placeholder; then
   s5_notes="doctor shows routing.mode placeholder, as expected before Console setup"
-  if grep -q 'mindstone config --section routing' "${MSA_README}"; then
-    finding F-MSA-4 "MindStone-Agent README step 5.4 says that if \`mindstone doctor\` shows \`routing.mode\` \`placeholder\`, run \`mindstone config --section routing\` (interactive) because Console chat fails without a route. On a Console-first install that is the expected state: the Console's guided setup sets the route. The README doesn't say so."
-  fi
+fi
+step54=$(awk '/^### 5\./{on=1; next} on && /^### /{exit} on' "${MSA_README}" | awk '/^4\. /{on=1} on && /^5\. /{exit} on')
+printf '%s\n' "${step54}" >"${LOG_DIR}/msa-readme-step5.4.txt"
+if printf '%s' "${step54}" | grep -q 'mindstone config --section routing' \
+   && ! printf '%s' "${step54}" | grep -qiE 'console-first|expected'; then
+  finding F-MSA-4 "MindStone-Agent README step 5.4 says that if \`mindstone doctor\` shows \`routing.mode\` \`placeholder\`, run \`mindstone config --section routing\` (interactive), and doesn't say that placeholder is expected on a Console-first install, where the Console's guided setup sets the route."
 fi
 # 5.5 macOS: host.docker.internal needs nothing; Linux: bridge address (handled by msa_env).
 # 5.6 restart, since the gateway was started with `gateway start`
@@ -597,6 +821,8 @@ fi
 CURRENT_STEP=""
 
 # --- step 2: configure ------------------------------------------------------------
+# As the README, except that every secret is written from a 0600 file by env-set.mjs
+# instead of on sed's command line (see deviations).
 CURRENT_STEP=C2
 (
   set -e
@@ -604,16 +830,14 @@ CURRENT_STEP=C2
   cp .env.example .env
   chmod 600 .env
   for k in CREDS_KEY JWT_SECRET JWT_REFRESH_SECRET; do
-    sed -i.bak "s|^$k=.*|$k=$(openssl rand -hex 32)|" .env
+    new_secret "env-${k}" -hex 32
+    node "${HERE}/lib/env-set.mjs" .env "${k}" "${SECRETS_DIR}/env-${k}"
   done
-  sed -i.bak "s|^CREDS_IV=.*|CREDS_IV=$(openssl rand -hex 16)|" .env
-  rm -f .env.bak
-  GW="${MSA_DIR}/.runtime/mindstone/secrets"
-  ADMIN="${SCRATCH_HOME}/.mindstone-admin-credential"
-  sed -i.bak "s|^MINDSTONE_GATEWAY_TOKEN=.*|MINDSTONE_GATEWAY_TOKEN=$(cat "$GW/gateway-token")|" .env
-  sed -i.bak "s|^MINDSTONE_ADMIN_TOKEN=.*|MINDSTONE_ADMIN_TOKEN=$(cat "$ADMIN")|" .env
-  rm -f .env.bak
-  # 2.1 MINDSTONE_GATEWAY_URL: the harness port, or the Linux bridge address.
+  new_secret env-CREDS_IV -hex 16
+  node "${HERE}/lib/env-set.mjs" .env CREDS_IV "${SECRETS_DIR}/env-CREDS_IV"
+  node "${HERE}/lib/env-set.mjs" .env MINDSTONE_GATEWAY_TOKEN "${MSA_DIR}/.runtime/mindstone/secrets/gateway-token"
+  node "${HERE}/lib/env-set.mjs" .env MINDSTONE_ADMIN_TOKEN "${SCRATCH_HOME}/.mindstone-admin-credential"
+  # 2.1 MINDSTONE_GATEWAY_URL (not a secret): the harness port, or the Linux bridge address.
   sed -i.bak "s|^MINDSTONE_GATEWAY_URL=.*|MINDSTONE_GATEWAY_URL=http://$([[ "$(uname -s)" == Linux ]] && echo "${GW_HOST}" || echo host.docker.internal):${GW_PORT}/v1|" .env
   rm -f .env.bak
   # 2.2 UID and GID, so the containers can write their data folders.
@@ -643,11 +867,17 @@ services:
     container_name: ${PROJECT}-mongo
 YAML
 cp "${OVERRIDE_FILE}" "${EVIDENCE}/compose.uat-override.yml"
+# The compose file comes from the ref under test, and teardown's `compose down -v` removes what it
+# names: refuse anything that isn't this project's before bringing it up.
+if ! compose config --format json 2>"${LOG_DIR}/compose-config.err" | node "${HERE}/lib/compose-guard.mjs" "${PROJECT}" "${CONSOLE_DIR}" >"${LOG_DIR}/compose-guard.log" 2>&1; then
+  record C3 FAIL "Console step 3: the compose project isn't safe to run and tear down" "${LOG_DIR}/compose-guard.log" "$(grep -v '^compose-guard' "${LOG_DIR}/compose-guard.log" | head -3 | tr '\n' ' ')"
+  die "compose-guard refused the compose file"
+fi
 log "  docker compose up -d --build (the first build takes several minutes)"
 t=$(date +%s)
 (cd "${COMPOSE_DIR}" && mkdir -p data-node uploads logs)
 COMPOSE_STARTED=1
-if ! compose up -d --build >"${LOG_DIR}/console-build.log" 2>&1; then
+if ! interruptible compose up -d --build >"${LOG_DIR}/console-build.log" 2>&1; then
   tail_to "${LOG_DIR}/console-build.log" "${LOG_DIR}/console-build.tail.log" 80
   record C3 FAIL "Console step 3: docker compose up -d --build" "${LOG_DIR}/console-build.tail.log"
   die "compose up failed"
@@ -661,11 +891,28 @@ done
 compose ps >"${LOG_DIR}/compose-ps.txt" 2>&1
 running=$(compose ps --status running --services 2>/dev/null | sort | tr '\n' ' ')
 if [[ "${ok}" == 1 && "${running}" == *console* && "${running}" == *mongodb* ]]; then
-  record C3 PASS "Console step 3: docker compose up -d --build; both services running; / answers 200" "${LOG_DIR}/compose-ps.txt" "build+start ${build_time}"
+  record C3 PASS "Console step 3: docker compose up -d --build; both services running; / answers 200" "${LOG_DIR}/compose-ps.txt" "build+start ${build_time}; $(tail -n 1 "${LOG_DIR}/compose-guard.log")"
 else
   compose logs --no-color console 2>&1 | tail -n 80 >"${LOG_DIR}/console.tail.log"
   record C3 FAIL "Console step 3: running services [${running}], / 200: ${ok}" "${LOG_DIR}/console.tail.log"
   die "Console didn't start"
+fi
+CURRENT_STEP=""
+
+# X2: the built image carries no secrets: no /app/mindstone (its .env), /app/.env empty or
+# absent, no non-empty .env files anywhere under /app. A throwaway container, labelled with
+# our project so teardown removes it if anything goes wrong; no network.
+CURRENT_STEP=X2
+if docker run --rm --network none --label "com.docker.compose.project=${PROJECT}" --entrypoint sh "${PROJECT}-console:local" -c '
+  fail=0
+  if [ -e /app/mindstone ]; then echo "FOUND: /app/mindstone"; fail=1; else echo "absent: /app/mindstone"; fi
+  if [ -s /app/.env ]; then echo "FOUND: /app/.env is not empty"; fail=1; else echo "empty or absent: /app/.env"; fi
+  found=$(find /app -name node_modules -prune -o -type f \( -name ".env" -o -name ".env.*" \) ! -name "*.example" -size +0c -print 2>/dev/null)
+  if [ -n "$found" ]; then echo "FOUND non-empty env files:"; echo "$found"; fail=1; else echo "no non-empty .env files under /app (node_modules skipped)"; fi
+  exit $fail' >"${LOG_DIR}/image-check.log" 2>&1; then
+  record X2 PASS "the Console image holds no secrets (/app/mindstone absent, /app/.env empty or absent)" "${LOG_DIR}/image-check.log"
+else
+  record X2 FAIL "the Console image may hold secrets" "${LOG_DIR}/image-check.log" "$(grep FOUND "${LOG_DIR}/image-check.log" | head -3 | tr '\n' ' ')"
 fi
 CURRENT_STEP=""
 
@@ -702,7 +949,7 @@ else
     log "  installing @playwright/test@${PW_VERSION} into ${HERE}/.pw (once)"
     mkdir -p "${HERE}/.pw"
     printf '{ "private": true }\n' >"${HERE}/.pw/package.json"
-    (cd "${HERE}/.pw" && npm install --no-save --no-package-lock --no-audit --no-fund "@playwright/test@${PW_VERSION}") >"${LOG_DIR}/playwright-install.log" 2>&1 \
+    interruptible npm --prefix "${HERE}/.pw" install --no-save --no-package-lock --no-audit --no-fund "@playwright/test@${PW_VERSION}" >"${LOG_DIR}/playwright-install.log" 2>&1 \
       || die "couldn't install @playwright/test (${LOG_DIR}/playwright-install.log)"
   fi
   PW_BIN="${HERE}/.pw/node_modules/.bin/playwright"
@@ -712,12 +959,21 @@ PW_INSTALL_ARGS=(install chromium)
 if [[ "$(uname -s)" == Linux ]] && { [[ "$(id -u)" == 0 ]] || sudo -n true 2>/dev/null; }; then
   PW_INSTALL_ARGS=(install --with-deps chromium) # the browser's system libraries too (CI)
 fi
-NODE_PATH="${PW_NODE_PATH}" "${PW_BIN}" "${PW_INSTALL_ARGS[@]}" >>"${LOG_DIR}/playwright-install.log" 2>&1 \
+interruptible env NODE_PATH="${PW_NODE_PATH}" "${PW_BIN}" "${PW_INSTALL_ARGS[@]}" >>"${LOG_DIR}/playwright-install.log" 2>&1 \
   || die "playwright ${PW_INSTALL_ARGS[*]} failed (${LOG_DIR}/playwright-install.log)"
+
+# X5: the on-screen check's own controls, in a real Chromium page (no Console needed).
+CURRENT_STEP=X5
+if NODE_PATH="${PW_NODE_PATH}" node "${HERE}/lib/screen-check.selftest.mjs" >"${LOG_DIR}/screen-check-selftest.log" 2>&1; then
+  record X5 PASS "the on-screen check's self-test (a reply only in the user's bubble, or hidden, is not found)" "${LOG_DIR}/screen-check-selftest.log" "$(tail -n 1 "${LOG_DIR}/screen-check-selftest.log")"
+else
+  record X5 FAIL "the on-screen check failed its self-test" "${LOG_DIR}/screen-check-selftest.log" "$(tail -n 1 "${LOG_DIR}/screen-check-selftest.log")"
+fi
+CURRENT_STEP=J
 
 provider_key_file=""
 [[ "${PROVIDER}" == ollama-cloud ]] && provider_key_file="${UAT_PROVIDER_KEY_FILE}"
-rm -f "${EVIDENCE}/journey-results.tsv" "${EVIDENCE}/journey-state.json"
+rm -f "${EVIDENCE}/journey-results.tsv" "${EVIDENCE}/journey-state.json" "${EVIDENCE}/journey-flow.txt"
 set +e
 (cd "${PW_DIR}" && \
   UAT_CONSOLE_URL="${CONSOLE_URL}" \
@@ -728,17 +984,20 @@ set +e
   UAT_PROVIDER_MODEL="${PROVIDER_MODEL}" \
   UAT_PROVIDER_KEY_FILE="${provider_key_file}" \
   UAT_OLLAMA_BASE_URL="${OLLAMA_URL}/v1" \
+  UAT_OLLAMA_EMBED_MODEL="${EMBED_MODEL}" \
   UAT_GATEWAY_URL="${GW_URL}" \
   UAT_GATEWAY_AUTH_HEADER_FILE="${SECRETS_DIR}/h-auth" \
   UAT_GATEWAY_ADMIN_HEADER_FILE="${SECRETS_DIR}/h-admin" \
   UAT_GATEWAY_LOG="${MSA_DIR}/.runtime/mindstone/gateway/gateway.log" \
   UAT_TRANSCRIPT_DIR="${MSA_DIR}/.runtime/mindstone/transcripts" \
+  UAT_DATA_DIR="${MSA_DIR}/.runtime/mindstone" \
   NODE_PATH="${PW_NODE_PATH}" \
   "${PW_BIN}" test --config "${PW_DIR}/playwright.config.ts") 2>&1 | tee "${LOG_DIR}/playwright.log"
 PW_RC=${PIPESTATUS[0]}
 set -e
 if [[ -f "${EVIDENCE}/journey-results.tsv" ]]; then
   cat "${EVIDENCE}/journey-results.tsv" >>"${STEPS_TSV}"
+  [[ -z "$(tail -c 1 "${STEPS_TSV}")" ]] || echo >>"${STEPS_TSV}" # an unterminated last row stays a row
 else
   record J FAIL "Playwright journey produced no results" "${LOG_DIR}/playwright.log" "exit ${PW_RC}"
 fi
@@ -749,6 +1008,7 @@ if [[ "${PW_RC}" == 130 || "${PW_RC}" == 143 || "${PW_RC}" == 129 ]]; then
   exit 130
 fi
 echo "playwright_exit=${PW_RC}" >>"${EVIDENCE}/run.env"
+echo "setup_flow=$(cut -f1 "${EVIDENCE}/journey-flow.txt" 2>/dev/null || echo unknown)" >>"${EVIDENCE}/run.env"
 echo "finished=$(date -u +%FT%TZ)" >>"${EVIDENCE}/run.env"
 echo "duration=$(elapsed "${T0}")" >>"${EVIDENCE}/run.env"
 # The gate (and the exit code) is decided in teardown's summary, after the secret check.

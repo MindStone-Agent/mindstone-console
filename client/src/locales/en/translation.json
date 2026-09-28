@@ -3023,6 +3023,7 @@
   "com_mindstone_onb_purpose": "What's the first thing you want help with?",
   "com_mindstone_onb_user_context": "Anything it should know before the first chat?",
   "com_mindstone_onb_say_hello": "Start a chat sends a first hello, so the agent can start getting to know you. If the chat opens empty, say hello to begin.",
+  "com_mindstone_onb_user_kept": "The agent already had a USER.md from an earlier setup, so it was kept and your answers on About you were not saved.",
   "com_mindstone_onb_finish_restart": "Connectors saved here ({{0}}) start after the gateway restarts: see the Gateway section at the bottom of the settings page.",
   "com_mindstone_onb_check_again": "Check again",
   "com_mindstone_onb_regrant": "Turn advanced settings back on",
