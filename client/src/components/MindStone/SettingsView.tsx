@@ -14,6 +14,7 @@ import SystemStatus, { type SystemStatusData } from './SystemStatus';
 import { useAuthContext, useLocalize } from '~/hooks';
 import RestartGateway from './RestartGateway';
 import { linkableStep } from './steps';
+import YourSetup from './YourSetup';
 
 type Status = { onboarded: boolean; steps: StatusSteps; system?: SystemStatusData };
 type Permissions = {
@@ -281,6 +282,8 @@ export default function MindStoneSettingsView() {
             </Link>
           </section>
         )}
+
+        {status && <YourSetup config={config} steps={status.steps} />}
 
         {status && (
           <section className={card} aria-labelledby="ms-system">

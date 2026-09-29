@@ -6,16 +6,22 @@
  * agent should know about you (MindStone-Agent #102). Each step is one or
  * two admin API writes, so leaving midway keeps a valid partial config.
  * The settings page links straight to a step with ?step=.
+ *
+ * ?change=<step> (MindStone-Agent #140) opens one step to change a setup
+ * choice from Settings: the same controls and requests, filled in with what
+ * is saved. Saving stays on the step, and the page links back to where the
+ * change started (?from=).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { request } from 'librechat-data-provider';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import type { EnterpriseKind, EnterpriseRegistered, ProviderTest } from './EnterpriseEndpointForm';
 import type { TranslationKeys } from '~/hooks';
+import type { ChangeableStep } from './steps';
 import type { StatusSteps } from './steps';
 import EnterpriseEndpointForm, { TestResult, testProvider } from './EnterpriseEndpointForm';
 import { CONFIRMATION, confirmationMatches, normalizeConfirmation } from './confirmation';
-import { linkableStep } from './steps';
+import { changeableStep, linkableStep, returnPage } from './steps';
 import { useLocalize } from '~/hooks';
 
 type Preset = {
@@ -179,6 +185,9 @@ export default function MindStoneOnboardingView() {
   // Where the access step continues to: a step the settings page linked to, or the provider.
   const [resumeAt, setResumeAt] = useState<Step>('provider');
   const linkChecked = useRef(false);
+  /** The one step being changed from Settings (?change=), or null in guided setup. */
+  const [changing, setChanging] = useState<ChangeableStep | null>(null);
+  const back = returnPage(searchParams.get('from'));
   const [status, setStatus] = useState<Status | null>(null);
   const [permissions, setPermissions] = useState<Permissions | null>(null);
   const [info, setInfo] = useState<ModelsInfo | null>(null);
@@ -260,7 +269,9 @@ export default function MindStoneOnboardingView() {
   useEffect(() => {
     if (linkChecked.current || !status || !permissions) return;
     linkChecked.current = true;
-    const wanted = linkableStep(searchParams.get('step'), status.steps);
+    const change = changeableStep(searchParams.get('change'), status.steps);
+    if (change) setChanging(change);
+    const wanted = change ?? linkableStep(searchParams.get('step'), status.steps);
     if (!wanted) return;
     setResumeAt(wanted);
     if (permissions.advancedSettings) setStep(wanted);
@@ -279,6 +290,16 @@ export default function MindStoneOnboardingView() {
     setMessage(null);
     setRegrantStep(null);
     setStep(next);
+  };
+
+  /** After a step's save: the next step in guided setup; a change stays on its step and says so. */
+  const advance = (next: Step) => {
+    if (!changing) {
+      goTo(next);
+      return;
+    }
+    setRegrantStep(null);
+    setMessage({ ok: true, text: localize('com_mindstone_onb_change_saved') });
   };
 
   /**
@@ -427,7 +448,7 @@ export default function MindStoneOnboardingView() {
       setKeyValue('');
       await load();
       if (result.models?.length) setModel(result.models[0]);
-      goTo('model');
+      advance('model');
       setMessage({
         ok: true,
         text: localize('com_mindstone_onb_connected', { 0: String(result.models?.length ?? 0) }),
@@ -474,7 +495,7 @@ export default function MindStoneOnboardingView() {
         defaultModel: model,
       });
       await load();
-      goTo('persona');
+      advance('persona');
     } catch (error) {
       showWriteError(error);
     } finally {
@@ -498,7 +519,7 @@ export default function MindStoneOnboardingView() {
       });
       await patchSection('agents', { [agentId]: { id: agentId, profileId: profile.id } });
       await load();
-      goTo('memory');
+      advance('memory');
     } catch (error) {
       showWriteError(error);
     } finally {
@@ -584,7 +605,7 @@ export default function MindStoneOnboardingView() {
         autoRecall,
       });
       await load();
-      goTo('connectors');
+      advance('connectors');
     } catch (error) {
       showWriteError(error);
     } finally {
@@ -622,7 +643,7 @@ export default function MindStoneOnboardingView() {
         setRestartFor((saved) => (saved.includes(chosen.id) ? saved : [...saved, chosen.id]));
       }
       await load();
-      goTo('about');
+      advance('about');
       setMessage({
         ok: true,
         text: localize(
@@ -697,6 +718,10 @@ export default function MindStoneOnboardingView() {
   const secondary = 'rounded border border-border-medium px-3 py-1';
   const input = 'rounded border border-border-medium bg-surface-secondary p-2';
   const stepIndex = STEPS.indexOf(step);
+  // A change saves in place; guided setup saves and moves on.
+  const saveLabel: TranslationKeys = changing
+    ? 'com_mindstone_onb_change_save'
+    : 'com_mindstone_onb_save_next';
   const confirmOk = confirmationMatches(confirmText);
   const confirmHint = confirmText !== '' && !confirmOk;
   const chosenConnector = CONNECTORS.find((candidate) => candidate.id === connector);
@@ -711,21 +736,31 @@ export default function MindStoneOnboardingView() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-3xl flex-col gap-4 p-6 text-text-primary">
-        <h1 className="text-2xl font-semibold">{localize('com_mindstone_onb_title')}</h1>
-        <ol
-          className="flex flex-wrap gap-2 text-sm"
-          aria-label={localize('com_mindstone_onb_steps')}
-        >
-          {STEPS.map((name, index) => (
-            <li
-              key={name}
-              aria-current={name === step ? 'step' : undefined}
-              className={stepClass(index, stepIndex)}
-            >
-              {index + 1}. {localize(STEP_LABELS[name])}
-            </li>
-          ))}
-        </ol>
+        <h1 className="text-2xl font-semibold">
+          {localize(changing ? 'com_mindstone_onb_change_title' : 'com_mindstone_onb_title')}
+        </h1>
+        {changing ? (
+          <p className="text-sm">
+            <Link to={back.path} className="underline" data-testid="ms-onb-change-back">
+              {localize(back.label)}
+            </Link>
+          </p>
+        ) : (
+          <ol
+            className="flex flex-wrap gap-2 text-sm"
+            aria-label={localize('com_mindstone_onb_steps')}
+          >
+            {STEPS.map((name, index) => (
+              <li
+                key={name}
+                aria-current={name === step ? 'step' : undefined}
+                className={stepClass(index, stepIndex)}
+              >
+                {index + 1}. {localize(STEP_LABELS[name])}
+              </li>
+            ))}
+          </ol>
+        )}
         {loadError && (
           <div role="alert" className="flex flex-wrap items-center gap-2 text-red-500">
             <span>{loadError}</span>
@@ -867,9 +902,11 @@ export default function MindStoneOnboardingView() {
                   >
                     {localize(testing ? 'com_mindstone_ent_testing' : 'com_mindstone_ent_test')}
                   </button>
-                  <button type="button" className={primary} onClick={() => goTo('model')}>
-                    {localize('com_mindstone_onb_save_next')}
-                  </button>
+                  {!changing && (
+                    <button type="button" className={primary} onClick={() => goTo('model')}>
+                      {localize('com_mindstone_onb_save_next')}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={secondary}
@@ -966,7 +1003,7 @@ export default function MindStoneOnboardingView() {
             <p className="mt-3 text-sm text-text-secondary">
               {localize('com_mindstone_onb_oauth_hint')}
             </p>
-            {usableModels.length > 0 && (
+            {!changing && usableModels.length > 0 && (
               <button type="button" className={`${secondary} mt-2`} onClick={() => goTo('model')}>
                 {localize('com_mindstone_onb_use_existing')}
               </button>
@@ -1002,16 +1039,18 @@ export default function MindStoneOnboardingView() {
               </select>
             )}
             <div className="flex gap-2">
-              <button type="button" className={secondary} onClick={() => goTo('provider')}>
-                {localize('com_mindstone_onb_back')}
-              </button>
+              {!changing && (
+                <button type="button" className={secondary} onClick={() => goTo('provider')}>
+                  {localize('com_mindstone_onb_back')}
+                </button>
+              )}
               <button
                 type="button"
                 className={primary}
                 disabled={busy || !model}
                 onClick={() => void saveModel()}
               >
-                {localize('com_mindstone_onb_save_next')}
+                {localize(saveLabel)}
               </button>
             </div>
           </section>
@@ -1044,16 +1083,18 @@ export default function MindStoneOnboardingView() {
               ))}
             </fieldset>
             <div className="flex gap-2">
-              <button type="button" className={secondary} onClick={() => goTo('model')}>
-                {localize('com_mindstone_onb_back')}
-              </button>
+              {!changing && (
+                <button type="button" className={secondary} onClick={() => goTo('model')}>
+                  {localize('com_mindstone_onb_back')}
+                </button>
+              )}
               <button
                 type="button"
                 className={primary}
                 disabled={busy || !profileId}
                 onClick={() => void savePersona()}
               >
-                {localize('com_mindstone_onb_save_next')}
+                {localize(saveLabel)}
               </button>
             </div>
           </section>
@@ -1192,21 +1233,23 @@ export default function MindStoneOnboardingView() {
               )}
             </div>
             <div className="flex gap-2">
-              <button
-                type="button"
-                className={secondary}
-                disabled={busy}
-                onClick={() => goTo('persona')}
-              >
-                {localize('com_mindstone_onb_back')}
-              </button>
+              {!changing && (
+                <button
+                  type="button"
+                  className={secondary}
+                  disabled={busy}
+                  onClick={() => goTo('persona')}
+                >
+                  {localize('com_mindstone_onb_back')}
+                </button>
+              )}
               <button
                 type="button"
                 className={primary}
                 disabled={busy || !currentCheck?.ok}
                 onClick={() => void saveMemory()}
               >
-                {localize('com_mindstone_onb_save_next')}
+                {localize(saveLabel)}
               </button>
             </div>
           </section>
@@ -1310,29 +1353,33 @@ export default function MindStoneOnboardingView() {
               {localize('com_mindstone_onb_email_calendar')}
             </p>
             <div className="flex gap-2">
-              <button
-                type="button"
-                className={secondary}
-                disabled={busy}
-                onClick={() => goTo('memory')}
-              >
-                {localize('com_mindstone_onb_back')}
-              </button>
-              <button
-                type="button"
-                className={secondary}
-                disabled={busy}
-                onClick={() => goTo('about')}
-              >
-                {localize('com_mindstone_onb_skip')}
-              </button>
+              {!changing && (
+                <>
+                  <button
+                    type="button"
+                    className={secondary}
+                    disabled={busy}
+                    onClick={() => goTo('memory')}
+                  >
+                    {localize('com_mindstone_onb_back')}
+                  </button>
+                  <button
+                    type="button"
+                    className={secondary}
+                    disabled={busy}
+                    onClick={() => goTo('about')}
+                  >
+                    {localize('com_mindstone_onb_skip')}
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 className={primary}
                 disabled={busy || !connectorReady}
                 onClick={() => void saveConnector()}
               >
-                {localize('com_mindstone_onb_save_next')}
+                {localize(saveLabel)}
               </button>
             </div>
           </section>

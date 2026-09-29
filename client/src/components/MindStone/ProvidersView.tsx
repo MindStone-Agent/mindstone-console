@@ -104,6 +104,16 @@ export default function MindStoneProvidersView() {
           </Link>
         </div>
         <p className="text-sm text-text-secondary">{localize('com_mindstone_prov_intro')}</p>
+        <p className="text-sm">
+          {/* A local provider (Ollama, LM Studio, a compatible server) is added with setup's own step (#140). */}
+          <Link
+            to="/mindstone/onboarding?change=provider&from=providers"
+            className="underline"
+            data-testid="ms-prov-add-local"
+          >
+            {localize('com_mindstone_prov_add_local')}
+          </Link>
+        </p>
         {!advanced && (
           <p className="text-sm text-text-secondary">
             {localize('com_mindstone_prov_need_advanced')}
