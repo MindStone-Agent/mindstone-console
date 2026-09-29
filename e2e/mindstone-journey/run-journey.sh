@@ -584,7 +584,7 @@ summary() {
     echo "MindStone-Agent \`${MSA_REF}\` ($(grep '^msa_sha=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2)), mindstone-console \`${CONSOLE_REF}\` ($(grep '^console_sha=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2)); provider $(grep '^provider=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2) $(grep '^provider_model=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2); duration $(elapsed "${T0}")."
     echo
     if [[ "${INSTALL_MODE}" == stack ]]; then
-      echo "Install mode: **stack** (\`UAT_INSTALL=stack\`): MindStone-Agent's \`install-stack.sh\` $([[ -n "${UAT_STACK_INSTALLER_FILE:-}" ]] && echo "from a local file (\`UAT_STACK_INSTALLER_FILE\`), not the raw URL" || echo "from \`${MSA_RAW}/${MSA_REF}/install-stack.sh\`") with \`--ref ${MSA_REF} --console-ref ${CONSOLE_REF}\`: the gateway, the Console and MongoDB in one Compose project (\`${PROJECT}\`), MindStone-Agent README install guide path A."
+      echo "Install mode: **stack** (\`UAT_INSTALL=stack\`): MindStone-Agent's \`install-stack.sh\` $([[ -n "${UAT_STACK_INSTALLER_FILE:-}" ]] && echo "from a local file (\`UAT_STACK_INSTALLER_FILE\`), not the raw URL" || echo "from \`${STACK_INSTALLER_URL}\`") with \`--ref ${STACK_MSA_INSTALL_REF} --console-ref ${STACK_CONSOLE_INSTALL_REF}\`$([[ "${STACK_PIN}" != 0 ]] && echo " (\`${MSA_REF}\` and \`${CONSOLE_REF}\` as the run started: installed at exactly these commits)"): the gateway, the Console and MongoDB in one Compose project (\`${PROJECT}\`), MindStone-Agent README install guide path A."
     else
       echo "Install mode: **native** (\`UAT_INSTALL\` unset): MindStone-Agent's \`install.sh\` at \`${MSA_REF}\` on this host, and the Console at \`${CONSOLE_REF}\` from \`mindstone/docker-compose.yml\`."
     fi
@@ -678,6 +678,8 @@ else
   GW_HOST="127.0.0.1"
 fi
 GW_URL="http://${GW_HOST}:${GW_PORT}"
+# Stack mode: the commits the stack is installed at, resolved now (lib/stack.sh).
+[[ "${INSTALL_MODE}" == stack ]] && stack_pin_refs
 CONSOLE_URL="http://localhost:${CONSOLE_PORT}"
 
 {
@@ -716,7 +718,7 @@ if [[ "${INSTALL_MODE}" == native ]]; then
     deviation "Linux: the gateway runs with \`MINDSTONE_AGENT_GATEWAY_HOST=${GW_HOST}\` (MSA README 5.5; \`UAT_GATEWAY_BRIDGE_HOST\`), on every start and restart."
   fi
 else
-  deviation "Stack mode (\`UAT_INSTALL=stack\`, MindStone-Agent README install guide path A): the README's \`curl -fsSL …/install-stack.sh | bash -s -- …\` runs $([[ -n "${UAT_STACK_INSTALLER_FILE:-}" ]] && echo "a local install-stack.sh (\`UAT_STACK_INSTALLER_FILE\`) piped to bash" || echo "the installer from ${MSA_RAW}/${MSA_REF}") with \`--dir <scratch>/stack --ref ${MSA_REF} --console-ref ${CONSOLE_REF} --admin-email ${UAT_ADMIN_EMAIL:-uat-admin@example.com} --admin-name \"UAT Admin\"\` and, on bash's environment, \`CONSOLE_PORT=${CONSOLE_PORT} MINDSTONE_GATEWAY_PORT=${GW_PORT} MINDSTONE_PROJECT=${PROJECT}\` (not 3080/19789/mindstone)$([[ -n "${UAT_STACK_OLLAMA_BASE_URL:-}" ]] && echo " and \`OLLAMA_BASE_URL=${STACK_OLLAMA_BASE_URL}\`")."
+  deviation "Stack mode (\`UAT_INSTALL=stack\`, MindStone-Agent README install guide path A): the README's \`curl -fsSL …/install-stack.sh | bash -s -- …\` runs $([[ -n "${UAT_STACK_INSTALLER_FILE:-}" ]] && echo "a local install-stack.sh (\`UAT_STACK_INSTALLER_FILE\`) piped to bash" || echo "the installer from ${STACK_INSTALLER_URL}")$([[ "${STACK_PIN}" != 0 ]] && echo ", pinned to the commits ${MSA_REF} and ${CONSOLE_REF} named at the start of the run (\`UAT_STACK_PIN=0\` passes the refs as given)") with \`--dir <scratch>/stack --ref ${STACK_MSA_INSTALL_REF} --console-ref ${STACK_CONSOLE_INSTALL_REF} --admin-email ${UAT_ADMIN_EMAIL:-uat-admin@example.com} --admin-name \"UAT Admin\"\` and, on bash's environment, \`CONSOLE_PORT=${CONSOLE_PORT} MINDSTONE_GATEWAY_PORT=${GW_PORT} MINDSTONE_PROJECT=${PROJECT}\` (not 3080/19789/mindstone)$([[ -n "${UAT_STACK_OLLAMA_BASE_URL:-}" ]] && echo " and \`OLLAMA_BASE_URL=${STACK_OLLAMA_BASE_URL}\`")."
   deviation "Stack mode: every \`docker compose\` the harness runs names its project and file (\`-p ${PROJECT} --project-directory <scratch>/stack -f <scratch>/stack/compose.yml\`) instead of the README's \`cd ~/.mindstone && docker compose …\`; the CLI runs as the README's \`docker compose exec gateway ./scripts/mindstone <command>\`, and gateway restarts are \`docker compose restart gateway\`."
   deviation "Stack mode: the gateway's data, transcripts, Pi sessions and log are in its container's volumes, so the journey reads copies, taken with \`docker compose cp\` and \`docker compose logs\` just before each read (\`lib/stack-files.js\`); J12's USER.md restore removes the file with \`docker compose exec\`."
   deviation "Stack mode, J11: the gateway's container reaches the stub as host.docker.internal, not loopback, and MindStone-Agent #126 allows plain http to loopback only. So the stub speaks https with a per-run test CA, and the harness adds \`MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1\` and \`NODE_EXTRA_CA_CERTS\` (that CA, copied into the gateway's runtime volume) to the stack's gateway.env, then \`docker compose up -d gateway\` (S3). The Playwright process trusts the same CA for its own stub checks."

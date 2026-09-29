@@ -110,6 +110,8 @@ curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/<ms
   bash -s -- --dir <scratch>/stack --ref <msa-ref> --console-ref <console-ref> --admin-email uat-admin@example.com --admin-name "UAT Admin"
 ```
 
+By default (`UAT_STACK_PIN=1`) `<msa-ref>` and `<console-ref>` are resolved to their commits with `git ls-remote` when the run starts, and the stack is installed at exactly those commits: the installer's raw URL, `--ref` and `--console-ref` all name them. So a branch that moves during the run can't change what was installed, and `SUMMARY.md` records both the refs and the commits. `UAT_STACK_PIN=0` passes the refs as given. `--dir` is always a fresh, empty path in the run's scratch dir.
+
 Both ports come from the harness's range (never 3080 or 19789: a range that includes either is refused in stack mode), and the Compose project is the run's own. raw.githubusercontent.com caches a branch's files for a few minutes, so right after a push, set `UAT_STACK_INSTALLER_FILE=<path to install-stack.sh>` to pipe a local copy to bash instead (the installer still downloads `deploy/docker/compose.yml` and the Console's files from raw at the refs, and the images build from the git URLs). `UAT_MSA_REPO` and `UAT_CONSOLE_REPO` are refused in stack mode, since the stack builds from the MindStone-Agent GitHub repos by URL.
 
 The install rows keep their ids, so the gate and the DEMO SUBSET are unchanged:
@@ -139,7 +141,7 @@ What changes after the install:
 Known limits of stack mode:
 - **Docker Desktop.** J11's stub listens on 127.0.0.1; Docker Desktop forwards `host.docker.internal` to the host's loopback, Docker Engine on Linux doesn't, so J11 can't reach the stub there (Ollama on Linux must listen on an address the containers reach anyway, README A0).
 - **The build cache.** The first build takes 10 to 20 minutes. The BuildKit cache of both images, and the pulled base images (`node:24-bookworm-slim`, `mongo:8.0.20`, the Console's), are left, as natively.
-- **Provenance.** The images build from the git URLs at the refs; the commits recorded are what `git ls-remote` said just before the install.
+- **Provenance.** The images build from the git URLs. Pinned (the default), they build at the recorded commits; with `UAT_STACK_PIN=0` the recorded commits are what the refs named at the start, which a push during the build could change.
 
 ### The journey: UI only (steps `J*`, `journey.spec.ts`)
 
@@ -279,6 +281,7 @@ There is no html report, trace or video, because those record step titles and ar
 | `UAT_MSA_REPO`, `UAT_MSA_RAW`, `UAT_CONSOLE_REPO` | the MindStone-Agent GitHub repos | for testing forks (native mode; stack mode takes only `UAT_MSA_RAW`, for the installer's URL) |
 | `UAT_INSTALL` | `native` | `stack`: install the whole stack in Docker with `install-stack.sh` ([Stack mode](#stack-mode-uat_installstack)) |
 | `UAT_STACK_INSTALLER_FILE` | unset | stack mode: pipe this local `install-stack.sh` to bash instead of the one at the raw URL (raw caches a branch for a few minutes) |
+| `UAT_STACK_PIN` | `1` | stack mode: install at the commits the refs name when the run starts (`0`: pass the refs as given) |
 | `UAT_STACK_OLLAMA_BASE_URL` | the stack's `http://host.docker.internal:11434/v1` | stack mode: Ollama as the gateway container reaches it, passed to the installer as `OLLAMA_BASE_URL` when set |
 | `UAT_KEEP_SCRATCH=1`, `UAT_KEEP_IMAGE=1` | off | keep the scratch dir, or the built Console image, for debugging |
 | `DOCKER_HOST`, `DOCKER_CONFIG` | Docker's own | passed through to `docker`. On a Mac where pulls hang in Docker Desktop's credential helper, point `DOCKER_CONFIG` at a config with no `credsStore`, and set `DOCKER_HOST=unix://$HOME/.docker/run/docker.sock`. |

@@ -13,6 +13,12 @@
 STACK_DIR="${SCRATCH}/stack"                     # install-stack.sh --dir
 STACK_MIRROR="${SCRATCH}/stack-mirror"           # the gateway's files, copied out for the journey (lib/stack-files.js)
 STACK_INSTALLER_COPY="${SCRATCH}/install-stack.sh" # the installer exactly as it was piped to bash (for --uninstall)
+# The refs the stack is installed at: by default (UAT_STACK_PIN, 1) the commits <msa-ref> and <console-ref> name when
+# the run starts, so what is installed is exactly what the evidence records, even if a branch moves during the run
+# (and raw.githubusercontent.com's cache of a branch can't serve an older installer). Set by stack_pin_refs.
+STACK_PIN="${UAT_STACK_PIN:-1}"
+STACK_MSA_INSTALL_REF="${MSA_REF}"
+STACK_CONSOLE_INSTALL_REF="${CONSOLE_REF}"
 STACK_INSTALLER_URL="${MSA_RAW}/${MSA_REF}/install-stack.sh"
 STACK_INSTALLER_FILE="${UAT_STACK_INSTALLER_FILE:-}" # a local install-stack.sh instead of the raw URL (raw caches for minutes)
 # Ollama as the gateway container reaches it: the stack's own default unless UAT_STACK_OLLAMA_BASE_URL says otherwise
@@ -75,12 +81,32 @@ stack_run_installer() {
     bash -s -- "$@"
 }
 
-# stack_ls_remote <repo> <ref>: the commit a ref names now (the stack builds from the git URL at the ref, so this is its
-# provenance), short; "unknown" if it can't be read.
+# stack_ls_remote <repo> <ref>: the full commit a ref names now (a full SHA is its own answer); empty if it can't be read.
 stack_ls_remote() {
-  local sha
-  sha=$(git ls-remote "$1" "refs/heads/$2" "refs/tags/$2" "$2" 2>/dev/null | head -n 1 | cut -c1-7)
-  printf '%s' "${sha:-unknown}"
+  if [[ "$2" =~ ^[0-9a-f]{40}$ ]]; then printf '%s' "$2"; return 0; fi
+  # A branch, else a tag's commit (the peeled ^{} line of an annotated tag wins over the tag object).
+  git ls-remote "$1" "refs/heads/$2" "refs/tags/$2" "refs/tags/$2^{}" 2>/dev/null \
+    | awk '$2 ~ /^refs\/heads\// { head = $1 } $2 ~ /\^\{\}$/ { peeled = $1 } $2 !~ /\^\{\}$/ && $2 ~ /^refs\/tags\// { tag = $1 }
+           END { v = head; if (v == "") v = peeled; if (v == "") v = tag; printf "%s", v }'
+}
+
+# stack_pin_refs: resolves <msa-ref> and <console-ref> to their commits now, before anything is installed, and (with
+# UAT_STACK_PIN=1, the default) installs at exactly those: the installer's raw URL, --ref and --console-ref. MSA_SHA
+# and CONSOLE_SHA (the evidence's) are those commits. UAT_STACK_PIN=0 passes the refs as given; the commits recorded
+# are then what the refs named at the start, which a push during the build could change.
+stack_pin_refs() {
+  local msa console
+  msa=$(stack_ls_remote "${MSA_REPO}" "${MSA_REF}")
+  console=$(stack_ls_remote "${CONSOLE_REPO}" "${CONSOLE_REF}")
+  if [[ "${STACK_PIN}" != 0 ]]; then
+    [[ "${msa}" =~ ^[0-9a-f]{40}$ ]] || die "stack mode: couldn't resolve MindStone-Agent ${MSA_REF} to a commit (git ls-remote; UAT_STACK_PIN=0 installs the ref as given)"
+    [[ "${console}" =~ ^[0-9a-f]{40}$ ]] || die "stack mode: couldn't resolve mindstone-console ${CONSOLE_REF} to a commit (git ls-remote; UAT_STACK_PIN=0 installs the ref as given)"
+    STACK_MSA_INSTALL_REF="${msa}"
+    STACK_CONSOLE_INSTALL_REF="${console}"
+  fi
+  STACK_INSTALLER_URL="${MSA_RAW}/${STACK_MSA_INSTALL_REF}/install-stack.sh"
+  MSA_SHA="${msa:0:7}"; MSA_SHA="${MSA_SHA:-unknown}"
+  CONSOLE_SHA="${console:0:7}"; CONSOLE_SHA="${CONSOLE_SHA:-unknown}"
 }
 
 # stack_wait_health <seconds>: until the gateway's /health answers on the host port.
@@ -166,12 +192,12 @@ stack_install_steps() {
   # will run it (the project name from .env, no -p), with empty placeholder env files.
   local pre="${SCRATCH}/stack-preflight"
   mkdir -p "${pre}"
-  if ! curl -fsSL "${MSA_RAW}/${MSA_REF}/deploy/docker/compose.yml" -o "${pre}/compose.yml" 2>"${LOG_DIR}/compose-guard.log"; then
+  if ! curl -fsSL "${MSA_RAW}/${STACK_MSA_INSTALL_REF}/deploy/docker/compose.yml" -o "${pre}/compose.yml" 2>"${LOG_DIR}/compose-guard.log"; then
     record S1 FAIL "Stack A1: deploy/docker/compose.yml at ${MSA_REF}" "${LOG_DIR}/compose-guard.log" "couldn't download it"
     die "no stack compose file at ${MSA_REF}"
   fi
   printf 'COMPOSE_PROJECT_NAME=%s\nMINDSTONE_REF=%s\nCONSOLE_REF=%s\nCONSOLE_PORT=%s\nMINDSTONE_GATEWAY_PORT=%s\nUID=%s\nGID=%s\n' \
-    "${PROJECT}" "${MSA_REF}" "${CONSOLE_REF}" "${CONSOLE_PORT}" "${GW_PORT}" "$(id -u)" "$(id -g)" >"${pre}/.env"
+    "${PROJECT}" "${STACK_MSA_INSTALL_REF}" "${STACK_CONSOLE_INSTALL_REF}" "${CONSOLE_PORT}" "${GW_PORT}" "$(id -u)" "$(id -g)" >"${pre}/.env"
   : >"${pre}/gateway.env"; : >"${pre}/console.env"; : >"${pre}/librechat.yaml"
   if ! env "${STACK_UNSET[@]}" docker compose --project-directory "${pre}" -f "${pre}/compose.yml" config --format json 2>>"${LOG_DIR}/compose-guard.log" \
        | node "${HERE}/lib/compose-guard.mjs" "${PROJECT}" "${pre}" >>"${LOG_DIR}/compose-guard.log" 2>&1; then
@@ -180,16 +206,14 @@ stack_install_steps() {
     die "compose-guard refused the stack's compose file"
   fi
   rm -rf "${pre}"
-  MSA_SHA=$(stack_ls_remote "${MSA_REPO}" "${MSA_REF}")
-  CONSOLE_SHA=$(stack_ls_remote "${CONSOLE_REPO}" "${CONSOLE_REF}")
-  { echo "msa_sha=${MSA_SHA}"; echo "console_sha=${CONSOLE_SHA}"; } >>"${EVIDENCE}/run.env"
-  curl -fsSL "${MSA_RAW}/${MSA_REF}/README.md" -o "${EVIDENCE}/msa-README.md" 2>/dev/null || : >"${EVIDENCE}/msa-README.md"
+  { echo "msa_sha=${MSA_SHA}"; echo "console_sha=${CONSOLE_SHA}"; echo "stack_msa_install_ref=${STACK_MSA_INSTALL_REF}"; echo "stack_console_install_ref=${STACK_CONSOLE_INSTALL_REF}"; } >>"${EVIDENCE}/run.env"
+  curl -fsSL "${MSA_RAW}/${STACK_MSA_INSTALL_REF}/README.md" -o "${EVIDENCE}/msa-README.md" 2>/dev/null || : >"${EVIDENCE}/msa-README.md"
   MSA_README="${EVIDENCE}/msa-README.md"
   log "  install-stack.sh: building and starting the stack (the first build takes 10 to 20 minutes)"
   t=$(date +%s)
   STACK_STARTED=1
   local install_rc=0
-  interruptible stack_run_installer --dir "${STACK_DIR}" --ref "${MSA_REF}" --console-ref "${CONSOLE_REF}" \
+  interruptible stack_run_installer --dir "${STACK_DIR}" --ref "${STACK_MSA_INSTALL_REF}" --console-ref "${STACK_CONSOLE_INSTALL_REF}" \
     --admin-email "${ADMIN_EMAIL}" --admin-name "UAT Admin" >"${LOG_DIR}/stack-install.log" 2>&1 || install_rc=$?
   [[ -s "${STACK_INSTALLER_COPY}" ]] && cp "${STACK_INSTALLER_COPY}" "${EVIDENCE}/msa-install-stack.sh"
   stack_compose ps --format '{{.Service}} {{.Status}}' >"${LOG_DIR}/stack-ps.txt" 2>&1 || true
@@ -204,7 +228,7 @@ stack_install_steps() {
   grep -qE '^console Up' "${LOG_DIR}/stack-ps.txt" || problems+=("console isn't Up")
   grep -qE '^mongodb Up' "${LOG_DIR}/stack-ps.txt" || problems+=("mongodb isn't Up")
   if [[ ${#problems[@]} -eq 0 ]]; then
-    record S1 PASS "Stack A1: \`curl -fsSL …/${MSA_REF}/install-stack.sh | bash -s -- --dir --ref ${MSA_REF} --console-ref ${CONSOLE_REF} --admin-email\` (MSA ${MSA_SHA}, Console ${CONSOLE_SHA}); \`docker compose ps\`: gateway healthy, console and mongodb up" \
+    record S1 PASS "Stack A1: \`curl -fsSL …/<ref>/install-stack.sh | bash -s -- --dir --ref --console-ref --admin-email\`, MindStone-Agent ${MSA_REF} (${MSA_SHA}) and Console ${CONSOLE_REF} (${CONSOLE_SHA})$([[ "${STACK_PIN}" != 0 ]] && echo ', installed at exactly those commits'); \`docker compose ps\`: gateway healthy, console and mongodb up" \
       "${LOG_DIR}/stack-install.log" "$(elapsed "$t"); $(tail -n 1 "${LOG_DIR}/compose-guard.log")"
   else
     record S1 FAIL "Stack A1: install-stack.sh checks" "${LOG_DIR}/stack-ps.txt" "$(IFS=';'; echo "${problems[*]}")"
@@ -340,9 +364,9 @@ stack_install_steps() {
 
   # --- the Console's files, pinned to <console-ref> ---
   CURRENT_STEP=C1
-  curl -fsSL "https://raw.githubusercontent.com/MindStone-Agent/mindstone-console/${CONSOLE_REF}/README.md" -o "${EVIDENCE}/console-README.md" 2>/dev/null || true
+  curl -fsSL "https://raw.githubusercontent.com/MindStone-Agent/mindstone-console/${STACK_CONSOLE_INSTALL_REF}/README.md" -o "${EVIDENCE}/console-README.md" 2>/dev/null || true
   if [[ -s "${STACK_DIR}/librechat.yaml" && -s "${STACK_DIR}/console.env.example" ]]; then
-    record C1 PASS "Console in the stack: built from ${CONSOLE_REF} (${CONSOLE_SHA}); librechat.yaml and .env.example downloaded at that ref" "${EVIDENCE}/console-README.md"
+    record C1 PASS "Console in the stack: built from ${CONSOLE_REF} (${CONSOLE_SHA}); librechat.yaml and .env.example downloaded at that commit" "${EVIDENCE}/console-README.md"
   else
     record C1 FAIL "Console in the stack: librechat.yaml or console.env.example missing from the stack dir" ""; die "stack Console files"
   fi
