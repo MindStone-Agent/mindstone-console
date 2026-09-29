@@ -1,5 +1,6 @@
 /**
- * Reads the gateway's recall index (<dataDir>/vectors/memory.sqlite) for J9,
+ * Reads the gateway's recall index (<dataDir>/vectors/memory.sqlite) for J9
+ * (and J12, which counts the stored vectors by size),
  * OUT OF PROCESS: Playwright's module loader hook can't load `node:sqlite` in
  * the test process ("Expected a string, an ArrayBuffer, or a TypedArray to be
  * returned for the "source" from the "load" hook but got null"). So
@@ -14,6 +15,7 @@
  *
  *   node recall-index.js <dbPath> embedded <token>
  *   node recall-index.js <dbPath> chunks <chunkId>...
+ *   node recall-index.js <dbPath> dims
  */
 const { execFileSync } = require('node:child_process');
 
@@ -58,7 +60,17 @@ function read(dbPath, mode, args) {
         .prepare(`SELECT chunk_id, text${hasUpdatedAt ? ', updated_at' : ''} FROM memory_chunks WHERE chunk_id IN (${args.map(() => '?').join(', ')})`)
         .all(...args);
     }
-    throw new Error(`unknown mode "${mode}" (embedded or chunks)`);
+    if (mode === 'dims') {
+      // Chunks by their vector's size (J12): dims null for a chunk not embedded yet, -1 for an unreadable vector.
+      return db
+        .prepare(
+          `SELECT CASE WHEN embedding_json IS NULL THEN NULL WHEN json_valid(embedding_json) THEN json_array_length(embedding_json) ELSE -1 END AS dims,
+                  count(*) AS n
+           FROM memory_chunks GROUP BY 1 ORDER BY 1`,
+        )
+        .all();
+    }
+    throw new Error(`unknown mode "${mode}" (embedded, chunks or dims)`);
   } finally {
     db.close();
   }

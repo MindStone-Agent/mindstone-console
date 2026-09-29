@@ -14,6 +14,9 @@
  * - isolationReasons: the negative control, under another persona, had no
  *   `pkb:<A>:` hit anywhere (and, before any chat held it, no token).
  * - skillsVerdict: only A's listed skill was in its prompt.
+ * - personaRestore: what J10's finally does to put the active persona back
+ *   as it was before the step (a mid-step failure must not leave A or B
+ *   active for later steps).
  *
  * What the gateway records (MindStone-Agent #141/#142,
  * packages/mindstone-gateway/src/index.ts): each assistant entry carries
@@ -190,4 +193,21 @@ function skillsVerdict({ picked, installed, built, control }) {
   return { provable: true, why: `${others.length} other installed skill(s) (${others.join(', ')}) were left out of the built persona's prompt`, reasons };
 }
 
-module.exports = { RECALL_EVENT, PRIVATE_PREFIX, j10Decision, personaTurnEvidence, builtPersonaReasons, isolationReasons, skillsVerdict };
+/**
+ * How J10's finally puts the active persona back to `before` (the active
+ * persona when J10 began; null for none), given the one active `now` and the
+ * persona ids the gateway lists (`known`): nothing when it is already so;
+ * otherwise make `before` active again, or, when it was none or is no longer
+ * listed, use no persona. Returns { action: 'none' | 'activate' | 'clear',
+ * active (the value to PATCH as config.personas.active), why }.
+ */
+function personaRestore({ before, now, known }) {
+  const was = before ?? null;
+  const is = now ?? null;
+  if (was === is) return { action: 'none', active: was, why: `${was ?? 'no persona'} is active, as before` };
+  if (was === null) return { action: 'clear', active: null, why: `no persona was active before; ${is} is now` };
+  if ((known ?? []).includes(was)) return { action: 'activate', active: was, why: `${was} was active before; ${is ?? 'none'} is now` };
+  return { action: 'clear', active: null, why: `${was} was active before but is no longer listed; ${is ?? 'none'} is now` };
+}
+
+module.exports = { RECALL_EVENT, PRIVATE_PREFIX, j10Decision, personaTurnEvidence, builtPersonaReasons, isolationReasons, skillsVerdict, personaRestore };

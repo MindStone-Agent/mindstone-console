@@ -25,6 +25,8 @@
 //   J10 is uncounted without its flag, and pw_explained_by and the stall filter
 //   leave out J10 only where it is uncounted; gate-rows excuses J10's own
 //   failure, not a hook's error charged to it.
+// (J10's restore of the active persona, run in a finally, is decided by
+// personaRestore, checked here too.)
 // Run by run-journey.sh with X5.
 //
 //   node persona-builder.selftest.mjs
@@ -37,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { failuresOnlyIn } from './gate-rows.mjs';
 
 const require = createRequire(import.meta.url);
-const { j10Decision, personaTurnEvidence, builtPersonaReasons, isolationReasons, skillsVerdict, RECALL_EVENT } = require('./persona-builder-evidence.js');
+const { j10Decision, personaTurnEvidence, builtPersonaReasons, isolationReasons, skillsVerdict, personaRestore, RECALL_EVENT } = require('./persona-builder-evidence.js');
 const { sessionLines } = require('./recall-evidence.js');
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -160,6 +162,15 @@ check(sv({ control: components(B, { skills: [P] }) }).reasons.some((r) => /shoul
 const one = skillsVerdict({ picked: P, installed: [P], built, control: undefined });
 check(!one.provable && one.reasons.length === 0 && /only one skill is installed/.test(one.why), 'skills: with one installed skill the restriction is not provable (PENDING), not a pass');
 
+// --- personaRestore: J10's finally puts the active persona back ---
+const pr = (before, now, known = [A, B, 'journey-x']) => personaRestore({ before, now, known });
+check(pr(null, null).action === 'none' && pr('journey-x', 'journey-x').action === 'none', 'restore: nothing to do when the active persona is what it was');
+check(pr('journey-x', B).action === 'activate' && pr('journey-x', B).active === 'journey-x', 'restore: B left active mid-step, journey-x before: make journey-x active again');
+check(pr(null, B).action === 'clear' && pr(null, B).active === null && pr(null, A).active === null, 'restore: A or B left active, none before: use no persona (active null)');
+check(pr('journey-x', A, [A, B]).action === 'clear' && pr('journey-x', A, [A, B]).active === null, 'restore: the persona active before is no longer listed: use no persona, never a missing id');
+check(pr('journey-x', null).action === 'activate', 'restore: no persona active now, journey-x before: make it active again');
+check(pr(undefined, undefined).action === 'none', 'restore: an unknown "before" and "now" (none on both) needs nothing');
+
 // --- lib/gate.sh: J10's flag ---
 const sh = (script) => spawnSync('bash', ['-c', `set -Eeuo pipefail; source "${path.join(HERE, 'gate.sh')}"; ${script}`], { encoding: 'utf8' });
 const out = (script) => sh(script).stdout.trim();
@@ -171,8 +182,9 @@ check(out('gate_required_steps 0 1') === `${BASE} J10` && out('gate_required_ste
 check(!has(out('gate_required_steps 1 0'), 'J10'), "gate.sh: J11's flag doesn't bring J10 in");
 check(out('gate_demo_steps') === 'S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J9 X1 X2 X3 X4 X5', 'gate.sh: the DEMO SUBSET is unchanged (J1-J6, J9 and S/C/X), never J10');
 check(has(out('echo "$GATE_DEMO_UNCOUNTED"'), 'J10') && has(out('echo "$GATE_OPTIONAL_STEPS"'), 'J10'), 'gate.sh: J10 is always a known row, and always uncounted by the demo');
-check(out('gate_uncounted 0 0') === 'J10 J11' && out('gate_uncounted 1 0') === 'J10' && out('gate_uncounted 0 1') === 'J11' && out('gate_uncounted 1 1') === '', 'gate.sh: J10 is uncounted by the gate exactly when its flag is off');
-check(out('gate_uncounted 0') === 'J10 J11', 'gate.sh: the persona-builder flag defaults to off');
+// (J12's own flag is set here, so only J10's and J11's are judged; lib/settings-parity.selftest.mjs covers J12.)
+check(out('gate_uncounted 0 0 1') === 'J10 J11' && out('gate_uncounted 1 0 1') === 'J10' && out('gate_uncounted 0 1 1') === 'J11' && out('gate_uncounted 1 1 1') === '', 'gate.sh: J10 is uncounted by the gate exactly when its flag is off');
+check(out('gate_uncounted 0') === 'J10 J11 J12', 'gate.sh: the persona-builder flag (and every other) defaults to off');
 
 // --- gate-rows and pw_explained_by with J10 ---
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uat-persona-builder-selftest-'));

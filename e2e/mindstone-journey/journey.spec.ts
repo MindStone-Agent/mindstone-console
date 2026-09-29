@@ -16,6 +16,11 @@
  * J11 (an enterprise Azure OpenAI endpoint, against the harness's stub) is
  * PENDING while the Console has no enterprise form; it is in the gate only
  * with UAT_EXPECT_ENTERPRISE=1, and never in the DEMO SUBSET.
+ * J12 (settings parity, MindStone-Agent #140) runs after J9 and before J10: it
+ * is PENDING while Settings has no "Your setup" section, in the gate only with
+ * UAT_EXPECT_SETTINGS_PARITY=1, and never in the DEMO SUBSET. It changes the
+ * default model, the memory setting and USER.md from Settings, and puts them
+ * back in a finally, so J10 and J11 start from the setup J2 made.
  *
  * PENDING steps first assert the flow's exact state: the setup step list, the
  * gateway's onboarding checklist keys, the links on /mindstone, and 404 from
@@ -70,13 +75,24 @@ import {
   stubLeakReasons,
   waitForStubProof,
   j10Decision,
+  personaRestore,
   builtPersonaReasons,
   isolationReasons,
   skillsVerdict,
   personaTurnForConversation,
   uiResponse,
+  answeredInConversation,
+  j12Decision,
+  parityReasons,
+  pickAlternateModel,
+  modelMatchReasons,
+  memoryChangeVerdict,
+  recallIndexDims,
+  SETUP_STEPS,
+  CHANGE_STEPS,
+  IN_PLACE_STEPS,
 } from './lib/journey';
-import type { FlowName, PersonaTurnEvidence, Reply, StoredMessage } from './lib/journey';
+import type { FlowName, ParityRow, PersonaTurnEvidence, Reply, StoredMessage } from './lib/journey';
 
 const ISSUES = {
   banner: 'mindstone-console#18 (PR #20)',
@@ -87,6 +103,7 @@ const ISSUES = {
   recall: 'MindStone-Agent#106 (automatic memory recall, on by default)',
   enterprise: 'MindStone-Agent#126 (enterprise model endpoints)',
   personaBuilder: 'MindStone-Agent#125 (persona builder: admin API #142, Console #36)',
+  settingsParity: 'MindStone-Agent#140 (settings parity: every setup choice has a Settings equivalent)',
 };
 
 /** The phrase as a phone or autocomplete types it: a capital and a trailing space (#18). */
@@ -1188,6 +1205,511 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
   }
 });
 
+/** Each guided-setup step's own heading, which its Change link must open (and nothing else). */
+const J12_STEP_HEADINGS: Record<string, string> = {
+  provider: 'Connect a model provider',
+  model: 'Choose the model',
+  persona: 'Choose a base persona',
+  memory: 'Set up memory',
+  connectors: 'Connect a chat app (optional)',
+};
+/** How long J12 watches the recall index after the embedding change, for a re-index (none shows it holds only old vectors). */
+const J12_REINDEX_WAIT_MS = 30_000;
+/** The memory step's Test (the Console's proxy gives the embed check 25 s; a model's first load can take longer). */
+const J12_MEMORY_CHECK_MS = 90_000;
+/** Words the product would use to warn that a new embedding model affects the memories already stored. */
+const J12_WARNING = /re-?index|re-?embed|incompatib|rebuil|existing (memor|vector|embedding)|stored (memor|vector)/i;
+
+type J12Config = {
+  etag?: string;
+  config?: {
+    routing?: { mode?: string; defaultAgentId?: string; defaultModel?: string };
+    memory?: { vectorStore?: string; embeddingProvider?: string; autoRecall?: boolean };
+    onboarding?: { profile?: { id?: string; label?: string } };
+  };
+};
+type J12UserFile = { exists?: boolean; bytes?: number; etag?: string; markdown?: string; tooLarge?: boolean; error?: string };
+type J12Kinds = { enterprise?: { kind: string; name?: string; fields?: { name: string; label: string; planned?: boolean }[] }[] };
+
+test('J12 settings parity: every setup choice has its Settings equivalent; the model, memory and About you changed from Settings', async ({}, testInfo) => {
+  testInfo.setTimeout(20 * 60_000);
+  const expectParity = process.env.UAT_EXPECT_SETTINGS_PARITY === '1';
+  testInfo.annotations.push({ type: 'label', description: expectParity ? 'gated: UAT_EXPECT_SETTINGS_PARITY=1' : 'not gated' });
+  await ensureSignedIn(page);
+  const yourSetup = page.locator('section[aria-labelledby="ms-your-setup"]');
+
+  // Is the feature here? Positive first: Settings rendered; only then does "no Your setup" mean something.
+  await navigate(page, '/mindstone');
+  const settingsShown = await appears(page.getByRole('heading', { name: 'MindStone settings' }), 30_000);
+  const sectionPresent = settingsShown && (await appears(yourSetup, 10_000));
+  const probe = await probeGatewayAdmin('/admin/user');
+  await shot(page, testInfo, 'settings');
+  note(testInfo, `Settings: ${settingsShown ? 'shown' : 'NOT shown'}; "Your setup" ${sectionPresent ? 'present' : 'absent'}; gateway GET /admin/user ${probe.status}`);
+  const decision = j12Decision({ settingsShown, sectionPresent, expectParity, gatewayRoute: probe.status !== 404 });
+  if (decision.verdict === 'pending') {
+    test.fixme(
+      true,
+      `PENDING ${ISSUES.settingsParity}: ${decision.why}. Not gated (set UAT_EXPECT_SETTINGS_PARITY=1 to require it). ` +
+        'Done when: Settings shows every guided-setup choice (Access, Provider, Model, Persona, Memory, Connectors, About you), each with a Change ' +
+        'link into just that setup step or a control in place; the default model changed there is saved as routing.defaultModel, shown on Settings, ' +
+        "and the next chat's Pi session calls it; a new embedding model is saved as memory.embeddingProvider, and the vectors already stored are " +
+        're-embedded or the change warns first; USER.md edited on Settings persists after a reload and a save with a stale etag is refused; the ' +
+        "enterprise endpoints' other sign-in options are shown disabled as not available yet, and the gateway refuses a value for one.",
+    );
+    return;
+  }
+  if (decision.verdict === 'fail') throw new Error(decision.why);
+
+  // The real test. It needs finished setup (J2).
+  requireSetupDone();
+  const stamp = Date.now().toString(36);
+  const marker = `j12-${stamp}`;
+  const readConfig = async () => (await consoleApi<J12Config>(page, 'GET', '/api/mindstone/admin/config')).json;
+  const readUser = () => consoleApi<J12UserFile>(page, 'GET', '/api/mindstone/admin/user');
+  const patchConfig = async (section: string, body: Record<string, unknown>) => {
+    const { etag } = await readConfig();
+    const query = etag ? `?ifMatch=${encodeURIComponent(etag)}` : '';
+    return consoleApi<{ error?: string }>(page, 'PATCH', `/api/mindstone/admin/config/${section}${query}`, body);
+  };
+  const startConfig = await readConfig();
+  const startUser = await readUser();
+  expect(startUser.status, `GET /api/mindstone/admin/user (${JSON.stringify(startUser.json).slice(0, 200)})`).toBe(200);
+  const original = {
+    routing: { ...(startConfig.config?.routing ?? {}) },
+    memory: { ...(startConfig.config?.memory ?? {}) },
+    user: { exists: startUser.json.exists === true, markdown: startUser.json.markdown ?? '', etag: startUser.json.etag ?? '' },
+  };
+  const proof: Record<string, unknown> = {
+    marker,
+    original: { routing: original.routing, memory: original.memory, user: { exists: original.user.exists, bytes: startUser.json.bytes } },
+  };
+  const saveProof = () => attachText(testInfo, 'evidence.json', JSON.stringify(proof, null, 2));
+  /** Checks that fail but let the rest run (so one run shows every problem); J12 fails on them at the end. */
+  const deferred: string[] = [];
+  const statusText = async (p: Page) => ((await p.getByRole('status').allTextContents()).join(' | ') || '').trim();
+
+  /**
+   * Puts the given settings back as they were when J12 began, through the Console's admin API; only what
+   * differs is written. Returns what it did, and whether everything now matches.
+   */
+  const putBack = async (parts: Array<'model' | 'memory' | 'user'>): Promise<{ ok: boolean; lines: string[] }> => {
+    const lines: string[] = [];
+    let ok = true;
+    const now = (await readConfig()).config ?? {};
+    if (parts.includes('model') && now.routing?.defaultModel !== original.routing.defaultModel) {
+      const r = await patchConfig('routing', { defaultModel: original.routing.defaultModel });
+      const back = (await readConfig()).config?.routing?.defaultModel;
+      ok &&= r.status < 300 && back === original.routing.defaultModel;
+      lines.push(`routing.defaultModel ${now.routing?.defaultModel} put back to ${original.routing.defaultModel}: HTTP ${r.status}, now ${back}`);
+    }
+    if (parts.includes('memory')) {
+      const keys = (['vectorStore', 'embeddingProvider', 'autoRecall'] as const).filter(
+        (key) => original.memory[key] !== undefined && now.memory?.[key] !== original.memory[key],
+      );
+      if (keys.length) {
+        const r = await patchConfig('memory', Object.fromEntries(keys.map((key) => [key, original.memory[key]])));
+        const back = (await readConfig()).config?.memory ?? {};
+        const same = keys.every((key) => back[key] === original.memory[key]);
+        ok &&= r.status < 300 && same;
+        lines.push(`memory ${keys.map((key) => `${key} ${JSON.stringify(now.memory?.[key])}`).join(', ')} put back: HTTP ${r.status}, ${same ? 'as before' : `now ${JSON.stringify(back)}`}`);
+      }
+    }
+    if (parts.includes('user') && original.user.exists) {
+      const current = await readUser();
+      if (current.json.markdown !== original.user.markdown) {
+        const r = await consoleApi(page, 'PATCH', `/api/mindstone/admin/user?ifMatch=${encodeURIComponent(current.json.etag ?? '')}`, { markdown: original.user.markdown });
+        const back = (await readUser()).json.markdown;
+        ok &&= r.status < 300 && back === original.user.markdown;
+        lines.push(`USER.md put back (${Buffer.byteLength(original.user.markdown)} bytes): HTTP ${r.status}, ${back === original.user.markdown ? 'as before' : 'NOT as before'}`);
+      }
+    }
+    return { ok, lines: lines.length ? lines : [`${parts.join(', ')}: as before, nothing to put back`] };
+  };
+
+  let completed = false;
+  let modelPending: string | undefined;
+  try {
+    await test.step('Access: advanced settings on, from the Advanced settings card on Settings', async () => {
+      // J4's Start a chat turned them off and J7 turned them on; they last an hour. Saving on Settings needs them.
+      await navigate(page, '/mindstone');
+      const state = page.getByTestId('ms-advanced-state');
+      await expect(state).toBeVisible({ timeout: 30_000 });
+      const before = ((await state.textContent()) ?? '').trim();
+      if (/^Off\b/.test(before)) {
+        await page.locator('section[aria-labelledby="ms-advanced"]').getByLabel('Confirmation').fill(TYPED_PHRASE);
+        await page.getByRole('button', { name: 'Turn on' }).click();
+      }
+      await expect(state).toHaveText(/^On\b/);
+      proof.access = { before, after: ((await state.textContent()) ?? '').trim() };
+      note(testInfo, `advanced settings: "${before}"${/^Off\b/.test(before) ? ', turned on with the phrase' : ''}`);
+    });
+
+    const rows: ParityRow[] = [];
+    await test.step('the parity table: every guided-setup step has its Settings equivalent', async () => {
+      await navigate(page, '/mindstone');
+      await expect(yourSetup).toBeVisible({ timeout: 30_000 });
+      const saved = (await readConfig()).config ?? {};
+      // Access: the Advanced settings card, in place.
+      const advanced = page.locator('section[aria-labelledby="ms-advanced"]');
+      const accessShows = ((await page.getByTestId('ms-advanced-state').textContent()) ?? '').trim();
+      rows.push({ step: 'Access', kind: 'in-place', shows: accessShows, control: (await advanced.getByRole('button', { name: /^Turn (on|off)$/ }).count()) === 1 });
+      // Provider to Connectors: a row in "Your setup" (a display: contents element, so read, not "visible") and its Change link.
+      for (const [step, change] of Object.entries(CHANGE_STEPS)) {
+        const row = page.getByTestId(`ms-setup-${change}`);
+        if ((await row.count()) !== 1) continue;
+        const link = page.getByTestId(`ms-setup-${change}-change`);
+        const href = (await link.count()) === 1 ? ((await link.getAttribute('href')) ?? undefined) : undefined;
+        rows.push({ step, kind: href ? 'change' : 'none', shows: ((await row.textContent()) ?? '').replace(/\s+/g, ' ').trim(), href });
+      }
+      // About you: USER.md, edited in place.
+      const about = page.getByTestId('ms-about');
+      if (await appears(about, 15_000)) {
+        const editor = await appears(page.getByTestId('ms-about-text'), 15_000);
+        rows.push({ step: 'About you', kind: 'in-place', shows: `USER.md, ${original.user.exists ? `${Buffer.byteLength(original.user.markdown)} bytes` : 'none yet'}`, control: editor && (await page.getByTestId('ms-about-save').count()) === 1 });
+      }
+      await shot(page, testInfo, 'your-setup');
+
+      // Settings shows what is saved.
+      const shows = (step: string) => rows.find((r) => r.step === step)?.shows ?? '';
+      const want: Array<[string, string | undefined]> = [
+        ['Model', saved.routing?.defaultModel],
+        ['Persona', saved.onboarding?.profile?.label ?? saved.onboarding?.profile?.id],
+        ['Memory', saved.memory?.embeddingProvider],
+      ];
+      for (const [step, value] of want) {
+        if (value && rows.some((r) => r.step === step) && !shows(step).includes(value)) deferred.push(`Settings' ${step} row shows "${shows(step)}", not the saved ${value}`);
+      }
+
+      // Each Change link opens just its step: "Change your setup", that step's heading, no step list, a way back.
+      for (const row of rows.filter((r) => r.kind === 'change')) {
+        const change = CHANGE_STEPS[row.step];
+        await navigate(page, '/mindstone');
+        await page.getByTestId(`ms-setup-${change}-change`).click();
+        const url = await page.waitForURL(/\/mindstone\/onboarding\?/, { timeout: 30_000 }).then(() => page.url(), () => page.url());
+        const opened = {
+          url: url.endsWith(`/mindstone/onboarding?change=${change}&from=settings`),
+          heading: await appears(page.getByRole('heading', { name: J12_STEP_HEADINGS[change] }), 30_000),
+          title: await appears(page.getByRole('heading', { name: 'Change your setup', level: 1 }), 5_000),
+          noStepList: (await page.getByRole('list', { name: 'Setup steps' }).count()) === 0,
+          back: await appears(page.getByTestId('ms-onb-change-back'), 5_000),
+        };
+        row.opened = Object.values(opened).every(Boolean);
+        if (!row.opened) row.openedWhy = Object.entries(opened).filter(([, v]) => !v).map(([k]) => `no ${k}`).join(', ');
+        await shot(page, testInfo, `change-${change}`);
+      }
+
+      const table = [
+        '| Setup step | Settings equivalent | Shows | Change link | Opens just that step |',
+        '|---|---|---|---|---|',
+        ...SETUP_STEPS.map((step) => {
+          const row = rows.find((r) => r.step === step);
+          if (!row) return `| ${step} | **none** | | | |`;
+          const what = row.kind === 'in-place' ? IN_PLACE_STEPS[step] : row.kind === 'change' ? `"Your setup" row, Change link` : '"Your setup" row, no link';
+          return `| ${step} | ${what} | ${(row.shows ?? '').replace(/\|/g, '\\|')} | ${row.href ? `\`${row.href}\`` : row.kind === 'in-place' ? `(in place: control ${row.control ? 'present' : 'MISSING'})` : '**none**'} | ${row.opened === undefined ? '' : row.opened ? 'yes' : `**no** (${row.openedWhy})`} |`;
+        }),
+      ].join('\n');
+      await attachText(testInfo, 'parity-table.md', table);
+      const reasons = parityReasons(rows);
+      proof.parity = { rows, reasons };
+      await saveProof();
+      note(testInfo, `parity table: ${reasons.length ? `INCOMPLETE: ${reasons.join('; ')}` : `all ${SETUP_STEPS.length} setup steps have their Settings equivalent`}`);
+      deferred.push(...reasons.map((r) => `parity: ${r}`));
+    });
+
+    let chosenModel = original.routing.defaultModel ?? '';
+    let shownModel: string | undefined;
+    await test.step('Model: changed through its Change link; Settings and config.routing.defaultModel agree', async () => {
+      await navigate(page, '/mindstone');
+      await page.getByTestId('ms-setup-model-change').click();
+      const section = page.locator('section[aria-labelledby="ms-onb-model"]');
+      const select = section.getByRole('combobox', { name: 'Choose the model' });
+      await expect(select, 'the Model step opens').toBeVisible({ timeout: 30_000 });
+      await expect(select, 'the Model step opens filled in with the saved model').toHaveValue(original.routing.defaultModel ?? '');
+      const values = await select.locator('option').evaluateAll((options) => options.map((o) => (o as HTMLOptionElement).value).filter(Boolean));
+      await attachText(testInfo, 'model-options.txt', values.join('\n'));
+      const alternate = pickAlternateModel(values, original.routing.defaultModel);
+      if (!alternate) modelPending = `the Model step offers no cloud model other than ${original.routing.defaultModel} (it offers: ${values.join(', ') || 'nothing'})`;
+      chosenModel = alternate ?? original.routing.defaultModel ?? '';
+      expect(chosenModel, 'a model to choose').not.toBe('');
+      await select.selectOption(chosenModel);
+      await shot(page, testInfo, 'model-change');
+      const saved = await uiResponse(page, { method: 'PATCH', path: '/api/mindstone/admin/config/routing' }, () =>
+        section.getByRole('button', { name: 'Save', exact: true }).click(),
+      );
+      expect(saved.status, `Save: PATCH /api/mindstone/admin/config/routing (the page says: "${await statusText(page)}")`).toBeLessThan(300);
+      await expect(page.getByRole('status').filter({ hasText: 'Saved.' }), 'the change says it saved').toBeVisible({ timeout: 15_000 });
+      await expect(section, 'a change stays on its step').toBeVisible();
+      await shot(page, testInfo, 'model-saved');
+      await page.getByTestId('ms-onb-change-back').click();
+      await expect(page).toHaveURL(/\/mindstone$/);
+      const row = page.getByTestId('ms-setup-model');
+      await expect(row, 'Settings shows the new default model').toContainText(chosenModel, { timeout: 30_000 });
+      shownModel = ((await row.textContent()) ?? '').replace(/\s+/g, ' ').trim();
+      await shot(page, testInfo, 'settings-after-model');
+      const routing = (await readConfig()).config?.routing ?? {};
+      proof.model = { from: original.routing.defaultModel, to: chosenModel, offered: values, shown: shownModel, saved: routing, pending: modelPending ?? null };
+      await saveProof();
+      note(testInfo, `default model ${original.routing.defaultModel} -> ${chosenModel}${modelPending ? ` (${modelPending})` : ''}; Settings shows "${shownModel}"; config.routing ${routing.mode} ${routing.defaultModel}`);
+      expect(routing.defaultModel, 'config.routing.defaultModel is the model chosen on Settings').toBe(chosenModel);
+      expect(routing.mode, 'routing.mode is still pi-session').toBe(original.routing.mode);
+    });
+
+    await test.step('Memory: the embedding model changed through its Change link; config.memory agrees; the stored vectors judged', async () => {
+      const beforeSpec = original.memory.embeddingProvider ?? '';
+      const [kind, ...rest] = beforeSpec.split(':');
+      const beforeModel = rest.join(':');
+      const indexBefore = recallIndexDims();
+      const sizes = Object.keys(indexBefore.byDims);
+      const beforeDims = Number(readState().memoryCheck?.match(/(\d+) dimensions/)?.[1] ?? 0) || (sizes.length === 1 ? Number(sizes[0]) : undefined);
+      await navigate(page, '/mindstone');
+      await page.getByTestId('ms-setup-memory-change').click();
+      const section = page.locator('section[aria-labelledby="ms-onb-memory"]');
+      await expect(page.getByRole('heading', { name: 'Set up memory' }), 'the Memory step opens').toBeVisible({ timeout: 30_000 });
+      const select = section.locator('select');
+      const recall = section.getByRole('checkbox', { name: 'Recall memories automatically' });
+      const check = page.getByTestId('ms-onb-memory-check');
+      // Filled in with what is saved.
+      expect(kind, `the saved embedding provider is Ollama's (${beforeSpec})`).toBe('ollama');
+      await expect(section.getByRole('radio', { name: 'Ollama (local)' }), 'the saved provider is picked').toBeChecked();
+      await expect(select, 'the saved embedding model is picked').toHaveValue(beforeModel);
+      expect(await recall.isChecked(), 'automatic recall shows as saved').toBe(original.memory.autoRecall === true);
+      /** The section's words, less the Test result (whose "N dimensions" is not a warning). */
+      const words = () =>
+        section.evaluate((el) => {
+          const copy = el.cloneNode(true) as HTMLElement;
+          copy.querySelector('[data-testid="ms-onb-memory-check"]')?.remove();
+          return (copy.textContent ?? '').replace(/\s+/g, ' ').trim();
+        });
+      const wordsBefore = await words();
+      /** Test, for the model picked now: the page's own check request, then its result in place of "test first". */
+      const testEmbedding = async (): Promise<string> => {
+        const waiting = ((await check.textContent()) ?? '').trim();
+        await uiResponse(page, { method: 'POST', path: '/api/mindstone/admin/memory/check', timeoutMs: J12_MEMORY_CHECK_MS }, () =>
+          section.getByRole('button', { name: 'Test', exact: true }).click(),
+        );
+        await expect(check, 'the Test shows its result').not.toHaveText(waiting, { timeout: 15_000 });
+        return ((await check.textContent()) ?? '').trim();
+      };
+      // Another embedding model that is already pulled: each other choice the step offers, tested; the harness never downloads one.
+      const others = (await select.locator('option').evaluateAll((o) => o.map((x) => (x as HTMLOptionElement).value))).filter((v) => v && v !== beforeModel && v !== 'custom');
+      const tried: { model: string; result: string }[] = [];
+      let after: { spec: string; dims: number } | undefined;
+      for (const candidate of others) {
+        await select.selectOption(candidate);
+        const result = await testEmbedding();
+        tried.push({ model: candidate, result });
+        const dims = Number(result.match(/Embedding works: (\d+) dimensions/)?.[1] ?? 0);
+        if (dims > 0) {
+          after = { spec: `ollama:${candidate}`, dims };
+          break;
+        }
+      }
+      let safeField: string | undefined;
+      if (!after) {
+        // Only one embedding model is pulled: change a safe memory field instead (automatic recall), with the saved model.
+        await select.selectOption(beforeModel);
+        const result = await testEmbedding();
+        tried.push({ model: beforeModel, result });
+        expect(result, `the saved embedding model still works (${beforeSpec})`).toMatch(/Embedding works: \d+ dimensions/);
+        await recall.setChecked(!(original.memory.autoRecall === true));
+        safeField = `autoRecall ${original.memory.autoRecall === true ? 'on -> off' : 'off -> on'}`;
+      }
+      const wordsAfter = await words();
+      await shot(page, testInfo, 'memory-change');
+      const saved = await uiResponse(page, { method: 'PATCH', path: '/api/mindstone/admin/config/memory' }, () =>
+        section.getByRole('button', { name: 'Save', exact: true }).click(),
+      );
+      const said = await statusText(page);
+      expect(saved.status, `Save: PATCH /api/mindstone/admin/config/memory (the page says: "${said}")`).toBeLessThan(300);
+      await expect(page.getByRole('status').filter({ hasText: 'Saved.' }), 'the change says it saved').toBeVisible({ timeout: 15_000 });
+      await shot(page, testInfo, 'memory-saved');
+      // A warning is the product's own words about the memories already stored, new on the page since the change began.
+      const fresh = `${wordsAfter} ${await statusText(page)}`
+        .split(/(?<=[.!?])\s+/)
+        .filter((sentence) => J12_WARNING.test(sentence) && !wordsBefore.includes(sentence));
+      const warned = fresh.join(' ') || undefined;
+      await page.getByTestId('ms-onb-change-back').click();
+      await expect(page).toHaveURL(/\/mindstone$/);
+      const memoryRow = page.getByTestId('ms-setup-memory');
+      const memory = (await readConfig()).config?.memory ?? {};
+      proof.memory = { before: { spec: beforeSpec, dims: beforeDims ?? null }, after: after ?? null, safeField: safeField ?? null, tried, warned: warned ?? null, saved: memory, indexBefore };
+      await saveProof();
+      if (!after) {
+        note(testInfo, `memory: only one embedding model is pulled (tried ${tried.map((t) => `${t.model}: "${t.result}"`).join('; ')}), so a safe field was changed instead: ${safeField}`);
+        await expect(memoryRow, 'Settings shows the new automatic-recall setting').toContainText(`automatic recall ${original.memory.autoRecall === true ? 'off' : 'on'}`, { timeout: 30_000 });
+        await shot(page, testInfo, 'settings-after-memory');
+        expect(memory.autoRecall, 'config.memory.autoRecall is what was chosen on Settings').toBe(!(original.memory.autoRecall === true));
+        expect(memory.embeddingProvider, 'config.memory.embeddingProvider is unchanged').toBe(beforeSpec);
+        return;
+      }
+      await expect(memoryRow, 'Settings shows the new embedding model').toContainText(after.spec, { timeout: 30_000 });
+      await shot(page, testInfo, 'settings-after-memory');
+      expect(memory.embeddingProvider, 'config.memory.embeddingProvider is the model chosen on Settings').toBe(after.spec);
+      expect(memory.vectorStore, 'config.memory.vectorStore is unchanged').toBe(original.memory.vectorStore);
+      expect(memory.autoRecall, 'config.memory.autoRecall is unchanged').toBe(original.memory.autoRecall);
+
+      // The vectors already stored: watch the recall index for a re-index, then judge (lib/settings-parity-evidence.js).
+      const started = Date.now();
+      let index = recallIndexDims();
+      let verdict = memoryChangeVerdict({ before: { spec: beforeSpec, dims: beforeDims }, after, warned, index });
+      while (verdict.verdict === 'fail' && Date.now() - started < J12_REINDEX_WAIT_MS) {
+        await page.waitForTimeout(3_000);
+        index = recallIndexDims();
+        verdict = memoryChangeVerdict({ before: { spec: beforeSpec, dims: beforeDims }, after, warned, index });
+      }
+      proof.memory = { ...(proof.memory as object), indexAfter: index, watchedMs: Date.now() - started, verdict };
+      await saveProof();
+      note(testInfo, `embedding ${beforeSpec} (${beforeDims ?? '?'} dims) -> ${after.spec} (${after.dims} dims); warning: ${warned ? `"${warned}"` : 'none'}; recall index before ${JSON.stringify(indexBefore.byDims)}, after ${JSON.stringify(index.byDims)} (${index.pending} pending); ${verdict.why}`);
+      if (verdict.verdict === 'fail') deferred.push(verdict.why);
+    });
+    // Put the memory setting back at once: no chat should embed with the changed model, and J10 recalls with the original.
+    const memoryBack = await putBack(['memory']);
+    note(testInfo, `memory put back right after it was judged: ${memoryBack.lines.join('; ')}`);
+    if (!memoryBack.ok) deferred.push(`the memory setting could not be put back: ${memoryBack.lines.join('; ')}`);
+
+    await test.step('About you: USER.md edited and saved on Settings, kept after a reload; a save with a stale etag is refused', async () => {
+      const text = page.getByTestId('ms-about-text');
+      await navigate(page, '/mindstone');
+      await expect(text, "Settings shows the agent's USER.md as saved").toHaveValue(original.user.markdown, { timeout: 30_000 });
+      const edited = `${original.user.markdown.trimEnd()}\n\n- Settings check ${marker}: the owner edited this line on Settings.\n`;
+      // A second tab reads the file before the save: its own save later carries the old etag.
+      const tab = await context.newPage();
+      try {
+        await navigate(tab, '/mindstone');
+        await expect(tab.getByTestId('ms-about-text')).toHaveValue(original.user.markdown, { timeout: 30_000 });
+
+        await text.fill(edited);
+        const saved = await uiResponse(page, { method: 'PATCH', path: '/api/mindstone/admin/user' }, () => page.getByTestId('ms-about-save').click());
+        const said = ((await page.getByTestId('ms-about-status').textContent().catch(() => '')) ?? '').trim();
+        expect(saved.status, `Save: PATCH /api/mindstone/admin/user (the page says: "${said}")`).toBeLessThan(300);
+        await expect(page.getByTestId('ms-about-status')).toHaveText('Saved. Your next chat uses it.');
+        await shot(page, testInfo, 'about-saved');
+
+        await navigate(page, '/mindstone');
+        await expect(text, 'after a reload, Settings shows the saved USER.md').toHaveValue(edited, { timeout: 30_000 });
+        await shot(page, testInfo, 'about-reloaded');
+        const reread = await readUser();
+        expect(reread.json.markdown, 'GET /admin/user returns the saved text').toBe(edited);
+        expect(reread.json.etag, 'the etag changed with the file').not.toBe(original.user.etag);
+        const files = promptFilesWith(marker);
+        expect(files.found.filter((f) => f.endsWith('USER.md')), "the agent's USER.md on disk holds the line (it goes into every prompt)").not.toEqual([]);
+
+        // The tab that read the file before the save: its save is refused, its text kept, and saving stays off until it reloads.
+        const stale = `${original.user.markdown.trimEnd()}\n\n- Stale edit ${marker}: this must never be saved.\n`;
+        await tab.getByTestId('ms-about-text').fill(stale);
+        const refused = await uiResponse(tab, { method: 'PATCH', path: '/api/mindstone/admin/user' }, () => tab.getByTestId('ms-about-save').click());
+        expect(refused.status, 'a save with the etag read before the other save is refused (412)').toBe(412);
+        await expect(tab.getByTestId('ms-about-status'), 'the page says the file changed').toContainText('changed since this page loaded it');
+        await expect(tab.getByTestId('ms-about-save'), 'saving stays off until the current file is loaded').toBeDisabled();
+        await expect(tab.getByTestId('ms-about-text'), 'the typed text is kept').toHaveValue(stale);
+        await shot(tab, testInfo, 'about-stale');
+        expect((await readUser()).json.markdown, 'the stale save did not overwrite USER.md').toBe(edited);
+        await tab.getByTestId('ms-about-reload').click();
+        await expect(tab.getByTestId('ms-about-text'), '"Load the current file" shows the saved text').toHaveValue(edited);
+      } finally {
+        await tab.close();
+      }
+      // The gateway's own guard, through the Console's proxy: an old etag is refused, and so is no etag at all.
+      const oldEtag = await consoleApi<{ error?: string }>(page, 'PATCH', `/api/mindstone/admin/user?ifMatch=${encodeURIComponent(original.user.etag)}`, { markdown: `${edited}x` });
+      const noEtag = await consoleApi<{ error?: string }>(page, 'PATCH', '/api/mindstone/admin/user', { markdown: `${edited}x` });
+      proof.about = { bytesBefore: Buffer.byteLength(original.user.markdown), bytesAfter: Buffer.byteLength(edited), line: `Settings check ${marker}`, oldEtag: [oldEtag.status, oldEtag.json?.error], noEtag: [noEtag.status, noEtag.json?.error] };
+      await saveProof();
+      note(testInfo, `USER.md: saved on Settings and kept after a reload; the stale tab's save refused (412, text kept); PATCH with the old etag ${oldEtag.status}, with none ${noEtag.status}`);
+      expect(oldEtag.status, `PATCH /admin/user with the etag read before the save (${oldEtag.json?.error ?? ''})`).toBe(412);
+      expect(noEtag.status, `PATCH /admin/user with no etag (${noEtag.json?.error ?? ''})`).toBe(428);
+      expect((await readUser()).json.markdown, 'neither refused write changed USER.md').toBe(edited);
+    });
+
+    await test.step('enterprise sign-in placeholders: listed, marked not available, disabled, and refused by the gateway', async () => {
+      const kinds = (await consoleApi<J12Kinds>(page, 'GET', '/api/mindstone/admin/models')).json.enterprise ?? [];
+      const wanted = kinds.map((k) => ({ kind: k.kind, planned: (k.fields ?? []).filter((f) => f.planned).map((f) => f.label) }));
+      await navigate(page, '/mindstone/providers');
+      const ent = page.locator('section[aria-labelledby="ms-prov-enterprise"]');
+      await expect(ent, 'the Model providers page lists the enterprise endpoints').toBeVisible({ timeout: 30_000 });
+      const seen: Record<string, { label: string; marked: boolean; disabled: boolean; editable: boolean }[]> = {};
+      const reasons: string[] = [];
+      for (const { kind, planned } of wanted) {
+        await ent.locator(`input[name="ms-prov-kind"][value="${kind}"]`).check();
+        const form = page.getByTestId(`ms-ent-form-${kind}`);
+        await expect(form, `the ${kind} form opens`).toBeVisible();
+        const fieldset = page.getByTestId(`ms-ent-planned-${kind}`);
+        const shown = (await fieldset.count()) === 1;
+        seen[kind] = [];
+        if (shown) {
+          for (const label of await fieldset.locator('label').all()) {
+            const input = label.locator('input');
+            seen[kind].push({
+              label: ((await label.locator('span').first().textContent()) ?? '').replace(/\s+/g, ' ').trim(),
+              marked: (await label.getByText('Not available yet', { exact: true }).count()) === 1,
+              disabled: await input.isDisabled(),
+              editable: await input.isEditable(),
+            });
+          }
+          await shot(page, testInfo, `enterprise-${kind}`);
+        }
+        // Not a sign-in choice either: the form's own "Sign in with" options never offer one.
+        const choices = (await form.locator('fieldset:not([data-testid]) label').allTextContents()).map((s) => s.trim());
+        for (const label of planned) {
+          const field = seen[kind].find((f) => f.label.startsWith(label));
+          if (!field) reasons.push(`${kind}: "${label}" (planned, per the gateway) is not shown under "Other sign-in options"`);
+          else if (!field.marked || !field.disabled || field.editable) reasons.push(`${kind}: "${label}" is ${[!field.marked && 'not marked "Not available yet"', !field.disabled && 'not disabled', field.editable && 'editable'].filter(Boolean).join(', ')}`);
+          if (choices.some((c) => c.startsWith(label))) reasons.push(`${kind}: "${label}" is offered as a sign-in choice`);
+        }
+        const extra = seen[kind].filter((f) => !planned.some((label) => f.label.startsWith(label)));
+        if (extra.length) reasons.push(`${kind}: shown as planned but not planned by the gateway: ${extra.map((f) => f.label).join(', ')}`);
+      }
+      const azure = wanted.find((k) => k.kind === 'azure-openai');
+      if (!azure?.planned.some((label) => /Entra/i.test(label))) reasons.push(`azure-openai has no planned Microsoft Entra ID / managed identity option (planned: ${azure?.planned.join(', ') || 'none'})`);
+      // The request the page never sends: a value for a planned field, which the gateway must refuse before anything is saved.
+      const refused = await consoleApi<{ error?: string }>(page, 'POST', '/api/mindstone/admin/providers/enterprise/azure-openai', { entraIdentity: `uat-${marker}` });
+      proof.enterprise = { wanted, seen, refused: [refused.status, refused.json?.error], reasons };
+      await saveProof();
+      note(testInfo, `enterprise placeholders: ${wanted.map((k) => `${k.kind}: ${k.planned.join(', ') || 'none'}`).join('; ')}; a value for one: HTTP ${refused.status} "${refused.json?.error ?? ''}"`);
+      expect(reasons, 'every planned sign-in option is shown, marked "Not available yet", disabled and not a sign-in choice').toEqual([]);
+      expect(refused.status, 'the gateway refuses a value for a planned sign-in option').toBe(400);
+      expect(refused.json?.error ?? '', "and says it isn't available").toMatch(/isn't available yet/);
+    });
+
+    await test.step('one chat after the changes: answered, on the model chosen on Settings', async () => {
+      await navigate(page, '/c/new');
+      await ensureMindStoneModel(page, testInfo);
+      const reply = await sendAndWaitForReply(page, 'Settings check: please reply in one short sentence.');
+      await attachText(testInfo, 'reply.txt', replyLog(reply));
+      await shot(page, testInfo, 'chat');
+      await gatewayExcerpt(testInfo, 40);
+      const answered = answeredInConversation(reply.conversationId);
+      const saved = (await readConfig()).config?.routing?.defaultModel;
+      const reasons = modelMatchReasons({ chosen: chosenModel, saved, shown: shownModel, answered });
+      proof.chat = { conversationId: reply.conversationId, chosen: chosenModel, saved, answered: answered ?? null, reasons };
+      await saveProof();
+      note(testInfo, `chat ${reply.conversationId}: "${reply.text.slice(0, 100)}"; the Pi session called ${answered?.provider ?? '?'}/${answered?.model ?? '?'}${answered?.modelFallbackMessage ? ` (fallback: ${answered.modelFallbackMessage})` : ''}`);
+      expectAnswer(reply, 'the chat after the Settings changes');
+      if (PROVIDER === 'mock') {
+        testInfo.annotations.push({ type: 'mock', description: 'mock provider' }, { type: 'label', description: 'MOCK' });
+        return;
+      }
+      expect(reasons, `the chat ran on the model chosen on Settings (${chosenModel}): the saved route, the Settings row and the Pi session agree`).toEqual([]);
+    });
+
+    expect(deferred, 'J12 checks that failed along the way (each is in the notes and logs/j12-evidence.json)').toEqual([]);
+    completed = true;
+    if (modelPending) {
+      test.fixme(
+        true,
+        `PENDING ${ISSUES.settingsParity} (model part): everything else passed, but ${modelPending}, so the chosen model is the one set up before. ` +
+          'Done when: with a second cloud model listed, the chat after the change runs on it.',
+      );
+    }
+  } finally {
+    // Whatever happened above: the default model, the memory setting and USER.md go back to what they were, for J10, J11 and later runs.
+    const restored = await putBack(['model', 'memory', 'user']).catch((error: Error) => ({ ok: false, lines: [`the settings could not be put back: ${error.message}`] }));
+    note(testInfo, `put back in the finally: ${restored.lines.join('; ')}`);
+    proof.restore = restored;
+    await saveProof().catch(() => undefined);
+    if (completed && !restored.ok) throw new Error(`J12 could not put the settings back: ${restored.lines.join('; ')}`);
+  }
+});
+
 /**
  * J10's private-KB fact, asked in words no other step uses (J6 plants a project codename, J9 a dog's name),
  * so no other memory can answer it.
@@ -1293,202 +1815,233 @@ test('J10 persona builder in the Console: a skill and a private KB, saved not ac
     await expect(status, 'the save says it is not active').toContainText("It isn't active");
   };
 
-  await test.step('build persona A: the picked skill, a global KB if there is one, saved', async () => {
-    await build(A, 'Northwind', descA, { skill: picked, globalKb });
-    await shot(page, testInfo, 'built');
-  });
-
-  await test.step("A's private KB: created, a text source with the fact, ingested", async () => {
-    const pkbs = editor.getByTestId('ms-private-kbs');
-    await expect(pkbs, "once A is saved, the editor offers its own knowledge bases").toBeVisible();
-    await pkbs.getByTestId('ms-pkb-new-id').fill(KB);
-    const base = `/api/mindstone/admin/personas/${A}/knowledgebases`;
-    const created = await uiResponse(page, { method: 'POST', path: base }, () => pkbs.getByTestId('ms-pkb-create').click());
-    expect(created.status, `POST ${base}`).toBeLessThan(300);
-    const kb = pkbs.getByTestId(`ms-pkb-${KB}`);
-    await expect(kb).toContainText('not ingested yet');
-    const ingest = kb.getByTestId(`ms-pkb-${KB}-ingest`);
-    await expect(ingest, 'Ingest is disabled until the KB has a source').toBeDisabled();
-    await kb.getByTestId(`ms-pkb-${KB}-text-name`).fill('harbour');
-    await kb.getByTestId(`ms-pkb-${KB}-text`).fill(`The harbour lighthouse call sign is ${token}.\n`);
-    const added = await uiResponse(page, { method: 'POST', path: `${base}/${KB}/sources` }, () => kb.getByTestId(`ms-pkb-${KB}-add-text`).click());
-    expect(added.status, `POST ${base}/${KB}/sources (a text source)`).toBeLessThan(300);
-    await expect(kb, 'the source is listed').toContainText('harbour.md');
-    await expect(ingest, 'Ingest is enabled once the KB has a source').toBeEnabled();
-    await shot(page, testInfo, 'private-kb');
-    const ingested = await uiResponse(page, { method: 'POST', path: `${base}/${KB}/ingest`, timeoutMs: J10_INGEST_TIMEOUT_MS }, () => ingest.click());
-    const said = ((await pkbs.getByRole('status').allTextContents()).join(' | ') || '').trim();
-    expect(ingested.status, `POST ${base}/${KB}/ingest (the page says: "${said}")`).toBeLessThan(300);
-    await expect(pkbs.getByRole('status')).toContainText(/Ingested: [1-9]\d* entries/);
-    await expect(kb, 'the KB is listed as ingested').toContainText(/ingested, [1-9]\d* entries/);
-    await shot(page, testInfo, 'ingested');
-  });
-
-  await test.step('saving did not make A active; the gateway has its components', async () => {
-    const detail = await consoleApi<LoadedPersona>(page, 'GET', `/api/mindstone/admin/personas/${A}`);
-    proof.savedA = detail.json.persona;
-    await saveProof();
-    const persona = detail.json.persona;
-    expect(detail.status, `GET /api/mindstone/admin/personas/${A}`).toBe(200);
-    expect(persona?.skills, "A's skills are the picked one").toEqual([picked]);
-    expect(persona?.knowledgebases ?? [], "A's global KBs").toEqual(globalKb ? [globalKb] : []);
-    expect(persona?.privateKnowledgebases?.find((kb) => kb.id === KB)?.indexed, `A's private KB ${KB} is ingested`).toBe(true);
-    expect(persona?.active, 'A is not active').toBe(false);
-    expect((await listPersonas()).active ?? null, 'saving A left the active persona unchanged').toBe(activeBefore);
-    await editor.getByRole('button', { name: 'Close', exact: true }).click();
-    await expect(row(A)).toBeVisible();
-    await expect(row(A).getByText('Active', { exact: true }), 'the list does not mark A active').toHaveCount(0);
-    await shot(page, testInfo, 'not-active');
-  });
-
-  await test.step('build persona B, the control: no skills listed, no KB of its own', async () => {
-    await build(B, 'Southgate', 'The journey test control persona: no skills listed, no private knowledge base.');
-    await editor.getByRole('button', { name: 'Close', exact: true }).click();
-    expect((await listPersonas()).active ?? null, 'saving B left the active persona unchanged').toBe(activeBefore);
-  });
-
-  /** The Personas page's Make active, then the list and the gateway agree it is active. */
-  const makeActive = async (id: string) => {
-    await navigate(page, '/mindstone/personas');
-    await expect(row(id)).toBeVisible({ timeout: 30_000 });
-    const patched = await uiResponse(page, { method: 'PATCH', path: '/api/mindstone/admin/config/personas' }, () =>
-      row(id).getByRole('button', { name: 'Make active' }).click(),
-    );
-    expect(patched.status, `Make active ${id}: PATCH /api/mindstone/admin/config/personas`).toBeLessThan(300);
-    await expect(row(id).getByText('Active', { exact: true })).toBeVisible({ timeout: 15_000 });
-    expect((await listPersonas()).active, `${id} is the active persona`).toBe(id);
+  /**
+   * The active persona as it was before J10 (activeBefore), put back through the Console's admin API. Run in a
+   * finally: a failure after a Make active must not leave A or B active for J11 (lib/persona-builder-evidence.js
+   * personaRestore decides what to do, self-tested).
+   */
+  const restoreActivePersona = async (): Promise<{ ok: boolean; text: string }> => {
+    const listed = await listPersonas();
+    const plan = personaRestore({ before: activeBefore, now: listed.active ?? null, known: (listed.personas ?? []).map((p) => p.id) });
+    if (plan.action === 'none') return { ok: true, text: `active persona: ${activeBefore ?? 'none'}, as before J10` };
+    const config = await consoleApi<{ etag?: string }>(page, 'GET', '/api/mindstone/admin/config');
+    const query = config.json.etag ? `?ifMatch=${encodeURIComponent(config.json.etag)}` : '';
+    const patched = await consoleApi(page, 'PATCH', `/api/mindstone/admin/config/personas${query}`, { active: plan.active });
+    const now = (await listPersonas()).active ?? null;
+    const ok = patched.status < 300 && now === plan.active;
+    return {
+      ok,
+      text: `active persona ${listed.active ?? 'none'} put back to ${plan.active ?? 'none'} (${plan.why}) in the finally: PATCH config/personas HTTP ${patched.status}; now ${now ?? 'none'}${ok ? '' : ': NOT restored'}`,
+    };
   };
-  /** A fresh chat asking for the fact; the stored reply, and the gateway transcript's evidence for it. */
-  const ask = async (name: string) => {
-    await navigate(page, '/c/new');
-    await ensureMindStoneModel(page, testInfo);
-    const reply = await sendAndWaitForReply(page, J10_ASK);
-    await shot(page, testInfo, name);
-    await attachText(testInfo, `${name}.txt`, replyLog(reply));
-    return { reply, turn: personaTurnForConversation(reply.conversationId, token) };
-  };
-  const brief = (turn: PersonaTurnEvidence) => ({
-    persona: turn.personaId ?? null,
-    components: turn.components ?? null,
-    recallInTurn: turn.recallAt >= 0,
-    hits: turn.allHits.map((h) => h.id),
-    entriesWithToken: turn.withToken.map((i) => turn.outline[i]),
-    outline: turn.outline,
-  });
 
-  // The negative control first, while no chat has ever held the token: under B, A's private KB must not be searched.
-  const control = await test.step('isolation: under B, before any chat held the fact, no pkb hit from A and no fact', async () => {
-    await makeActive(B);
-    const { reply, turn } = await ask('control-chat');
-    const reasons = isolationReasons(turn, { builtPersonaId: A, controlPersonaId: B });
-    proof.control = { conversationId: reply.conversationId, ...brief(turn), reasons };
-    await saveProof();
-    note(testInfo, `control chat ${reply.conversationId} under ${B}: ${reasons.length ? `BROKEN: ${reasons.join('; ')}` : `no pkb:${A}: hit, no fact`}; reply "${reply.text.slice(0, 100)}"`);
-    expectAnswer(reply, 'the control chat under B');
-    expect(reply.text.toLowerCase(), "under B, the reply doesn't have A's fact").not.toContain(token);
-    expect(reasons, `the gateway transcript for the control chat (${reply.conversationId})`).toEqual([]);
-    return turn;
-  });
+  let completed = false;
+  try {
+    await test.step('build persona A: the picked skill, a global KB if there is one, saved', async () => {
+      await build(A, 'Northwind', descA, { skill: picked, globalKb });
+      await shot(page, testInfo, 'built');
+    });
 
-  const built = await test.step("A made active: a fresh chat's reply has the fact, from A's private KB, with only A's skill", async () => {
-    await makeActive(A);
-    const { reply, turn } = await ask('chat');
-    const reasons = builtPersonaReasons(turn, { personaId: A, kbId: KB });
-    proof.built = { conversationId: reply.conversationId, ...brief(turn), reasons };
-    await saveProof();
-    await gatewayExcerpt(testInfo, 40);
-    note(
-      testInfo,
-      `chat ${reply.conversationId} under ${A}: ${reasons.length ? `NOT proven: ${reasons.join('; ')}` : `persona ${turn.personaId}, recall hit ${turn.turnHits.filter((h) => h.id?.startsWith(`pkb:${A}:`)).map((h) => h.id).join(', ')}`}; ` +
-        `reply "${reply.text.slice(0, 100)}"`,
-    );
-    expect(reply.error, `the reply is not an error: ${(reply.errorText ?? '').slice(0, 300)}`).toBe(false);
-    expect(
-      reasons,
-      `the gateway transcript for the chat under A (${reply.conversationId}) proves the private KB supplied the fact: A answered (personaContext), ` +
-        `a pkb:${A}:${KB}: hit in the reply's own recall event, no other persona's private KB, the token in no other entry`,
-    ).toEqual([]);
-    expect(turn.components?.globalKnowledgebases, "A's turn searched its listed global KBs (every one when it lists none)").toEqual(globalKb ? [globalKb] : 'all');
-    expect(turn.components?.privateKnowledgebases, "A's turn searched its own private KBs").toBe('own');
-    if (PROVIDER === 'mock') {
-      // The mock route echoes; whether the reply uses the fact can't be judged. MOCK counts as not passed.
-      testInfo.annotations.push({ type: 'mock', description: 'mock provider' }, { type: 'label', description: 'MOCK' });
-    } else {
-      expect(reply.text.toLowerCase(), `the reply under A has the fact from its private KB (${token})`).toContain(token);
-      await expectOnScreen(page, token, "the fact in A's reply", { role: 'assistant', messageId: reply.messageId });
-    }
-    return turn;
-  });
+    await test.step("A's private KB: created, a text source with the fact, ingested", async () => {
+      const pkbs = editor.getByTestId('ms-private-kbs');
+      await expect(pkbs, "once A is saved, the editor offers its own knowledge bases").toBeVisible();
+      await pkbs.getByTestId('ms-pkb-new-id').fill(KB);
+      const base = `/api/mindstone/admin/personas/${A}/knowledgebases`;
+      const created = await uiResponse(page, { method: 'POST', path: base }, () => pkbs.getByTestId('ms-pkb-create').click());
+      expect(created.status, `POST ${base}`).toBeLessThan(300);
+      const kb = pkbs.getByTestId(`ms-pkb-${KB}`);
+      await expect(kb).toContainText('not ingested yet');
+      const ingest = kb.getByTestId(`ms-pkb-${KB}-ingest`);
+      await expect(ingest, 'Ingest is disabled until the KB has a source').toBeDisabled();
+      await kb.getByTestId(`ms-pkb-${KB}-text-name`).fill('harbour');
+      await kb.getByTestId(`ms-pkb-${KB}-text`).fill(`The harbour lighthouse call sign is ${token}.\n`);
+      const added = await uiResponse(page, { method: 'POST', path: `${base}/${KB}/sources` }, () => kb.getByTestId(`ms-pkb-${KB}-add-text`).click());
+      expect(added.status, `POST ${base}/${KB}/sources (a text source)`).toBeLessThan(300);
+      await expect(kb, 'the source is listed').toContainText('harbour.md');
+      await expect(ingest, 'Ingest is enabled once the KB has a source').toBeEnabled();
+      await shot(page, testInfo, 'private-kb');
+      const ingested = await uiResponse(page, { method: 'POST', path: `${base}/${KB}/ingest`, timeoutMs: J10_INGEST_TIMEOUT_MS }, () => ingest.click());
+      const said = ((await pkbs.getByRole('status').allTextContents()).join(' | ') || '').trim();
+      expect(ingested.status, `POST ${base}/${KB}/ingest (the page says: "${said}")`).toBeLessThan(300);
+      await expect(pkbs.getByRole('status')).toContainText(/Ingested: [1-9]\d* entries/);
+      await expect(kb, 'the KB is listed as ingested').toContainText(/ingested, [1-9]\d* entries/);
+      await shot(page, testInfo, 'ingested');
+    });
 
-  // Only the picked skill in A's prompt, from the turn records; B (none listed) is the positive control.
-  const skills = skillsVerdict({ picked, installed, built: built.components, control: control.components });
-  proof.skills = skills;
-  await saveProof();
-  note(testInfo, `skills: ${skills.reasons.length ? `NOT shown: ${skills.reasons.join('; ')}` : skills.provable ? `only ${picked} in A's prompt; ${skills.why}` : skills.why}`);
-  expect(skills.reasons, `only the picked skill (${picked}) is in A's prompt (personaComponents.skillsInPrompt)`).toEqual([]);
+    await test.step('saving did not make A active; the gateway has its components', async () => {
+      const detail = await consoleApi<LoadedPersona>(page, 'GET', `/api/mindstone/admin/personas/${A}`);
+      proof.savedA = detail.json.persona;
+      await saveProof();
+      const persona = detail.json.persona;
+      expect(detail.status, `GET /api/mindstone/admin/personas/${A}`).toBe(200);
+      expect(persona?.skills, "A's skills are the picked one").toEqual([picked]);
+      expect(persona?.knowledgebases ?? [], "A's global KBs").toEqual(globalKb ? [globalKb] : []);
+      expect(persona?.privateKnowledgebases?.find((kb) => kb.id === KB)?.indexed, `A's private KB ${KB} is ingested`).toBe(true);
+      expect(persona?.active, 'A is not active').toBe(false);
+      expect((await listPersonas()).active ?? null, 'saving A left the active persona unchanged').toBe(activeBefore);
+      await editor.getByRole('button', { name: 'Close', exact: true }).click();
+      await expect(row(A)).toBeVisible();
+      await expect(row(A).getByText('Active', { exact: true }), 'the list does not mark A active').toHaveCount(0);
+      await shot(page, testInfo, 'not-active');
+    });
 
-  await test.step('isolation again: back under B after the chat under A, no pkb hit from A', async () => {
-    await makeActive(B);
-    const { reply, turn } = await ask('control-after');
-    // A's reply is in the shared transcripts now (#125 design §2), so the fact may come back through transcript recall:
-    // only the private-KB rule is judged here, and a token in the reply is noted.
-    const reasons = isolationReasons(turn, { builtPersonaId: A, controlPersonaId: B, tokenMayLeak: true });
-    proof.controlAfter = { conversationId: reply.conversationId, ...brief(turn), reasons };
-    await saveProof();
-    note(
-      testInfo,
-      `control chat after A (${reply.conversationId}) under ${B}: ${reasons.length ? `BROKEN: ${reasons.join('; ')}` : `no pkb:${A}: hit`}` +
-        `${reply.text.toLowerCase().includes(token) ? '; the reply has the fact, through the shared transcripts, not the private KB' : '; the reply has no fact'}`,
-    );
-    expectAnswer(reply, 'the control chat under B, after A');
-    expect(reasons, `the gateway transcript for the second control chat (${reply.conversationId})`).toEqual([]);
-  });
+    await test.step('build persona B, the control: no skills listed, no KB of its own', async () => {
+      await build(B, 'Southgate', 'The journey test control persona: no skills listed, no private knowledge base.');
+      await editor.getByRole('button', { name: 'Close', exact: true }).click();
+      expect((await listPersonas()).active ?? null, 'saving B left the active persona unchanged').toBe(activeBefore);
+    });
 
-  await test.step('edit A: a new description, saved, still there after a reload', async () => {
-    const edited = `${descA} Edited ${stamp}.`;
-    await navigate(page, '/mindstone/personas');
-    await page.getByTestId(`ms-persona-edit-${A}`).click();
-    await expect(editor.getByTestId('ms-pe-description'), 'the editor loads A').toHaveValue(descA, { timeout: 30_000 });
-    await expect(editor.getByTestId(`ms-skill-picker-selected-${picked}`), 'the editor shows A\'s skill').toBeVisible();
-    await editor.getByTestId('ms-pe-description').fill(edited);
-    const patched = await uiResponse(page, { method: 'PATCH', path: `/api/mindstone/admin/personas/${A}` }, () => editor.getByTestId('ms-pe-save').click());
-    expect(patched.status, `PATCH /api/mindstone/admin/personas/${A}`).toBeLessThan(300);
-    await expect(editor.getByRole('status').filter({ hasText: /^Saved\./ }), 'the edit is saved, and A is still not active').toContainText("It isn't active");
-    await shot(page, testInfo, 'edited');
-    await navigate(page, '/mindstone/personas');
-    await expect(row(A), 'the list shows the new description after a reload').toContainText(edited);
-    await page.getByTestId(`ms-persona-edit-${A}`).click();
-    await expect(editor.getByTestId('ms-pe-description'), 'the editor shows the new description after a reload').toHaveValue(edited, { timeout: 30_000 });
-    await expect(editor.getByTestId(`ms-skill-picker-selected-${picked}`), 'the skill is kept').toBeVisible();
-    await expect(editor.getByTestId(`ms-pkb-${KB}`), 'the private KB is kept, ingested').toContainText(/ingested, [1-9]\d* entries/);
-    await shot(page, testInfo, 'reloaded');
-    const reread = await consoleApi<LoadedPersona>(page, 'GET', `/api/mindstone/admin/personas/${A}`);
-    proof.editedA = reread.json.persona;
-    await saveProof();
-    expect(reread.json.persona?.description, "the gateway has A's new description").toBe(edited);
-    expect(reread.json.persona?.skills, "the edit kept A's skill").toEqual([picked]);
-    expect((await listPersonas()).active, 'editing A did not make it active').toBe(B);
-    await editor.getByRole('button', { name: 'Close', exact: true }).click();
-  });
-
-  // Put the active persona back as it was, through the same page (J11 and later runs shouldn't answer as B).
-  await test.step('the active persona put back', async () => {
-    if (activeBefore && (await listPersonas()).personas?.some((p) => p.id === activeBefore)) {
-      await makeActive(activeBefore);
-    } else {
+    /** The Personas page's Make active, then the list and the gateway agree it is active. */
+    const makeActive = async (id: string) => {
       await navigate(page, '/mindstone/personas');
-      await page.getByRole('button', { name: 'Use no persona' }).click();
-      await expect.poll(async () => (await listPersonas()).active ?? null, { timeout: 15_000 }).toBe(null);
-    }
-    note(testInfo, `active persona put back to ${activeBefore ?? 'none'}`);
-  });
+      await expect(row(id)).toBeVisible({ timeout: 30_000 });
+      const patched = await uiResponse(page, { method: 'PATCH', path: '/api/mindstone/admin/config/personas' }, () =>
+        row(id).getByRole('button', { name: 'Make active' }).click(),
+      );
+      expect(patched.status, `Make active ${id}: PATCH /api/mindstone/admin/config/personas`).toBeLessThan(300);
+      await expect(row(id).getByText('Active', { exact: true })).toBeVisible({ timeout: 15_000 });
+      expect((await listPersonas()).active, `${id} is the active persona`).toBe(id);
+    };
+    /** A fresh chat asking for the fact; the stored reply, and the gateway transcript's evidence for it. */
+    const ask = async (name: string) => {
+      await navigate(page, '/c/new');
+      await ensureMindStoneModel(page, testInfo);
+      const reply = await sendAndWaitForReply(page, J10_ASK);
+      await shot(page, testInfo, name);
+      await attachText(testInfo, `${name}.txt`, replyLog(reply));
+      return { reply, turn: personaTurnForConversation(reply.conversationId, token) };
+    };
+    const brief = (turn: PersonaTurnEvidence) => ({
+      persona: turn.personaId ?? null,
+      components: turn.components ?? null,
+      recallInTurn: turn.recallAt >= 0,
+      hits: turn.allHits.map((h) => h.id),
+      entriesWithToken: turn.withToken.map((i) => turn.outline[i]),
+      outline: turn.outline,
+    });
 
-  if (!skills.provable) {
-    test.fixme(
-      true,
-      `PENDING ${ISSUES.personaBuilder} (skills part): everything else passed, but ${skills.why}. ` +
-        "Done when: with a second skill installed (J7 installs two), A's prompt holds only the picked one.",
-    );
+    // The negative control first, while no chat has ever held the token: under B, A's private KB must not be searched.
+    const control = await test.step('isolation: under B, before any chat held the fact, no pkb hit from A and no fact', async () => {
+      await makeActive(B);
+      const { reply, turn } = await ask('control-chat');
+      const reasons = isolationReasons(turn, { builtPersonaId: A, controlPersonaId: B });
+      proof.control = { conversationId: reply.conversationId, ...brief(turn), reasons };
+      await saveProof();
+      note(testInfo, `control chat ${reply.conversationId} under ${B}: ${reasons.length ? `BROKEN: ${reasons.join('; ')}` : `no pkb:${A}: hit, no fact`}; reply "${reply.text.slice(0, 100)}"`);
+      expectAnswer(reply, 'the control chat under B');
+      expect(reply.text.toLowerCase(), "under B, the reply doesn't have A's fact").not.toContain(token);
+      expect(reasons, `the gateway transcript for the control chat (${reply.conversationId})`).toEqual([]);
+      return turn;
+    });
+
+    const built = await test.step("A made active: a fresh chat's reply has the fact, from A's private KB, with only A's skill", async () => {
+      await makeActive(A);
+      const { reply, turn } = await ask('chat');
+      const reasons = builtPersonaReasons(turn, { personaId: A, kbId: KB });
+      proof.built = { conversationId: reply.conversationId, ...brief(turn), reasons };
+      await saveProof();
+      await gatewayExcerpt(testInfo, 40);
+      note(
+        testInfo,
+        `chat ${reply.conversationId} under ${A}: ${reasons.length ? `NOT proven: ${reasons.join('; ')}` : `persona ${turn.personaId}, recall hit ${turn.turnHits.filter((h) => h.id?.startsWith(`pkb:${A}:`)).map((h) => h.id).join(', ')}`}; ` +
+          `reply "${reply.text.slice(0, 100)}"`,
+      );
+      expect(reply.error, `the reply is not an error: ${(reply.errorText ?? '').slice(0, 300)}`).toBe(false);
+      expect(
+        reasons,
+        `the gateway transcript for the chat under A (${reply.conversationId}) proves the private KB supplied the fact: A answered (personaContext), ` +
+          `a pkb:${A}:${KB}: hit in the reply's own recall event, no other persona's private KB, the token in no other entry`,
+      ).toEqual([]);
+      expect(turn.components?.globalKnowledgebases, "A's turn searched its listed global KBs (every one when it lists none)").toEqual(globalKb ? [globalKb] : 'all');
+      expect(turn.components?.privateKnowledgebases, "A's turn searched its own private KBs").toBe('own');
+      if (PROVIDER === 'mock') {
+        // The mock route echoes; whether the reply uses the fact can't be judged. MOCK counts as not passed.
+        testInfo.annotations.push({ type: 'mock', description: 'mock provider' }, { type: 'label', description: 'MOCK' });
+      } else {
+        expect(reply.text.toLowerCase(), `the reply under A has the fact from its private KB (${token})`).toContain(token);
+        await expectOnScreen(page, token, "the fact in A's reply", { role: 'assistant', messageId: reply.messageId });
+      }
+      return turn;
+    });
+
+    // Only the picked skill in A's prompt, from the turn records; B (none listed) is the positive control.
+    const skills = skillsVerdict({ picked, installed, built: built.components, control: control.components });
+    proof.skills = skills;
+    await saveProof();
+    note(testInfo, `skills: ${skills.reasons.length ? `NOT shown: ${skills.reasons.join('; ')}` : skills.provable ? `only ${picked} in A's prompt; ${skills.why}` : skills.why}`);
+    expect(skills.reasons, `only the picked skill (${picked}) is in A's prompt (personaComponents.skillsInPrompt)`).toEqual([]);
+
+    await test.step('isolation again: back under B after the chat under A, no pkb hit from A', async () => {
+      await makeActive(B);
+      const { reply, turn } = await ask('control-after');
+      // A's reply is in the shared transcripts now (#125 design §2), so the fact may come back through transcript recall:
+      // only the private-KB rule is judged here, and a token in the reply is noted.
+      const reasons = isolationReasons(turn, { builtPersonaId: A, controlPersonaId: B, tokenMayLeak: true });
+      proof.controlAfter = { conversationId: reply.conversationId, ...brief(turn), reasons };
+      await saveProof();
+      note(
+        testInfo,
+        `control chat after A (${reply.conversationId}) under ${B}: ${reasons.length ? `BROKEN: ${reasons.join('; ')}` : `no pkb:${A}: hit`}` +
+          `${reply.text.toLowerCase().includes(token) ? '; the reply has the fact, through the shared transcripts, not the private KB' : '; the reply has no fact'}`,
+      );
+      expectAnswer(reply, 'the control chat under B, after A');
+      expect(reasons, `the gateway transcript for the second control chat (${reply.conversationId})`).toEqual([]);
+    });
+
+    await test.step('edit A: a new description, saved, still there after a reload', async () => {
+      const edited = `${descA} Edited ${stamp}.`;
+      await navigate(page, '/mindstone/personas');
+      await page.getByTestId(`ms-persona-edit-${A}`).click();
+      await expect(editor.getByTestId('ms-pe-description'), 'the editor loads A').toHaveValue(descA, { timeout: 30_000 });
+      await expect(editor.getByTestId(`ms-skill-picker-selected-${picked}`), 'the editor shows A\'s skill').toBeVisible();
+      await editor.getByTestId('ms-pe-description').fill(edited);
+      const patched = await uiResponse(page, { method: 'PATCH', path: `/api/mindstone/admin/personas/${A}` }, () => editor.getByTestId('ms-pe-save').click());
+      expect(patched.status, `PATCH /api/mindstone/admin/personas/${A}`).toBeLessThan(300);
+      await expect(editor.getByRole('status').filter({ hasText: /^Saved\./ }), 'the edit is saved, and A is still not active').toContainText("It isn't active");
+      await shot(page, testInfo, 'edited');
+      await navigate(page, '/mindstone/personas');
+      await expect(row(A), 'the list shows the new description after a reload').toContainText(edited);
+      await page.getByTestId(`ms-persona-edit-${A}`).click();
+      await expect(editor.getByTestId('ms-pe-description'), 'the editor shows the new description after a reload').toHaveValue(edited, { timeout: 30_000 });
+      await expect(editor.getByTestId(`ms-skill-picker-selected-${picked}`), 'the skill is kept').toBeVisible();
+      await expect(editor.getByTestId(`ms-pkb-${KB}`), 'the private KB is kept, ingested').toContainText(/ingested, [1-9]\d* entries/);
+      await shot(page, testInfo, 'reloaded');
+      const reread = await consoleApi<LoadedPersona>(page, 'GET', `/api/mindstone/admin/personas/${A}`);
+      proof.editedA = reread.json.persona;
+      await saveProof();
+      expect(reread.json.persona?.description, "the gateway has A's new description").toBe(edited);
+      expect(reread.json.persona?.skills, "the edit kept A's skill").toEqual([picked]);
+      expect((await listPersonas()).active, 'editing A did not make it active').toBe(B);
+      await editor.getByRole('button', { name: 'Close', exact: true }).click();
+    });
+
+    // Put the active persona back as it was, through the same page (J11 and later runs shouldn't answer as B).
+    await test.step('the active persona put back', async () => {
+      if (activeBefore && (await listPersonas()).personas?.some((p) => p.id === activeBefore)) {
+        await makeActive(activeBefore);
+      } else {
+        await navigate(page, '/mindstone/personas');
+        await page.getByRole('button', { name: 'Use no persona' }).click();
+        await expect.poll(async () => (await listPersonas()).active ?? null, { timeout: 15_000 }).toBe(null);
+      }
+      note(testInfo, `active persona put back to ${activeBefore ?? 'none'}`);
+    });
+
+    completed = true;
+    if (!skills.provable) {
+      test.fixme(
+        true,
+        `PENDING ${ISSUES.personaBuilder} (skills part): everything else passed, but ${skills.why}. ` +
+          "Done when: with a second skill installed (J7 installs two), A's prompt holds only the picked one.",
+      );
+    }
+  } finally {
+    const restored = await restoreActivePersona().catch((error: Error) => ({ ok: false, text: `the active persona could not be put back: ${error.message}` }));
+    note(testInfo, restored.text);
+    proof.restore = restored;
+    await saveProof().catch(() => undefined);
+    // A step that otherwise passed (or ended PENDING) fails when it leaves the wrong persona active; a failure above keeps its own error.
+    if (completed && !restored.ok) throw new Error(`J10 left the wrong active persona behind: ${restored.text}`);
   }
 });
 

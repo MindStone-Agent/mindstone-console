@@ -263,17 +263,18 @@ try {
   check(out('gate_required_steps 1').replace(/ J11$/, '') === out('gate_required_steps 0') && out('gate_required_steps 0').split(' ').length === 24, 'gate.sh: the flag adds J11 and nothing else to the 24 rows');
   const demo = ` ${out('gate_demo_steps')} `;
   check(!demo.includes(' J11 ') && !demo.includes(' J7 ') && !demo.includes(' J8 ') && demo.includes(' J9 ') && demo.includes(' J6 ') && demo.includes(' X5 '), 'gate.sh: the demo subset is J1-J6, J9 and S/C/X, never J11');
-  // (J10's own flag is set here, so only J11's is judged; lib/persona-builder.selftest.mjs covers J10.)
-  check(out('gate_uncounted 0 1') === 'J11' && out('gate_uncounted 1 1') === '' && ` ${out('echo "$GATE_DEMO_UNCOUNTED"')} `.includes(' J11 '), 'gate.sh: J11 is uncounted by the gate without the flag, counted with it, and always uncounted by the demo');
+  // (J10's and J12's own flags are set here, so only J11's is judged; lib/persona-builder.selftest.mjs covers J10,
+  // lib/settings-parity.selftest.mjs J12.)
+  check(out('gate_uncounted 0 1 1') === 'J11' && out('gate_uncounted 1 1 1') === '' && ` ${out('echo "$GATE_DEMO_UNCOUNTED"')} `.includes(' J11 '), 'gate.sh: J11 is uncounted by the gate without the flag, counted with it, and always uncounted by the demo');
   fs.writeFileSync(results, JSON.stringify(report([...passing, j11('failed', [at(SPEC, 1250)])])));
   const glog = path.join(dir, 'gate-rows.log');
   check(rc(`pw_explained_by 1 "${results}" "${glog}" J11`) === 0, 'gate.sh: pw_explained_by excuses exit 1 when only J11 failed and J11 is uncounted');
-  check(rc(`pw_explained_by 1 "${results}" "${glog}" $(gate_uncounted 1 1)`) === 1, 'gate.sh: with the flag (nothing uncounted) the same exit is not excused');
+  check(rc(`pw_explained_by 1 "${results}" "${glog}" $(gate_uncounted 1 1 1)`) === 1, 'gate.sh: with the flag (nothing uncounted) the same exit is not excused');
   check(rc(`pw_explained_by 0 "${results}" "${glog}" J11`) === 1 && rc(`pw_explained_by 2 "${results}" "${glog}" J11`) === 1, 'gate.sh: pw_explained_by never excuses exit 0 (needs none) or another exit code');
   fs.writeFileSync(results, JSON.stringify(report([...passing, j11('failed', [at(SPEC, 134, 'afterAll boom')])])));
   check(rc(`pw_explained_by 1 "${results}" "${glog}" J11`) === 1, "gate.sh: pw_explained_by doesn't excuse an afterAll error charged to J11");
   fs.writeFileSync(stalls, 'J4\tSTALL: GET /api/messages\nJ11\tSTALL: navigation to /mindstone\nJ11\tSTALL: POST /api/x\n');
-  check(out(`stalls_counted "${stalls}" J11`) === '1' && out(`stalls_counted "${stalls}"`) === '3' && out(`stalls_counted "${stalls}" $(gate_uncounted 1 1)`) === '3', 'gate.sh: J11 stalls are left out only where J11 is uncounted');
+  check(out(`stalls_counted "${stalls}" J11`) === '1' && out(`stalls_counted "${stalls}"`) === '3' && out(`stalls_counted "${stalls}" $(gate_uncounted 1 1 1)`) === '3', 'gate.sh: J11 stalls are left out only where J11 is uncounted');
   check(out(`stalls_counted "${path.join(dir, 'none.tsv')}" J11`) === '0', 'gate.sh: no stalls file counts 0');
 } finally {
   await stub.close();

@@ -1,11 +1,11 @@
 // Whether Playwright's non-zero exit is explained by steps a verdict doesn't
 // count. The gate requires "Playwright exited 0", but a step outside a verdict
 // (J10 when UAT_EXPECT_PERSONA_BUILDER isn't set, J11 when UAT_EXPECT_ENTERPRISE
-// isn't; both always, for the DEMO SUBSET) must not decide it through the exit
-// code either. This reads Playwright's
-// json report and answers: every failed test is one of <ids>, each failed only
-// on its own errors, and there is no error outside a test (global setup, a
-// worker crash).
+// isn't, J12 when UAT_EXPECT_SETTINGS_PARITY isn't; all three always, for the
+// DEMO SUBSET) must not decide it through the exit code either. This reads
+// Playwright's json report and answers: every failed test is one of <ids>,
+// each failed only on its own errors, and there is no error outside a test
+// (global setup, a worker crash).
 //
 // "Its own errors": Playwright charges an error in a hook to a test (an
 // afterAll error goes to the worker's LAST test, which is J11; an afterEach
@@ -19,8 +19,8 @@
 // Exit 0: explained (the failures are all in <ids>); 1: not explained (a
 // failure elsewhere, a top-level error, no failures at all to explain it, or
 // an unreadable report); the reason on stdout. With no ids, nothing is
-// explained. Shared with lib/enterprise.selftest.mjs and
-// lib/persona-builder.selftest.mjs.
+// explained. Shared with lib/enterprise.selftest.mjs,
+// lib/persona-builder.selftest.mjs and lib/settings-parity.selftest.mjs.
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 

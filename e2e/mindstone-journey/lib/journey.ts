@@ -760,6 +760,26 @@ export function personaForConversation(conversationId: string): { found: boolean
   return { found: true, personaId: persona?.injected ? persona.personaId : undefined };
 }
 
+/**
+ * Which model answered a Console conversation's latest turn (J12): like answeredBy, but found by
+ * conversation (the last assistant entry of its gateway transcript), not by the reply's opening words,
+ * so an earlier reply that starts the same way can't stand in for it.
+ */
+export function answeredInConversation(conversationId: string): AnsweredBy | undefined {
+  const assistants = conversationEntries(conversationId).filter((e) => e.role === 'assistant') as Array<SessionEntry & TranscriptLine>;
+  const latest = assistants[assistants.length - 1];
+  if (!latest) return undefined;
+  const pi = latest.metadata?.providerDiagnostics?.piSession;
+  const result: AnsweredBy = {
+    gatewayProvider: latest.metadata?.provider,
+    gatewayModel: latest.metadata?.model,
+    modelFallbackMessage: pi?.modelFallbackMessage,
+    sessionFile: pi?.sessionFile ? path.basename(pi.sessionFile) : undefined,
+  };
+  if (pi?.sessionFile && fs.existsSync(pi.sessionFile)) Object.assign(result, lastModelPair(pi.sessionFile));
+  return result;
+}
+
 export type RecallEvidence = {
   entries: number;
   sessionKey?: string;
@@ -802,7 +822,7 @@ export function recallIndexExists(): boolean {
 // Out of process: Playwright's loader hook can't load node:sqlite in the test process (lib/recall-index.js).
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { queryRecallIndex } = require('./recall-index.js') as {
-  queryRecallIndex: (dbPath: string, mode: 'embedded' | 'chunks', args: string[]) => Record<string, unknown>[];
+  queryRecallIndex: (dbPath: string, mode: 'embedded' | 'chunks' | 'dims', args: string[]) => Record<string, unknown>[];
 };
 
 /** Recall-index chunks whose text holds `token` and that are embedded (embedding_json set): the fact is ready to recall. */
@@ -814,6 +834,27 @@ export function embeddedChunksWith(token: string): { chunkId: string; kind: stri
     kind: String(r.kind),
     path: r.path === null || r.path === undefined ? null : String(r.path),
   }));
+}
+
+export type IndexDims = { present: boolean; byDims: Record<string, number>; pending: number; unreadable: number };
+
+/**
+ * The recall index's chunks counted by their vector's size (J12): `byDims`
+ * maps a size to its embedded chunks, `pending` counts chunks not embedded
+ * yet, `unreadable` vectors that aren't valid JSON. An absent index is
+ * `present: false`; one that can't be read throws (the caller keeps it a FAIL).
+ */
+export function recallIndexDims(): IndexDims {
+  const file = recallIndexPath();
+  if (!fs.existsSync(file)) return { present: false, byDims: {}, pending: 0, unreadable: 0 };
+  const out: IndexDims = { present: true, byDims: {}, pending: 0, unreadable: 0 };
+  for (const row of queryRecallIndex(file, 'dims', [])) {
+    const n = Number(row.n ?? 0);
+    if (row.dims === null || row.dims === undefined) out.pending += n;
+    else if (Number(row.dims) < 0) out.unreadable += n;
+    else out.byDims[String(row.dims)] = n;
+  }
+  return out;
 }
 
 /**
@@ -989,8 +1030,13 @@ const personaBuilder = require('./persona-builder-evidence.js') as {
     why: string;
     reasons: string[];
   };
+  personaRestore: (arg: { before: string | null; now: string | null; known: string[] }) => {
+    action: 'none' | 'activate' | 'clear';
+    active: string | null;
+    why: string;
+  };
 };
-export const { j10Decision, builtPersonaReasons, isolationReasons, skillsVerdict } = personaBuilder;
+export const { j10Decision, builtPersonaReasons, isolationReasons, skillsVerdict, personaRestore } = personaBuilder;
 
 /** A Console conversation's gateway transcript, read for its latest reply's persona, components and recall hits (J10). */
 export function personaTurnForConversation(conversationId: string, token: string): PersonaTurnEvidence {
@@ -1088,6 +1134,43 @@ export async function waitForStubProof(
     await page.waitForTimeout(1_000);
   }
 }
+
+// J12 (settings parity, MindStone-Agent #140). Shared with lib/settings-parity.selftest.mjs, so the self-test runs the
+// same PENDING decision, parity table rule, model pick and match, and embedding-change judgement.
+export type ParityRow = {
+  step: string;
+  kind: 'change' | 'in-place' | 'none';
+  /** What Settings shows for it (the saved value, or the control's state). */
+  shows?: string;
+  href?: string;
+  control?: boolean;
+  /** Whether following the Change link opened just that step (and why not). */
+  opened?: boolean;
+  openedWhy?: string;
+};
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const settingsParity = require('./settings-parity-evidence.js') as {
+  SETUP_STEPS: string[];
+  CHANGE_STEPS: Record<string, string>;
+  IN_PLACE_STEPS: Record<string, string>;
+  changeHref: (change: string) => string;
+  j12Decision: (arg: { settingsShown: boolean; sectionPresent: boolean; expectParity: boolean; gatewayRoute?: boolean }) => {
+    verdict: 'run' | 'pending' | 'fail';
+    why: string;
+  };
+  parityReasons: (rows: ParityRow[]) => string[];
+  isCloudModel: (id: string) => boolean;
+  pickAlternateModel: (values: string[], current: string | undefined) => string | undefined;
+  modelMatchReasons: (arg: { chosen: string; saved?: string; shown?: string; answered?: AnsweredBy }) => string[];
+  memoryChangeVerdict: (arg: {
+    before: { spec?: string; dims?: number };
+    after: { spec?: string; dims?: number };
+    warned?: string;
+    index?: IndexDims;
+  }) => { verdict: 'pass' | 'fail'; why: string; stale: number };
+};
+export const { SETUP_STEPS, CHANGE_STEPS, IN_PLACE_STEPS, changeHref, j12Decision, parityReasons, pickAlternateModel, modelMatchReasons, memoryChangeVerdict } =
+  settingsParity;
 
 /** Text that means the Console showed an error, not an answer. */
 export const ERROR_REPLY =
