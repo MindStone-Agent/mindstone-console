@@ -3261,6 +3261,8 @@
   "com_mindstone_ent_credentials": "Sign in with",
   "com_mindstone_ent_missing": "Still needed: {{0}}",
   "com_mindstone_ent_register": "Save endpoint",
+  "com_mindstone_ent_planned_title": "Other sign-in options",
+  "com_mindstone_ent_planned": "Not available yet",
   "com_mindstone_ent_registered": "Saved {{0}}: {{1}} models, sent to {{2}}.",
   "com_mindstone_ent_test": "Test",
   "com_mindstone_ent_testing": "Testing…",

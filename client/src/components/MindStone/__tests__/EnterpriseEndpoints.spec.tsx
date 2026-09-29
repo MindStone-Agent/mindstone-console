@@ -41,6 +41,14 @@ const AZURE: EnterpriseKind = {
     { name: 'models', label: 'Deployment names', type: 'list', required: true },
     { name: 'apiVersion', label: 'API version', type: 'text', required: false },
     { name: 'secret', label: 'API key', type: 'secret', required: true },
+    {
+      name: 'entraIdentity',
+      label: 'Microsoft Entra ID / managed identity',
+      type: 'text',
+      required: false,
+      planned: true,
+      hint: 'Not available yet: an API key for now',
+    },
   ],
 };
 const BEDROCK: EnterpriseKind = {
@@ -502,5 +510,39 @@ describe('memory through an enterprise endpoint', () => {
     expect(
       screen.getByRole('radio', { name: 'com_mindstone_onb_embed_ollama' }),
     ).toBeInTheDocument();
+  });
+});
+
+describe('auth options that are not available yet (MindStone-Agent #140)', () => {
+  it('are shown disabled and marked, never required, and never sent', async () => {
+    mockPost.mockResolvedValue({
+      ok: true,
+      providerId: 'enterprise-azure',
+      host: 'res.openai.azure.com',
+      models: ['enterprise-azure/gpt-4o'],
+    });
+    renderProviders();
+    fireEvent.click(await screen.findByRole('radio', { name: 'Azure OpenAI / AI Foundry' }));
+    const planned = screen.getByTestId('ms-ent-planned-azure-openai');
+    expect(within(planned).getByText('com_mindstone_ent_planned')).toBeInTheDocument();
+    expect(within(planned).getByRole('textbox')).toBeDisabled();
+    expect(missingFields(AZURE, { endpoint: 'e', models: 'm', secret: 'k' }, undefined)).toEqual(
+      [],
+    );
+    // planned wins even if a field also claims to be required
+    const claimsRequired = {
+      ...AZURE,
+      fields: AZURE.fields.map((f) => (f.planned ? { ...f, required: true } : f)),
+    };
+    expect(
+      missingFields(claimsRequired, { endpoint: 'e', models: 'm', secret: 'k' }, undefined),
+    ).toEqual([]);
+    const plan = registrationPlan(
+      AZURE,
+      { endpoint: 'e', models: 'm', secret: 'k', entraIdentity: 'x' },
+      undefined,
+      [],
+    );
+    expect(plan.body).not.toHaveProperty('entraIdentity');
   });
 });
