@@ -55,6 +55,30 @@ const ALLOWED = [
   { method: 'POST', path: /^memory\/check$/ },
   { method: 'POST', path: /^memory\/pull$/ },
   { method: 'GET', path: /^personas$/ },
+  // The persona builder (MindStone-Agent #125): personas, workflows, the
+  // global KB list, and a persona's private knowledge bases.
+  { method: 'POST', path: /^personas$/ },
+  { method: 'GET', path: /^personas\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/ },
+  { method: 'PATCH', path: /^personas\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/ },
+  { method: 'GET', path: /^workflows$/ },
+  { method: 'POST', path: /^workflows$/ },
+  { method: 'GET', path: /^workflows\/[a-z0-9][a-z0-9-]{0,39}$/ },
+  { method: 'PATCH', path: /^workflows\/[a-z0-9][a-z0-9-]{0,39}$/ },
+  { method: 'GET', path: /^knowledgebases$/ },
+  { method: 'GET', path: /^personas\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\/knowledgebases$/ },
+  { method: 'POST', path: /^personas\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\/knowledgebases$/ },
+  {
+    method: 'GET',
+    path: /^personas\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\/knowledgebases\/[a-z0-9][a-z0-9-]{0,39}\/sources$/,
+  },
+  {
+    method: 'POST',
+    path: /^personas\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\/knowledgebases\/[a-z0-9][a-z0-9-]{0,39}\/sources$/,
+  },
+  {
+    method: 'POST',
+    path: /^personas\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\/knowledgebases\/[a-z0-9][a-z0-9-]{0,39}\/ingest$/,
+  },
 ];
 
 /**
@@ -64,6 +88,12 @@ const ALLOWED = [
  */
 const TIMEOUT_MS = 15_000;
 const ROUTE_TIMEOUT_MS = { 'memory/check': 25_000, 'memory/pull': 16 * 60_000 };
+/**
+ * A private KB's ingest fetches its URL sources one after another (at most
+ * 10, 20 s each on the gateway), so it gets four minutes (#125).
+ */
+const INGEST_PATH = /^personas\/[A-Za-z0-9._-]+\/knowledgebases\/[a-z0-9-]+\/ingest$/;
+const INGEST_TIMEOUT_MS = 4 * 60_000;
 
 /** Gateway base URL: MINDSTONE_GATEWAY_URL is the OpenAI base (…/v1); the admin API sits at the root. */
 function gatewayBase() {
@@ -153,7 +183,9 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
       // Never follow a redirect: fetch would carry the admin credential (and
       // the body, which can hold a secret) to wherever it points.
       redirect: 'error',
-      signal: AbortSignal.timeout(ROUTE_TIMEOUT_MS[path] ?? TIMEOUT_MS),
+      signal: AbortSignal.timeout(
+        ROUTE_TIMEOUT_MS[path] ?? (INGEST_PATH.test(path) ? INGEST_TIMEOUT_MS : TIMEOUT_MS),
+      ),
     });
     const text = await response.text();
     if (response.status === 401) {
