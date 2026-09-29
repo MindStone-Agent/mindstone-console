@@ -57,10 +57,18 @@ type EmbedKind = 'ollama' | 'openai' | 'openai-compatible' | EnterpriseEmbedKind
 /** Embeddings through an enterprise endpoint registered in the provider step (MindStone-Agent #126). */
 type EnterpriseEmbedKind = 'enterprise-azure' | 'enterprise-openai';
 type Connector = 'telegram' | 'slack' | 'discord';
-type MemoryCheck = { spec: string; ok: boolean; text: string; missingModel?: boolean };
+type MemoryCheck = {
+  spec: string;
+  ok: boolean;
+  text: string;
+  missingModel?: boolean;
+  /** Memories another model embedded (MindStone-Agent #140): embedded again after a switch. */
+  reembed?: number;
+};
 type MemoryCheckResult = {
   ok: boolean;
   dimensions?: number;
+  index?: { embedded?: number; otherModel?: number };
   error?: string;
   missingModel?: boolean;
 };
@@ -540,6 +548,10 @@ export default function MindStoneOnboardingView() {
               spec,
               ok: true,
               text: localize('com_mindstone_onb_memory_ok', { 0: String(result.dimensions) }),
+              reembed:
+                typeof result.index?.otherModel === 'number' && result.index.otherModel > 0
+                  ? result.index.otherModel
+                  : undefined,
             }
           : {
               spec,
@@ -1232,6 +1244,11 @@ export default function MindStoneOnboardingView() {
                 </span>
               )}
             </div>
+            {!pulling && currentCheck?.ok && currentCheck.reembed !== undefined && (
+              <p className="mb-3 text-sm text-text-secondary" data-testid="ms-onb-memory-reembed">
+                {localize('com_mindstone_onb_memory_reembed', { 0: String(currentCheck.reembed) })}
+              </p>
+            )}
             <div className="flex gap-2">
               {!changing && (
                 <button

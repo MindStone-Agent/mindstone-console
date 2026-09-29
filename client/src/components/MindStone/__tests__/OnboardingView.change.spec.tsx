@@ -138,6 +138,35 @@ describe('changing one setup choice', () => {
     ).toBeInTheDocument();
   });
 
+  it('says how many memories another embedding model made, before the switch is saved', async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/memory/check`) {
+        return { ok: true, dimensions: 1024, index: { embedded: 7, otherModel: 5 } };
+      }
+      throw new Error(`unexpected POST ${url}`);
+    });
+    renderAt('change=memory&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    expect(await screen.findByTestId('ms-onb-memory-reembed')).toHaveTextContent(
+      'com_mindstone_onb_memory_reembed 5',
+    );
+  });
+
+  it("says nothing about re-embedding when no memory is another model's", async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/memory/check`) {
+        return { ok: true, dimensions: 768, index: { embedded: 7, otherModel: 0 } };
+      }
+      throw new Error(`unexpected POST ${url}`);
+    });
+    renderAt('change=memory&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    await screen.findByText('com_mindstone_onb_memory_ok 768');
+    expect(screen.queryByTestId('ms-onb-memory-reembed')).toBeNull();
+  });
+
   it('asks for advanced settings first, then opens the step being changed', async () => {
     advancedSettings = false;
     renderAt('change=model&from=settings');
