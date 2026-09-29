@@ -97,13 +97,6 @@ const approve = (section: HTMLElement) => {
   );
 };
 
-const plainA = {
-  ...skillCard,
-  id: A,
-  parentApprovalId: undefined,
-  summary: 'install skill alpha: Alpha',
-  skill: { id: 'alpha', label: 'Alpha', description: 'A skill.', instructions: '# Alpha' },
-};
 const plainB = {
   ...skillCard,
   id: B,
@@ -116,71 +109,6 @@ describe('MindStone approvals: a decision in flight never touches another card (
   afterEach(() => {
     mockGet.mockReset();
     mockPost.mockReset();
-  });
-
-  it("A's skill_exists refusal arriving while B's confirm is open must not offer Replace on B", async () => {
-    mockGet.mockImplementation((url: string) => {
-      if (url.endsWith(`/approvals/${A}`)) return Promise.resolve({ action: plainA });
-      if (url.endsWith(`/approvals/${B}`)) return Promise.resolve({ action: plainB });
-      return Promise.resolve(list([plainA, plainB]));
-    });
-    const post = deferred();
-    mockPost.mockReturnValue(post.promise);
-    renderPage();
-    fireEvent.click(await screen.findByText(plainA.summary));
-    approve(await screen.findByRole('region', { name: plainA.summary }));
-    // Approve of A is in flight (e.g. waiting on the admin write lock). Owner moves to B.
-    fireEvent.click(screen.getByText(plainB.summary));
-    const b = await screen.findByRole('region', { name: plainB.summary });
-    fireEvent.click(within(b).getByRole('button', { name: 'com_mindstone_appr_approve' }));
-    await act(async () => {
-      post.reject({
-        response: {
-          status: 409,
-          data: { error: 'skill "alpha" is installed', code: 'skill_exists' },
-        },
-      });
-    });
-    const bNow = screen.getByRole('region', { name: plainB.summary });
-    const replace = within(bNow).queryByRole('button', {
-      name: 'com_mindstone_appr_skill_replace',
-    });
-    if (replace) {
-      mockPost.mockResolvedValue({ ok: true, result: {} });
-      fireEvent.click(replace);
-
-      console.log(
-        'R1 force POST:',
-        JSON.stringify(mockPost.mock.calls.at(-1)),
-        'status:',
-        screen.getByRole('status').textContent,
-      );
-    }
-    expect(
-      within(bNow).queryByRole('button', { name: 'com_mindstone_appr_skill_replace' }),
-    ).toBeNull();
-  });
-
-  it("A's approve succeeding while B is open must not close B nor say 'Approved.' over it", async () => {
-    mockGet.mockImplementation((url: string) => {
-      if (url.endsWith(`/approvals/${A}`)) return Promise.resolve({ action: plainA });
-      if (url.endsWith(`/approvals/${B}`)) return Promise.resolve({ action: plainB });
-      return Promise.resolve(list([plainA, plainB]));
-    });
-    const post = deferred();
-    mockPost.mockReturnValue(post.promise);
-    renderPage();
-    fireEvent.click(await screen.findByText(plainA.summary));
-    approve(await screen.findByRole('region', { name: plainA.summary }));
-    fireEvent.click(screen.getByText(plainB.summary));
-    await screen.findByRole('region', { name: plainB.summary });
-    await act(async () => {
-      post.resolve({
-        ok: true,
-        result: { outcome: 'approved', kind: 'skill_install', skillId: 'alpha' },
-      });
-    });
-    expect(screen.queryByRole('region', { name: plainB.summary })).not.toBeNull();
   });
 
   it("the re-read after persona_rejected, raced by a click on B, must not put A's refusal over B", async () => {
@@ -211,27 +139,6 @@ describe('MindStone approvals: a decision in flight never touches another card (
     });
     expect(screen.getByRole('region', { name: cardB.summary })).toBeInTheDocument();
     expect(screen.queryByText('PERSONA-OF-A-REJECTED')).toBeNull();
-  });
-
-  it("A's persona_rejected refusal arriving after the owner opened B must not yank the page back to A", async () => {
-    const kbA = { ...kbCard, id: A, summary: 'kb AAA' };
-    mockGet.mockImplementation((url: string) => {
-      if (url.endsWith(`/approvals/${A}`)) return Promise.resolve({ action: kbA });
-      if (url.endsWith(`/approvals/${B}`)) return Promise.resolve({ action: plainB });
-      return Promise.resolve(list([kbA, plainB]));
-    });
-    const post = deferred();
-    mockPost.mockReturnValue(post.promise);
-    renderPage();
-    fireEvent.click(await screen.findByText('kb AAA'));
-    approve(await screen.findByRole('region', { name: 'kb AAA' }));
-    fireEvent.click(screen.getByText(plainB.summary));
-    await screen.findByRole('region', { name: plainB.summary });
-    await act(async () => {
-      post.reject({ response: { status: 409, data: { error: 'x', code: 'persona_rejected' } } });
-    });
-    await act(async () => undefined);
-    expect(screen.queryByRole('region', { name: plainB.summary })).not.toBeNull();
   });
 
   it('an approved KB whose ingest failed is not shown in green', async () => {

@@ -376,4 +376,30 @@ describe("MindStone approvals: deciding a persona's component cards (MindStone-A
     expect(section).toHaveTextContent('com_mindstone_appr_persona_workflow_unreadable:gone');
     expect(section).not.toHaveTextContent('com_mindstone_appr_persona_workflow_missing');
   });
+
+  it("a decided component skill doesn't say approving installs it for everyone", async () => {
+    const section = await open({ ...skillCard, status: 'approved' });
+    expect(within(section).queryByTestId('ms-appr-skill-everyone')).toBeNull();
+  });
+
+  it('after persona_missing on one card, the next card opened still shows its own "approve the persona first" hint', async () => {
+    const other = { ...kbCard, id: B, summary: 'kb BBB' };
+    mockGet.mockImplementation((url: string) => {
+      if (url.endsWith(`/approvals/${A}`)) return Promise.resolve({ action: wfCard });
+      if (url.endsWith(`/approvals/${B}`)) return Promise.resolve({ action: other });
+      return Promise.resolve(list([wfCard, other]));
+    });
+    renderPage();
+    fireEvent.click(await screen.findByText(wfCard.summary));
+    const a = await screen.findByRole('region', { name: wfCard.summary });
+    mockPost.mockRejectedValue({
+      response: { status: 409, data: { error: 'gone; reject this card', code: 'persona_missing' } },
+    });
+    approve(a);
+    await screen.findByText('gone; reject this card');
+    expect(within(a).queryByTestId('ms-appr-part-of-persona')).toBeNull();
+    fireEvent.click(screen.getByText('kb BBB'));
+    const b = await screen.findByRole('region', { name: 'kb BBB' });
+    expect(within(b).getByTestId('ms-appr-part-of-persona')).toBeInTheDocument();
+  });
 });

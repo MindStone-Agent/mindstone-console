@@ -314,14 +314,18 @@ function componentOutcome(
   if (!result) return undefined;
   if (result.kind === 'persona_kb_create' && result.ingested) {
     const { error, entryCount } = result.ingested;
+    // Written into a persona that doesn't load: not in use, whatever the ingest did.
+    const unused = result.listed === false ? ` ${visibleText(result.note ?? '')}` : '';
     return typeof error === 'string'
       ? {
           ok: false,
-          text: (l) => l('com_mindstone_appr_kb_ingest_failed', { 0: visibleText(error) }),
+          text: (l) =>
+            `${l('com_mindstone_appr_kb_ingest_failed', { 0: visibleText(error) })}${unused}`,
         }
       : {
-          ok: true,
-          text: (l) => l('com_mindstone_appr_kb_ingested', { 0: String(entryCount ?? 0) }),
+          ok: !unused,
+          text: (l) =>
+            `${l('com_mindstone_appr_kb_ingested', { 0: String(entryCount ?? 0) })}${unused}`,
         };
   }
   const joined =
@@ -416,15 +420,21 @@ export default function MindStoneApprovalsView() {
   // After a persona is approved, the Personas page is where to make it active.
   const [personasLink, setPersonasLink] = useState(false);
 
+  // Only the latest list read is shown: an older one answering late never
+  // puts a decided card back to pending (#125 review).
+  const listRead = useRef(0);
   const load = useCallback(async () => {
+    const read = ++listRead.current;
     try {
       const result = await request.get<{ actions: Summary[]; status: Counts }>(
         `${BASE}/approvals${showAll ? '?all=1' : ''}`,
       );
+      if (read !== listRead.current) return;
       setActions(result.actions);
       setCounts(result.status);
       setLoadError(null);
     } catch (error) {
+      if (read !== listRead.current) return;
       setLoadError(errorBody(error).error ?? localize('com_mindstone_gateway_unreachable'));
     }
   }, [localize, showAll]);
@@ -438,8 +448,9 @@ export default function MindStoneApprovalsView() {
   // The gateway said this card's persona card no longer exists (persona_missing).
   const [parentGone, setParentGone] = useState(false);
   const open = async (id: string) => {
+    // A re-read of the same card keeps what the gateway said about its persona.
+    if (opening.current !== id) setParentGone(false);
     opening.current = id;
-    setParentGone(false);
     setMessage(null);
     setPersonasLink(false);
     setConfirming(null);
@@ -514,11 +525,18 @@ export default function MindStoneApprovalsView() {
         decision === 'approve' &&
           (code === 'memory_exists' || (code === 'skill_exists' && !decided.parentApprovalId)),
       );
-      setParentGone(code === 'persona_missing');
+      // The persona card or folder is gone: "approve the persona first" no longer
+      // applies. Set once for the card, cleared only when a card is opened.
+      if (code === 'persona_missing' || code === 'invalid_persona') setParentGone(true);
       // Refusals that changed the card anyway (its persona was rejected, so it
       // was too; or the Console stopped waiting on an approve that went on):
       // the list and the card are read again (#125 review).
-      if (code === 'persona_rejected' || code === 'gateway_timeout' || code === 'already_decided') {
+      if (
+        code === 'persona_rejected' ||
+        code === 'gateway_timeout' ||
+        code === 'already_decided' ||
+        code === undefined
+      ) {
         void load();
         void open(decided.id).then(() => {
           if (stillOpen()) {
@@ -583,6 +601,11 @@ export default function MindStoneApprovalsView() {
               {localize('com_mindstone_appr_show_all')}
             </label>
           </div>
+          {busy && (
+            <p className="text-sm text-text-secondary" data-testid="ms-appr-deciding">
+              {localize('com_mindstone_appr_deciding')}
+            </p>
+          )}
           {actions.length === 0 ? (
             <p className="text-sm text-text-secondary">{localize('com_mindstone_appr_none')}</p>
           ) : (
@@ -593,6 +616,9 @@ export default function MindStoneApprovalsView() {
                     type="button"
                     className="w-full rounded px-2 py-1 text-left hover:bg-surface-hover"
                     aria-current={detail?.id === action.id}
+                    // One decision at a time: while it is in flight the list
+                    // is locked, so its answer always lands on its own card.
+                    disabled={busy}
                     onClick={() => void open(action.id)}
                   >
                     <span className="font-mono text-xs">{action.id.slice(0, 8)}</span>{' '}
