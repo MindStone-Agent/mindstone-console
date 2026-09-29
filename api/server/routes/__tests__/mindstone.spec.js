@@ -410,6 +410,8 @@ describe('MindStone admin proxy', () => {
       ['post', 'knowledgebases/a%2Fb/reembed'],
       ['post', 'knowledgebases/..%2Fpersonas/reembed'],
       ['post', 'knowledgebases/%2E%2E/reembed'],
+      // Past the length a folder name can have (MindStone-Agent #166).
+      ['post', `knowledgebases/${'a'.repeat(1025)}/reembed`],
       ['post', 'knowledgebases/g1/reembed/x'],
       ['patch', 'personas/analyst/knowledgebases'],
       ['post', 'personas/analyst/knowledgebases/Notes/sources'],

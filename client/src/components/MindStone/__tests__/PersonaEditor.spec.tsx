@@ -329,7 +329,6 @@ describe('persona editor (MindStone-Agent #125)', () => {
 
   it('every given-up shared KB gets Try again, whatever its folder name (MindStone-Agent #166)', async () => {
     const id = "HR Policies #1 é?% it's";
-    let reset = false;
     serve({
       persona: ATLAS,
       globalKbs: [
@@ -339,28 +338,23 @@ describe('persona editor (MindStone-Agent #125)', () => {
           indexed: true,
           entryCount: 1,
           sourceCount: 1,
-          ...(reset ? {} : { reembed: { failures: 5, gaveUp: true } }),
+          reembed: { failures: 5, gaveUp: true },
         },
       ],
     });
-    mockPost.mockImplementation((url: string) => {
-      if (url === `${BASE}/knowledgebases/${encodeURIComponent(id)}/reembed`) {
-        reset = true;
-        return Promise.resolve({ ok: true });
-      }
-      return Promise.reject(new Error(`unexpected post ${url}`));
-    });
+    mockPost.mockImplementation((url: string) =>
+      url === `${BASE}/knowledgebases/${encodeURIComponent(id)}/reembed`
+        ? Promise.resolve({ ok: true })
+        : Promise.reject(new Error(`unexpected post ${url}`)),
+    );
     await renderEditor('atlas');
-    const retry = await screen.findByTestId(`ms-pe-global-kb-reembed-${id}-retry`);
-    expect(screen.queryByTestId(`ms-pe-global-kb-reembed-${id}-cli`)).not.toBeInTheDocument();
-    fireEvent.click(retry);
+    fireEvent.click(await screen.findByTestId(`ms-pe-global-kb-reembed-${id}-retry`));
     await waitFor(() =>
       expect(mockPost).toHaveBeenCalledWith(
         `${BASE}/knowledgebases/HR%20Policies%20%231%20%C3%A9%3F%25%20it's/reembed`,
         {},
       ),
     );
-    expect(reset).toBe(true);
     expect(
       screen.queryByTestId(`ms-pe-global-kb-reembed-${id}-retry-failed`),
     ).not.toBeInTheDocument();

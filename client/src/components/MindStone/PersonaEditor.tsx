@@ -22,7 +22,6 @@ import SkillPicker from './SkillPicker';
 import { useLocalize } from '~/hooks';
 
 const BASE = '/api/mindstone/admin';
-/** A shared KB id the gateway's reset route and the proxy take: its folder name (MindStone-Agent #158). */
 
 function errorText(error: unknown): string | undefined {
   const data = (error as { response?: { data?: { error?: unknown } } })?.response?.data;
