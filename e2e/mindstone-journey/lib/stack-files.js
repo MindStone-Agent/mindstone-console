@@ -38,9 +38,12 @@ function stack(env = process.env) {
   };
 }
 
-/** `docker compose` for the harness's project only (-p and the stack's own compose file, never a default). */
+/** `docker compose` for the harness's project only (-p and the stack's own compose files, never a default). */
 function compose(s, args) {
-  return execFileSync('docker', ['compose', '-p', s.project, '--project-directory', s.dir, '-f', path.join(s.dir, 'compose.yml'), ...args], {
+  const files = ['-f', path.join(s.dir, 'compose.yml')];
+  // The stack's own local changes, as install-stack.sh and run-journey.sh include them.
+  if (fs.existsSync(path.join(s.dir, 'compose.override.yml'))) files.push('-f', path.join(s.dir, 'compose.override.yml'));
+  return execFileSync('docker', ['compose', '-p', s.project, '--project-directory', s.dir, ...files, ...args], {
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 120_000,
     maxBuffer: 256 * 1024 * 1024,

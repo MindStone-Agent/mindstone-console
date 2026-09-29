@@ -29,7 +29,7 @@ STACK_GATEWAY_SESSIONS_DIR="" # PI_CODING_AGENT_SESSION_DIR inside it
 STACK_CA_FILE=""              # J11: the per-run CA the gateway trusts for the stub (NODE_EXTRA_CA_CERTS)
 STACK_STUB_CERT=""
 STACK_STUB_KEY=""
-STACK_CA_IN_GATEWAY="/home/node/.mindstone-agent/uat-enterprise-ca.pem" # in the gateway-runtime volume
+STACK_CA_IN_GATEWAY="/run/uat-j11/ca.pem" # where compose.override.yml mounts J11's CA in the gateway container
 # The stack's images, as Compose names built images (<project>-<service>).
 HARNESS_IMAGES="${PROJECT}-gateway ${PROJECT}-console"
 CONSOLE_IMAGE="${PROJECT}-console"
@@ -39,11 +39,14 @@ GW_TOKEN_FILE="${SECRETS_DIR}/gateway-token"
 # would change what the installer does. Unset for every stack command, so the stack's .env alone decides.
 STACK_UNSET=(-u MINDSTONE_BUILD_CONTEXT -u CONSOLE_BUILD_CONTEXT -u OLLAMA_BASE_URL -u COMPOSE_PROFILES -u COMPOSE_FILE
   -u COMPOSE_PROJECT_NAME -u MINDSTONE_DIR -u MINDSTONE_REF -u CONSOLE_REF -u CONSOLE_PORT -u MINDSTONE_GATEWAY_PORT
-  -u MINDSTONE_PROJECT)
+  -u MINDSTONE_PROJECT -u MINDSTONE_OLLAMA_BASE_URL -u COMPOSE_PATH_SEPARATOR)
 
-# stack_compose <args…>: docker compose for this run's project only: -p, and the stack's own compose file.
+# stack_compose <args…>: docker compose for this run's project only: -p, and the stack's own compose file, plus its
+# compose.override.yml when there is one (as install-stack.sh and a plain `docker compose` in the folder use it).
 stack_compose() {
-  env "${STACK_UNSET[@]}" docker compose -p "${PROJECT}" --project-directory "${STACK_DIR}" -f "${STACK_DIR}/compose.yml" "$@"
+  local files=(-f "${STACK_DIR}/compose.yml")
+  [[ -f "${STACK_DIR}/compose.override.yml" ]] && files+=(-f "${STACK_DIR}/compose.override.yml")
+  env "${STACK_UNSET[@]}" docker compose -p "${PROJECT}" --project-directory "${STACK_DIR}" "${files[@]}" "$@"
 }
 
 # The MindStone-Agent helpers, against the gateway container (README A4: `docker compose exec gateway
@@ -71,13 +74,13 @@ stack_env_value() { K="$2" awk -F= '$1 == ENVIRON["K"] { sub(/^[^=]*=/, ""); v =
 stack_mode_of() { ls -l "$1" 2>/dev/null | cut -c1-10; }
 
 # stack_run_installer <args…>: the README's command. The installer is piped to bash (from the raw URL at <msa-ref>,
-# or UAT_STACK_INSTALLER_FILE), with the ports and project on bash's environment, as the README sets them.
+# or UAT_STACK_INSTALLER_FILE), with the ports and project on bash's environment, as the README sets them. The
+# caller adds --ollama-url only with UAT_STACK_OLLAMA_BASE_URL.
 stack_run_installer() {
   local fetch
   if [[ -n "${STACK_INSTALLER_FILE}" ]]; then fetch=(cat "${STACK_INSTALLER_FILE}"); else fetch=(curl -fsSL "${STACK_INSTALLER_URL}"); fi
   "${fetch[@]}" | tee "${STACK_INSTALLER_COPY}" | env "${STACK_UNSET[@]}" \
     CONSOLE_PORT="${CONSOLE_PORT}" MINDSTONE_GATEWAY_PORT="${GW_PORT}" MINDSTONE_PROJECT="${PROJECT}" \
-    ${UAT_STACK_OLLAMA_BASE_URL:+OLLAMA_BASE_URL="${STACK_OLLAMA_BASE_URL}"} \
     bash -s -- "$@"
 }
 
@@ -214,7 +217,8 @@ stack_install_steps() {
   STACK_STARTED=1
   local install_rc=0
   interruptible stack_run_installer --dir "${STACK_DIR}" --ref "${STACK_MSA_INSTALL_REF}" --console-ref "${STACK_CONSOLE_INSTALL_REF}" \
-    --admin-email "${ADMIN_EMAIL}" --admin-name "UAT Admin" >"${LOG_DIR}/stack-install.log" 2>&1 || install_rc=$?
+    --admin-email "${ADMIN_EMAIL}" --admin-name "UAT Admin" ${UAT_STACK_OLLAMA_BASE_URL:+--ollama-url "${STACK_OLLAMA_BASE_URL}"} \
+    >"${LOG_DIR}/stack-install.log" 2>&1 || install_rc=$?
   [[ -s "${STACK_INSTALLER_COPY}" ]] && cp "${STACK_INSTALLER_COPY}" "${EVIDENCE}/msa-install-stack.sh"
   stack_compose ps --format '{{.Service}} {{.Status}}' >"${LOG_DIR}/stack-ps.txt" 2>&1 || true
   if [[ "${install_rc}" != 0 ]]; then
@@ -266,9 +270,9 @@ stack_install_steps() {
   # MindStone-Agent #126 lets an enterprise endpoint be a private host only with MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1 in
   # the gateway's own environment, and plain http only to loopback. J11's stub runs on this host; the gateway's
   # container reaches it as host.docker.internal, which isn't loopback, so the stub speaks https with a per-run CA
-  # the gateway trusts (NODE_EXTRA_CA_CERTS). Both variables go into gateway.env (the gateway service's env_file,
-  # which install-stack.sh keeps on a re-run), the CA into the gateway's runtime volume; then `docker compose up -d
-  # gateway` recreates the gateway with them. The stack has no documented way to do either (finding F-STACK-1).
+  # the gateway trusts (NODE_EXTRA_CA_CERTS). Both go in the stack's own place for local changes, compose.override.yml
+  # in the install folder (install-stack.sh includes it and never overwrites it), with the CA mounted from beside it;
+  # then `docker compose up -d gateway` recreates the gateway with them.
   CURRENT_STEP=S3
   problems=()
   local health
@@ -279,9 +283,20 @@ stack_install_steps() {
   {
     stack_make_tls || echo "couldn't make J11's CA and certificate (logs/j11-tls.log)"
     if [[ -n "${STACK_CA_FILE}" ]]; then
-      stack_compose cp "${STACK_CA_FILE}" "gateway:${STACK_CA_IN_GATEWAY}" && echo "copied the J11 CA into the gateway's runtime volume"
-      printf 'MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1\nNODE_EXTRA_CA_CERTS=%s\n' "${STACK_CA_IN_GATEWAY}" >>"${STACK_DIR}/gateway.env"
-      echo "gateway.env: + MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1, NODE_EXTRA_CA_CERTS=${STACK_CA_IN_GATEWAY}"
+      cp "${STACK_CA_FILE}" "${STACK_DIR}/uat-j11-ca.pem" && chmod 644 "${STACK_DIR}/uat-j11-ca.pem"
+      cat >"${STACK_DIR}/compose.override.yml" <<YAML
+# Added by the MindStone journey UAT (run-journey.sh, J11): the gateway may register an enterprise endpoint on a
+# private host (MindStone-Agent #126), and trusts the run's test CA, for the stub endpoint on this machine.
+services:
+  gateway:
+    environment:
+      MINDSTONE_ENTERPRISE_PRIVATE_HOSTS: "1"
+      NODE_EXTRA_CA_CERTS: ${STACK_CA_IN_GATEWAY}
+    volumes:
+      - ./uat-j11-ca.pem:${STACK_CA_IN_GATEWAY}:ro
+YAML
+      cp "${STACK_DIR}/compose.override.yml" "${EVIDENCE}/stack-compose.override.yml"
+      echo "wrote compose.override.yml (evidence: stack-compose.override.yml) and uat-j11-ca.pem in the install folder"
       stack_compose up -d --no-build --no-deps gateway
     fi
   } >"${LOG_DIR}/gateway-j11-settings.log" 2>&1
@@ -294,7 +309,7 @@ stack_install_steps() {
   stack_compose exec -T gateway sh -c 'test "$MINDSTONE_ENTERPRISE_PRIVATE_HOSTS" = 1 && test -r "$NODE_EXTRA_CA_CERTS"' >/dev/null 2>&1 \
     || problems+=("the recreated gateway doesn't have J11's settings")
   if [[ ${#problems[@]} -eq 0 ]]; then
-    record S3 PASS "Stack: the gateway answers /health on 127.0.0.1:${GW_PORT}; J11's host settings added to gateway.env, \`docker compose up -d gateway\` recreated it, healthy again" \
+    record S3 PASS "Stack: the gateway answers /health on 127.0.0.1:${GW_PORT}; J11's host settings in compose.override.yml, \`docker compose up -d gateway\` recreated it, healthy again" \
       "${LOG_DIR}/gateway-j11-settings.log" "gateway /health on port ${GW_PORT}"
   else
     stack_compose logs --no-color --tail 80 gateway >"${LOG_DIR}/gateway.tail.log" 2>&1
@@ -302,8 +317,8 @@ stack_install_steps() {
     die "the stack's gateway isn't healthy"
   fi
   CURRENT_STEP=""
-  if ! grep -q MINDSTONE_ENTERPRISE_PRIVATE_HOSTS "${STACK_DIR}/compose.yml" && ! grep -q NODE_EXTRA_CA_CERTS "${STACK_DIR}/compose.yml"; then
-    finding F-STACK-1 "The stack (MindStone-Agent #171) has no documented way to give the gateway container an extra setting or a CA: \`deploy/docker/compose.yml\` passes neither \`MINDSTONE_ENTERPRISE_PRIVATE_HOSTS\` (#126's gateway-host switch for a private-network enterprise endpoint) nor a CA bundle (\`NODE_EXTRA_CA_CERTS\`, for an endpoint behind a private CA), and a \`compose.override.yml\` in the install dir is dropped on update, since \`install-stack.sh\` runs \`docker compose -f compose.yml\`. It works to add them to \`gateway.env\` (the gateway's env_file, which a re-run keeps) and copy the CA into the gateway-runtime volume, as the harness does, but the README describes \`gateway.env\` as holding the two secrets only. Also: plain http is allowed to loopback only (#126), and from the container the host is host.docker.internal, so a test endpoint on the host needs https."
+  if ! grep -q 'compose.override.yml' "${STACK_INSTALLER_COPY}" 2>/dev/null; then
+    finding F-STACK-1 "This \`install-stack.sh\` doesn't include a \`compose.override.yml\` from the install folder (it runs \`docker compose -f compose.yml\`), so a change of one's own to the stack, such as J11's gateway settings (\`MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1\`, a CA for a private endpoint), is dropped on the next update."
   fi
 
   # --- A2: the secrets and the gateway, then a restart through the container (A5) ----------------------
