@@ -284,8 +284,10 @@ describe('persona editor (MindStone-Agent #125)', () => {
     await renderEditor('atlas');
     expect(screen.queryByTestId('ms-pe-global-kb-reembed-HR Policies-retry')).not.toBeInTheDocument();
     expect(screen.getByTestId('ms-pe-global-kb-reembed-HR Policies-cli').textContent).toBe('com_mindstone_kb_reembed_cli:HR Policies');
+    const retry = await screen.findByTestId('ms-pkb-reembed-notes-retry');
+    // Asked once the private list is on screen: a KB with a retry here has no CLI hint.
     expect(screen.queryByTestId('ms-pkb-reembed-notes-cli')).not.toBeInTheDocument();
-    fireEvent.click(await screen.findByTestId('ms-pkb-reembed-notes-retry'));
+    fireEvent.click(retry);
     expect((await screen.findByTestId('ms-pkb-reembed-notes-retry-failed')).textContent).toBe(
       'com_mindstone_kb_reembed_retry_refused:persona "atlas" has no knowledge base named "notes"',
     );
