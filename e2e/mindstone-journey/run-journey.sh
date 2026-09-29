@@ -721,8 +721,26 @@ if [[ -z "${EMBED_MODEL}" && "${UAT_OLLAMA_ALLOW_PULL:-0}" == 1 && -n "${tags}" 
   EMBED_MODEL="$(pick_embed)"
 fi
 [[ -n "${EMBED_MODEL}" ]] || log "${c_yellow}no embedding model in Ollama: J3 will FAIL (pull nomic-embed-text first, or set UAT_OLLAMA_ALLOW_PULL=1)${c_reset}"
-{ echo "provider=${PROVIDER}"; echo "provider_model=${PROVIDER_MODEL}"; echo "embed_model=${EMBED_MODEL:-none}"; } >>"${EVIDENCE}/run.env"
-log "model provider: ${PROVIDER}${PROVIDER_MODEL:+ (${PROVIDER_MODEL})}; embedding model: ${EMBED_MODEL:-none}"
+
+# The other default model J12 switches to on Settings: a cloud model Ollama lists that actually answers (a listed
+# cloud model can be retired upstream). Each candidate, smallest first, gets one short chat; the first reply with
+# text wins. "none" when none answers, so J12 keeps the model and says so; unset for other providers (J12 then
+# picks another cloud model the Model step offers). UAT_ALT_MODEL overrides it.
+ALT_MODEL="${UAT_ALT_MODEL:-}"
+if [[ -z "${ALT_MODEL}" && "${PROVIDER}" == ollama ]]; then
+  ALT_MODEL=none
+  while IFS= read -r candidate; do
+    [[ -n "${candidate}" ]] || continue
+    answer=$(curl -s -m 60 "${OLLAMA_URL}/api/chat" -H 'Content-Type: application/json' \
+      -d "{\"model\":\"${candidate}\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one short sentence.\"}]}" 2>/dev/null \
+      | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(j.message&&j.message.content?"ok":`no text: ${String(j.error||"empty reply").slice(0,160)}`)}catch{process.stdout.write("no JSON answer")}})' 2>/dev/null || true)
+    echo "J12 alternate model ${candidate}: ${answer:-no answer}" >>"${LOG_DIR}/provider.log"
+    if [[ "${answer}" == ok ]]; then ALT_MODEL="${candidate}"; break; fi
+  done < <(printf '%s' "${tags}" | node "${HERE}/lib/pick-ollama-model.mjs" alt "${PROVIDER_MODEL}" 2>>"${LOG_DIR}/provider.log")
+  deviation "J12: to pick the other default model it switches to on Settings, the harness sent one short chat (\"Say hello in one short sentence.\") to each other \`:cloud\` model Ollama lists, smallest first, until one answered: ${ALT_MODEL} (\`logs/provider.log\`)."
+fi
+{ echo "provider=${PROVIDER}"; echo "provider_model=${PROVIDER_MODEL}"; echo "embed_model=${EMBED_MODEL:-none}"; echo "alt_model=${ALT_MODEL:-unset}"; } >>"${EVIDENCE}/run.env"
+log "model provider: ${PROVIDER}${PROVIDER_MODEL:+ (${PROVIDER_MODEL})}; embedding model: ${EMBED_MODEL:-none}; J12's other model: ${ALT_MODEL:-unset}"
 
 # =============================================================================
 # MindStone-Agent README, "Install guide for AI agents"
@@ -1144,6 +1162,7 @@ set +e
   UAT_PROVIDER_KEY_FILE="${provider_key_file}" \
   UAT_OLLAMA_BASE_URL="${OLLAMA_URL}/v1" \
   UAT_OLLAMA_EMBED_MODEL="${EMBED_MODEL}" \
+  UAT_ALT_MODEL="${ALT_MODEL}" \
   UAT_GATEWAY_URL="${GW_URL}" \
   UAT_GATEWAY_AUTH_HEADER_FILE="${SECRETS_DIR}/h-auth" \
   UAT_GATEWAY_ADMIN_HEADER_FILE="${SECRETS_DIR}/h-admin" \

@@ -1217,6 +1217,8 @@ const J12_STEP_HEADINGS: Record<string, string> = {
 const J12_REINDEX_WAIT_MS = 30_000;
 /** The memory step's Test (the Console's proxy gives the embed check 25 s; a model's first load can take longer). */
 const J12_MEMORY_CHECK_MS = 90_000;
+/** A memory Test result that says the check ran out of time (a cold model load), not that the model can't embed. */
+const J12_TEST_AGAIN = /aborted|timed? ?out|no answer within/i;
 /** Words the product would use to warn that a new embedding model affects the memories already stored. */
 const J12_WARNING = /re-?index|re-?embed|incompatib|rebuil|existing (memor|vector|embedding)|stored (memor|vector)/i;
 
@@ -1427,8 +1429,15 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       await expect(select, 'the Model step opens filled in with the saved model').toHaveValue(original.routing.defaultModel ?? '');
       const values = await select.locator('option').evaluateAll((options) => options.map((o) => (o as HTMLOptionElement).value).filter(Boolean));
       await attachText(testInfo, 'model-options.txt', values.join('\n'));
-      const alternate = pickAlternateModel(values, original.routing.defaultModel);
-      if (!alternate) modelPending = `the Model step offers no cloud model other than ${original.routing.defaultModel} (it offers: ${values.join(', ') || 'nothing'})`;
+      // The other cloud model run-journey.sh found answering (UAT_ALT_MODEL), or, without one, the first other cloud model offered.
+      const preferred = process.env.UAT_ALT_MODEL || undefined;
+      const alternate = pickAlternateModel(values, original.routing.defaultModel, preferred);
+      if (!alternate) {
+        modelPending =
+          preferred === 'none'
+            ? `no cloud model other than ${original.routing.defaultModel} answered the harness's probe (logs/provider.log)`
+            : `the Model step offers no ${preferred ? `${preferred} (UAT_ALT_MODEL)` : `cloud model other than ${original.routing.defaultModel}`} (it offers: ${values.join(', ') || 'nothing'})`;
+      }
       chosenModel = alternate ?? original.routing.defaultModel ?? '';
       expect(chosenModel, 'a model to choose').not.toBe('');
       await select.selectOption(chosenModel);
@@ -1490,14 +1499,27 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
         await expect(check, 'the Test shows its result').not.toHaveText(waiting, { timeout: 15_000 });
         return ((await check.textContent()) ?? '').trim();
       };
+      /**
+       * A pulled model that isn't loaded yet can outlast the gateway's embed timeout on its first Test ("This operation
+       * was aborted"); Ollama goes on loading it, so the Test is pressed again (twice at most), as a person would.
+       */
+      const testWithRetry = async (): Promise<string[]> => {
+        const results = [await testEmbedding()];
+        while (J12_TEST_AGAIN.test(results[results.length - 1]) && results.length < 3) {
+          await page.waitForTimeout(5_000);
+          results.push(await testEmbedding());
+        }
+        return results;
+      };
       // Another embedding model that is already pulled: each other choice the step offers, tested; the harness never downloads one.
       const others = (await select.locator('option').evaluateAll((o) => o.map((x) => (x as HTMLOptionElement).value))).filter((v) => v && v !== beforeModel && v !== 'custom');
       const tried: { model: string; result: string }[] = [];
       let after: { spec: string; dims: number } | undefined;
       for (const candidate of others) {
         await select.selectOption(candidate);
-        const result = await testEmbedding();
-        tried.push({ model: candidate, result });
+        const results = await testWithRetry();
+        const result = results[results.length - 1];
+        tried.push({ model: candidate, result: results.join(' -> ') });
         const dims = Number(result.match(/Embedding works: (\d+) dimensions/)?.[1] ?? 0);
         if (dims > 0) {
           after = { spec: `ollama:${candidate}`, dims };
@@ -1508,8 +1530,9 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       if (!after) {
         // Only one embedding model is pulled: change a safe memory field instead (automatic recall), with the saved model.
         await select.selectOption(beforeModel);
-        const result = await testEmbedding();
-        tried.push({ model: beforeModel, result });
+        const results = await testWithRetry();
+        const result = results[results.length - 1];
+        tried.push({ model: beforeModel, result: results.join(' -> ') });
         expect(result, `the saved embedding model still works (${beforeSpec})`).toMatch(/Embedding works: \d+ dimensions/);
         await recall.setChecked(!(original.memory.autoRecall === true));
         safeField = `autoRecall ${original.memory.autoRecall === true ? 'on -> off' : 'off -> on'}`;

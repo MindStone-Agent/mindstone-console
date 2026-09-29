@@ -11,7 +11,8 @@
  *   Access and About you, the control Settings has in place (the #140 audit:
  *   Access is the Advanced settings card, About you is edited as USER.md).
  * - pickAlternateModel: a different model for the Model change, only a cloud
- *   one (chatting with a local model would load it into a shared Ollama).
+ *   one (chatting with a local model would load it into a shared Ollama), the
+ *   one run-journey.sh found answering when it probed.
  * - modelMatchReasons: the model chosen in Settings is the saved route, shown
  *   on Settings, and the model the gateway's Pi session actually called.
  * - memoryChangeVerdict: after the embedding model changed, either the vector
@@ -93,12 +94,20 @@ function parityReasons(rows) {
 const isCloudModel = (id) => /[:-]cloud$/.test(String(id ?? ''));
 
 /**
- * The model J12 switches to: the first cloud model (by id) the Model step
- * offers other than the current one. Undefined when there is none; the step
- * then keeps the current model and the model part ends PENDING.
+ * The model J12 switches to, from the ids the Model step offers
+ * ("<provider>/<model>"), never the current one and never a local one:
+ * - `preferred` set (run-journey.sh's UAT_ALT_MODEL: an Ollama cloud model
+ *   that answered a probe): that model, if offered; "none" (no other cloud
+ *   model answered): nothing;
+ * - unset: the first other cloud model by id.
+ * Undefined when there is none; J12 then keeps the current model and the
+ * model part ends PENDING.
  */
-function pickAlternateModel(values, current) {
-  return [...new Set((values ?? []).filter((value) => typeof value === 'string' && value && value !== current && isCloudModel(value)))].sort()[0];
+function pickAlternateModel(values, current, preferred) {
+  const candidates = [...new Set((values ?? []).filter((value) => typeof value === 'string' && value && value !== current && isCloudModel(value)))].sort();
+  if (preferred === 'none') return undefined;
+  if (preferred) return candidates.find((value) => value === preferred || value.endsWith(`/${preferred}`));
+  return candidates[0];
 }
 
 /**

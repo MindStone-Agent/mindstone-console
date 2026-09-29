@@ -251,6 +251,9 @@ export async function uiResponse(
 /**
  * Signs in on /login unless the session is still good. With stayIfSignedIn, a
  * page already inside the app (not /login, not blank) is left where it is.
+ * The session decides, not only the URL: after a failed step Playwright starts
+ * a new worker, whose fresh page has no session but may not have been sent to
+ * /login yet, so a page that stays on /c/new is asked for its access token.
  */
 export async function ensureSignedIn(page: Page, options: { stayIfSignedIn?: boolean } = {}): Promise<void> {
   const url = page.url();
@@ -261,8 +264,18 @@ export async function ensureSignedIn(page: Page, options: { stayIfSignedIn?: boo
     .waitForURL(/\/login/, { timeout: 5_000 })
     .then(() => true)
     .catch(() => page.url().includes('/login'));
-  if (!onLogin) return;
+  if (!onLogin && (await hasSession(page))) return;
   await signIn(page);
+}
+
+/** Whether the page's refresh cookie still gets an access token (a signed-in session). */
+async function hasSession(page: Page): Promise<boolean> {
+  return accessToken(page)
+    .then(() => true)
+    .catch((error: unknown) => {
+      if (isStall(error)) throw error;
+      return false;
+    });
 }
 
 export async function signIn(page: Page): Promise<void> {
@@ -1160,7 +1173,7 @@ const settingsParity = require('./settings-parity-evidence.js') as {
   };
   parityReasons: (rows: ParityRow[]) => string[];
   isCloudModel: (id: string) => boolean;
-  pickAlternateModel: (values: string[], current: string | undefined) => string | undefined;
+  pickAlternateModel: (values: string[], current: string | undefined, preferred?: string) => string | undefined;
   modelMatchReasons: (arg: { chosen: string; saved?: string; shown?: string; answered?: AnsweredBy }) => string[];
   memoryChangeVerdict: (arg: {
     before: { spec?: string; dims?: number };

@@ -11,8 +11,9 @@
 //   once followed, that opened the step); Access and About you each their
 //   control on Settings. A missing step, a wrong target, a link that opened
 //   something else, a duplicate or an unknown row must each fail with a reason;
-// - pickAlternateModel picks another cloud model, never a local one, never
-//   the current one, and nothing when there is no other cloud model;
+// - pickAlternateModel picks the cloud model the harness found answering
+//   (UAT_ALT_MODEL) or, without one, another cloud model; never a local one,
+//   never the current one, and nothing with UAT_ALT_MODEL=none;
 // - modelMatchReasons (the model-match check) proves the chat used the model
 //   chosen in Settings only when the saved route, the Settings row and the
 //   Pi session's provider and model all agree, with no fallback;
@@ -28,7 +29,8 @@
 //   don't bring it in), the DEMO SUBSET is exactly what it was (never J12),
 //   J12 is uncounted without its flag, and pw_explained_by and the stall
 //   filter leave out J12 only where it is uncounted; gate-rows excuses J12's
-//   own failure, not a hook's error charged to it.
+//   own failure (a spec-file helper's error too, when its stack passes
+//   through J12's lines), not a hook's error charged to it.
 // Run by run-journey.sh with X5.
 //
 //   node settings-parity.selftest.mjs
@@ -38,7 +40,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { failuresOnlyIn } from './gate-rows.mjs';
+import { failuresOnlyIn, stackLines } from './gate-rows.mjs';
 
 const require = createRequire(import.meta.url);
 const { SETUP_STEPS, CHANGE_STEPS, changeHref, j12Decision, parityReasons, pickAlternateModel, modelMatchReasons, memoryChangeVerdict } = require('./settings-parity-evidence.js');
@@ -101,6 +103,10 @@ check(pickAlternateModel(offered, 'ollama/deepseek-v4.1-flash:cloud') === 'ollam
 check(pickAlternateModel(['ollama/a:cloud', 'ollama/gemma4:26b', 'ollama/b:latest'], 'ollama/a:cloud') === undefined, 'model pick: never a local model (it would load into a shared Ollama): none');
 check(pickAlternateModel(['ollama/a:cloud', 'ollama/a:cloud'], 'ollama/a:cloud') === undefined && pickAlternateModel([], 'x') === undefined, 'model pick: only the current model (or nothing) offered: none');
 check(pickAlternateModel(['ollama/gemma4:31b-cloud', 'ollama/a:cloud'], 'ollama/a:cloud') === 'ollama/gemma4:31b-cloud', 'model pick: a "-cloud" tag counts as cloud');
+check(pickAlternateModel(offered, 'ollama/deepseek-v4.1-flash:cloud', 'gemma4:31b-cloud') === 'ollama/gemma4:31b-cloud', 'model pick: the model the harness found answering (UAT_ALT_MODEL) wins over the first by id');
+check(pickAlternateModel(offered, 'ollama/deepseek-v4.1-flash:cloud', 'none') === undefined, 'model pick: UAT_ALT_MODEL=none (no other cloud model answered): none, never an unprobed one');
+check(pickAlternateModel(offered, 'ollama/deepseek-v4.1-flash:cloud', 'missing:cloud') === undefined && pickAlternateModel(offered, 'ollama/deepseek-v4.1-flash:cloud', 'deepseek-v4.1-flash:cloud') === undefined, 'model pick: a preferred model the step does not offer, or the current one: none');
+check(pickAlternateModel(offered, 'ollama/deepseek-v4.1-flash:cloud', 'gemma4:26b') === undefined, 'model pick: a preferred local model is still refused');
 
 // --- The model-match check ---
 const CHOSEN = 'ollama/deepseek-v4-flash:cloud';
@@ -188,6 +194,16 @@ try {
   check(!failuresOnlyIn(all('failed', [at(SPEC, 141, 'afterEach boom')]), ['J12']).explained, "gate-rows: an afterEach error charged to J12 (at the hook's line) is not excused");
   check(!failuresOnlyIn(all('failed', [at(SPEC, 1600)]), ['J12']).explained, "gate-rows: an error located in J10's lines, charged to J12, is not excused");
   check(!failuresOnlyIn(report([spec('J1 sign in', 200, 'failed', [at(SPEC, 210)]), j12('failed', [at(SPEC, 1300)])]), ['J12']).explained, 'gate-rows: J1 failing as well as J12 is not explained');
+  // A spec-file helper (expectAnswer, above the tests) is located at the helper; its stack (result.error) says who called it.
+  const withStack = (status, location, frames) => ({
+    ...j12(status, [at(SPEC, location)]),
+    tests: [{ results: [{ status, errors: [at(SPEC, location)], error: { ...at(SPEC, location), stack: `Error: x\n${frames.map((f) => `    at ${f} (/abs/e2e/mindstone-journey/${SPEC}:${f === 'helper' ? location : f}:7)`).join('\n')}` } }] }],
+  });
+  const stacked = (status, location, frames) => report([...passing, withStack(status, location, frames), j10('passed'), j11('passed')]);
+  check(stackLines('Error: x\n    at expectAnswer (/a/b/journey.spec.ts:225:60)\n    at /a/b/journey.spec.ts:1686:7\n    at /a/b/lib/journey.ts:305:21', SPEC).join(',') === '225,1686', 'gate-rows: stackLines reads the spec-file frames only');
+  check(failuresOnlyIn(stacked('failed', 225, ['helper', 1250]), ['J12']).explained, "gate-rows: a spec-file helper's error (expectAnswer at line 225) called from J12's own lines is J12's own: explained");
+  check(!failuresOnlyIn(stacked('failed', 141, ['helper', 142]), ['J12']).explained, "gate-rows: an afterEach error whose stack stays in the hook's lines is still not excused");
+  check(!failuresOnlyIn(stacked('failed', 225, ['helper', 1600]), ['J12']).explained, "gate-rows: a helper's error called from J10's lines, charged to J12, is not excused");
 
   const results = path.join(dir, 'results.json');
   const glog = path.join(dir, 'gate-rows.log');
