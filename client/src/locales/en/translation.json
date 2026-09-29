@@ -3095,6 +3095,7 @@
   "com_mindstone_appr_deciding": "A decision is being made; the card list is locked until it's done (approving a knowledge base ingests it, which can take a few minutes).",
   "com_mindstone_appr_persona_not_loading": "its persona doesn't load",
   "com_mindstone_appr_kb_not_in_use": "It isn't in use yet: {{0}}.",
+  "com_mindstone_appr_no_answer_no_card": "The Console didn't hear back and can't read the card now either, so it can't say whether this went through. Open the card again once the gateway answers.",
   "com_mindstone_appr_outcome_unknown": "The Console didn't hear back, so it can't say whether this went through. The card below shows what it is now.",
   "com_mindstone_appr_kb_ingest_failed": "Approved: the knowledge base is written, but the ingest failed ({{0}}). Ingest it again from the persona editor (once the persona loads, if it doesn't).",
   "com_mindstone_appr_component_not_joined": "Approved, but it isn't in use yet: {{0}}",

@@ -96,12 +96,20 @@ const CONFIRM_APPROVE: Partial<Record<Summary['kind'], TranslationKeys>> = {
   persona_kb_create: 'com_mindstone_appr_confirm_kb',
 };
 
-function errorBody(error: unknown): { error?: string; code?: string } {
-  const data = (error as { response?: { data?: { error?: unknown; code?: unknown } } })?.response
-    ?.data;
+function errorBody(error: unknown): { error?: string; code?: string; heard: boolean } {
+  const response = (
+    error as { response?: { data?: { error?: unknown; code?: unknown; message?: unknown } } }
+  )?.response;
+  const data = response?.data;
+  // The gateway's text, or a Console refusal's own (a 403 says "Forbidden").
+  let text: string | undefined;
+  if (typeof data?.error === 'string') text = data.error;
+  else if (typeof data?.message === 'string') text = data.message;
   return {
-    error: typeof data?.error === 'string' ? data.error : undefined,
+    error: text,
     code: typeof data?.code === 'string' ? data.code : undefined,
+    // Any HTTP answer is an answer: only no response at all leaves the outcome unknown.
+    heard: Boolean(response),
   };
 }
 
@@ -453,16 +461,23 @@ export default function MindStoneApprovalsView() {
   const opening = useRef<string | null>(null);
   // After a decision, focus goes to what it says, not back to the top of the page.
   const statusLine = useRef<HTMLParagraphElement>(null);
+  // Only when focus was lost (the card it was in went away), never away from
+  // wherever the owner has gone meanwhile (#125 review).
   useEffect(() => {
-    if (message) statusLine.current?.focus();
+    const active = document.activeElement;
+    if (message && (!active || active === document.body)) statusLine.current?.focus();
   }, [message]);
   // The gateway said this card's persona card no longer exists (persona_missing).
   const [parentGone, setParentGone] = useState(false);
   // Each card read is numbered: an older read of the same card answering
   // late never replaces a newer one (#125 review).
   const cardRead = useRef(0);
-  /** `keepForm`: a re-read of the same card after a decision keeps the reject note typed for a retry. */
-  const open = async (id: string, keepForm = false) => {
+  /**
+   * `keepForm`: a re-read of the same card after a decision keeps the reject
+   * note typed for a retry. Resolves to whether this read's answer was shown
+   * (a newer read, or another card, wins; a failed read shows its own error).
+   */
+  const open = async (id: string, keepForm = false): Promise<boolean> => {
     const read = ++cardRead.current;
     // A re-read of the same card keeps what the gateway said about its persona.
     if (opening.current !== id) setParentGone(false);
@@ -480,11 +495,12 @@ export default function MindStoneApprovalsView() {
       const result = await request.get<{ action: Detail }>(
         `${BASE}/approvals/${encodeURIComponent(id)}`,
       );
-      if (opening.current !== id || read !== cardRead.current) return;
+      if (opening.current !== id || read !== cardRead.current) return false;
       setDetail(result.action);
       if (keepForm && result.action.status !== 'pending') setConfirming(null);
+      return true;
     } catch (error) {
-      if (opening.current !== id || read !== cardRead.current) return;
+      if (opening.current !== id || read !== cardRead.current) return false;
       setDetail(null);
       setMessage({
         ok: false,
@@ -537,11 +553,12 @@ export default function MindStoneApprovalsView() {
         void load();
         return;
       }
-      const { error: text, code } = errorBody(error);
-      // No answer at all (a dropped connection, a proxy's HTML page): the
-      // decision may have gone through, so the page doesn't say it didn't.
+      const { error: text, code, heard } = errorBody(error);
+      // No answer at all (a dropped connection): the decision may have gone
+      // through, so the page doesn't say it didn't.
       const shown =
-        text ?? localize(code ? 'com_mindstone_not_changed' : 'com_mindstone_appr_outcome_unknown');
+        text ??
+        localize(heard ? 'com_mindstone_not_changed' : 'com_mindstone_appr_outcome_unknown');
       // An existing memory file or installed skill is only replaced on a second,
       // explicit click; a persona's new skill never replaces one (#125).
       setNeedsForce(
@@ -564,8 +581,12 @@ export default function MindStoneApprovalsView() {
         code === undefined
       ) {
         void load();
-        void open(decided.id, decision === 'reject').then(() => {
-          if (stillOpen()) setMessage({ ok: false, text: shown });
+        void open(decided.id, decision === 'reject').then((applied) => {
+          // Only over this read's own answer: a newer read or a failed one says its own.
+          if (applied && stillOpen()) setMessage({ ok: false, text: shown });
+          if (!applied && stillOpen() && !heard) {
+            setMessage({ ok: false, text: localize('com_mindstone_appr_no_answer_no_card') });
+          }
         });
       }
       // The card is gone: it leaves the page, and the list is read again.
@@ -738,7 +759,7 @@ export default function MindStoneApprovalsView() {
                 </button>
               </div>
             )}
-            {confirming === 'approve' && (
+            {confirming === 'approve' && detail.status === 'pending' && (
               <div className="mt-3 flex flex-col gap-2">
                 <p className="text-sm">
                   {localize(CONFIRM_APPROVE[detail.kind] ?? 'com_mindstone_appr_confirm_send')}
@@ -780,7 +801,7 @@ export default function MindStoneApprovalsView() {
                 </div>
               </div>
             )}
-            {confirming === 'reject' && (
+            {confirming === 'reject' && detail.status === 'pending' && (
               <div className="mt-3 flex flex-col gap-2">
                 <label className="flex flex-col gap-1 text-sm">
                   {localize('com_mindstone_appr_note')}
