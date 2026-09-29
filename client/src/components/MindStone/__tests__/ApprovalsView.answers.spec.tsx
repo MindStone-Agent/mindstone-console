@@ -220,4 +220,23 @@ describe('MindStone approvals: what counts as an answer (MindStone-Agent #125)',
     expect(await screen.findByText('CONSOLE-TIMEOUT-TEXT')).toBeInTheDocument();
     expect(screen.queryByText('com_mindstone_appr_no_answer_no_card')).toBeNull();
   });
+
+  it("a memory write's path, summary and content show non-printing characters, as the CLI does", async () => {
+    const lookalike = {
+      ...memCard,
+      summary: 'memory write proposal from chat: notes/to\u200cdo.md',
+      memory: { path: 'notes/to\u200cdo.md', content: 'Hidden\u200bmark' },
+    };
+    mockGet.mockImplementation((url: string) =>
+      url.endsWith(`/approvals/${A}`)
+        ? Promise.resolve({ action: lookalike })
+        : Promise.resolve(list([lookalike])),
+    );
+    renderPage();
+    const shown = 'memory write proposal from chat: notes/to\\u{200C}do.md';
+    fireEvent.click(await screen.findByText(shown));
+    const section = await screen.findByRole('region', { name: shown });
+    expect(section).toHaveTextContent('notes/to\\u{200C}do.md');
+    expect(section).toHaveTextContent('Hidden\\u{200B}mark');
+  });
 });

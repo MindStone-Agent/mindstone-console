@@ -131,13 +131,9 @@ function payloadText(detail: Detail): string {
 }
 
 /** A persona's or a skill's summary carries text the agent wrote, so it is shown the same way. */
+/** Every kind's summary with non-printing characters shown: a memory path or mutation text is the agent's too (#125 review). */
 function summaryText(action: Summary): string {
-  return action.kind === 'persona_create' ||
-    action.kind === 'skill_install' ||
-    action.kind === 'workflow_create' ||
-    action.kind === 'persona_kb_create'
-    ? visibleText(action.summary)
-    : action.summary;
+  return visibleText(action.summary);
 }
 
 /** More than two blank lines in a row are shown as a marker, so text can't hide below them. */
@@ -715,7 +711,7 @@ export default function MindStoneApprovalsView() {
             </p>
             {detail.memory && (
               <p className="mb-1 text-sm">
-                {localize('com_mindstone_appr_memory_path', { 0: detail.memory.path })}
+                {localize('com_mindstone_appr_memory_path', { 0: visibleText(detail.memory.path) })}
               </p>
             )}
             {detail.parentApprovalId && detail.status === 'pending' && !parentGone && (
@@ -757,7 +753,7 @@ export default function MindStoneApprovalsView() {
             {(detail.workflow || detail.knowledgebase) && <ComponentFields detail={detail} />}
             {!detail.persona && !detail.skill && !detail.workflow && !detail.knowledgebase && (
               <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-secondary p-2 text-sm">
-                {payloadText(detail)}
+                {visibleText(payloadText(detail))}
               </pre>
             )}
             {detail.status === 'pending' && confirming === null && (
