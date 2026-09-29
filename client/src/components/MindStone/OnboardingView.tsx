@@ -1364,7 +1364,11 @@ export default function MindStoneOnboardingView() {
                   />
                   {keepsBot && (
                     <span className="text-text-secondary" data-testid="ms-onb-token-kept">
-                      {localize('com_mindstone_onb_token_kept')}
+                      {localize(
+                        savedChosen?.tokenFile
+                          ? 'com_mindstone_onb_token_kept'
+                          : 'com_mindstone_onb_token_env',
+                      )}
                     </span>
                   )}
                 </label>
@@ -1380,7 +1384,11 @@ export default function MindStoneOnboardingView() {
                     />
                     {keepsApp && (
                       <span className="text-text-secondary">
-                        {localize('com_mindstone_onb_token_kept')}
+                        {localize(
+                          savedChosen?.appTokenFile
+                            ? 'com_mindstone_onb_token_kept'
+                            : 'com_mindstone_onb_token_env',
+                        )}
                       </span>
                     )}
                   </label>

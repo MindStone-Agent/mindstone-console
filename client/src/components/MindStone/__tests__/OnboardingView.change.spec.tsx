@@ -189,6 +189,9 @@ describe('changing one setup choice', () => {
         screen.getByRole('radio', { name: 'com_mindstone_onb_connector_telegram' }),
       ).toBeChecked(),
     );
+    expect(screen.getByTestId('ms-onb-token-kept')).toHaveTextContent(
+      'com_mindstone_onb_token_env',
+    );
     expect(button('com_mindstone_onb_change_save')).toBeEnabled();
     fireEvent.click(button('com_mindstone_onb_change_save'));
     await screen.findByText(/com_mindstone_onb_connector_saved/);
