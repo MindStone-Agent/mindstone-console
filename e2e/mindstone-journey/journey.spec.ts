@@ -51,6 +51,7 @@ import {
   expectOnScreen,
   fillSecret,
   formationEvidence,
+  gatewayDataDir,
   gatewayExcerpt,
   controlForConversation,
   memoryStoreFilesWith,
@@ -333,7 +334,15 @@ test('J2 guided setup in the UI: access, provider, model, persona, (memory, conn
     if (PROVIDER === 'ollama') {
       const wantedBase = process.env.UAT_OLLAMA_BASE_URL;
       const address = page.getByRole('textbox', { name: 'Server address' });
-      if (wantedBase && (await address.inputValue()) !== wantedBase && !/\/\/(127\.0\.0\.1|localhost):11434\/v1$/.test(wantedBase)) {
+      if (process.env.UAT_INSTALL === 'stack') {
+        // The stack's gateway reaches Ollama on the host as its OLLAMA_BASE_URL, and the Ollama choice comes filled in
+        // with it (MindStone-Agent #171, README A4): checked, never typed.
+        // The page fills it in just after the choice renders (an effect), so this waits for it.
+        await expect(address, `the Ollama choice comes filled in with the stack's Ollama address (${wantedBase})`).toHaveValue(wantedBase ?? '', {
+          timeout: 10_000,
+        });
+        note(testInfo, `stack: the Ollama Server address came filled in as ${await address.inputValue()}`);
+      } else if (wantedBase && (await address.inputValue()) !== wantedBase && !/\/\/(127\.0\.0\.1|localhost):11434\/v1$/.test(wantedBase)) {
         await address.fill(wantedBase);
         note(testInfo, `server address set to ${wantedBase}`);
       }
@@ -682,7 +691,7 @@ test('J5 identity formation on the first chat', async ({}, testInfo) => {
   }
   note(testInfo, `transcript: identity_formation_prompted (mode ${formation!.mode ?? '?'}) at entry ${formation!.promptedAt}, first reply at ${formation!.firstAssistantAt}`);
   // The gateway's per-agent claim is this conversation's.
-  const dataDir = process.env.UAT_DATA_DIR ?? '';
+  const dataDir = gatewayDataDir();
   const record = path.join(dataDir, 'identity-formation', 'default.json');
   expect(dataDir && fs.existsSync(record), '<dataDir>/identity-formation/default.json exists').toBeTruthy();
   const claim = JSON.parse(fs.readFileSync(record, 'utf8')) as { sessionKey?: string };

@@ -10,10 +10,12 @@
 # the journey through the UI only (journey.spec.ts). Every step prints PASS,
 # FAIL, PENDING or MOCK with evidence. Everything it creates is torn down on
 # exit; the evidence dir is kept, checked for secrets, and scrubbed.
+# UAT_INSTALL=stack installs the whole stack in Docker with install-stack.sh
+# instead (MindStone-Agent #171, lib/stack.sh); the journey is the same.
 set -Eeuo pipefail
 
 if [[ $# -lt 2 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
   echo "See e2e/mindstone-journey/README.md for the environment variables."
   exit 2
 fi
@@ -48,6 +50,14 @@ SECRETS_DIR="${SCRATCH}/harness-secrets" # generated secrets, curl header files;
 OVERRIDE_FILE="${SCRATCH}/compose.uat-override.yml"
 REAL_NPM_CACHE="${npm_config_cache:-${HOME}/.npm}"
 INSTALL_STATUS_TMP="/tmp/mindstone-agent-install-status.txt" # older install.sh's fixed path (F-MSA-1)
+# How MindStone is installed: native (install.sh, then the Console from mindstone/docker-compose.yml) or stack (the
+# gateway, the Console and MongoDB in one Compose project, from install-stack.sh: lib/stack.sh, which also sets the
+# stack's own values of the three below).
+INSTALL_MODE="${UAT_INSTALL:-native}"
+GW_TOKEN_FILE="${MSA_DIR}/.runtime/mindstone/secrets/gateway-token" # the gateway token (stack: a 0600 copy)
+HARNESS_IMAGES="${PROJECT}-console:local"                          # the images this run builds, removed on exit
+CONSOLE_IMAGE="${PROJECT}-console:local"                           # the Console image X2 checks
+STACK_STARTED=0
 
 STEPS_TSV="${EVIDENCE}/harness-steps.tsv"
 LOG_DIR="${EVIDENCE}/logs"
@@ -144,6 +154,16 @@ esac
 [[ "${EXPECT_ENTERPRISE}" == 0 || "${EXPECT_ENTERPRISE}" == 1 ]] || die "UAT_EXPECT_ENTERPRISE must be 0 or 1, not ${EXPECT_ENTERPRISE}"
 [[ "${EXPECT_PERSONA_BUILDER}" == 0 || "${EXPECT_PERSONA_BUILDER}" == 1 ]] || die "UAT_EXPECT_PERSONA_BUILDER must be 0 or 1, not ${EXPECT_PERSONA_BUILDER}"
 [[ "${EXPECT_SETTINGS_PARITY}" == 0 || "${EXPECT_SETTINGS_PARITY}" == 1 ]] || die "UAT_EXPECT_SETTINGS_PARITY must be 0 or 1, not ${EXPECT_SETTINGS_PARITY}"
+[[ "${INSTALL_MODE}" == native || "${INSTALL_MODE}" == stack ]] || die "UAT_INSTALL must be native or stack, not ${INSTALL_MODE}"
+if [[ "${INSTALL_MODE}" == stack ]]; then
+  # The stack's own defaults are a live install's ports: a harness range must never reach them.
+  if (( PORT_MIN <= 3080 && PORT_MAX >= 3080 )) || (( PORT_MIN <= 19789 && PORT_MAX >= 19789 )); then
+    die "stack mode: the port range ${PORT_MIN}-${PORT_MAX} includes 3080 or 19789, the stack's defaults"
+  fi
+  # install-stack.sh and its compose file build from the MindStone-Agent GitHub repos by URL: a fork can't be swapped in.
+  [[ -z "${UAT_MSA_REPO:-}" && -z "${UAT_CONSOLE_REPO:-}" ]] || die "stack mode builds from the MindStone-Agent GitHub repos: unset UAT_MSA_REPO and UAT_CONSOLE_REPO"
+  [[ -z "${UAT_STACK_INSTALLER_FILE:-}" || -r "${UAT_STACK_INSTALLER_FILE}" ]] || die "UAT_STACK_INSTALLER_FILE isn't a readable file: ${UAT_STACK_INSTALLER_FILE}"
+fi
 # NODE_OPTIONS can preload code into every node process the harness starts (the spec, the
 # checks, the gateway): a run with it set proves nothing. Recorded in provenance as empty.
 if [[ -n "${NODE_OPTIONS:-}" ]]; then
@@ -245,13 +265,18 @@ new_secret() { local name="$1"; shift; (umask 077; openssl rand "$@" >"${SECRETS
 write_header_files() {
   (
     umask 077
-    printf 'Authorization: Bearer %s\n' "$(cat "${MSA_DIR}/.runtime/mindstone/secrets/gateway-token")" >"${SECRETS_DIR}/h-auth"
+    printf 'Authorization: Bearer %s\n' "$(cat "${GW_TOKEN_FILE}")" >"${SECRETS_DIR}/h-auth"
     printf 'x-mindstone-admin-token: %s\n' "$(cat "${SECRETS_DIR}/admin-credential")" >"${SECRETS_DIR}/h-admin"
   )
 }
 
 secret_sources() {
-  printf '%s\n' "${SECRETS_DIR}" "${MSA_DIR}/.runtime/mindstone/secrets" "${COMPOSE_DIR}/.env"
+  if [[ "${INSTALL_MODE}" == stack ]]; then
+    # The stack's generated secrets: console.env and gateway.env (600), the admin password, and the harness's copies.
+    printf '%s\n' "${SECRETS_DIR}" "${STACK_DIR}/console.env" "${STACK_DIR}/gateway.env" "${STACK_DIR}/admin-password" "${STACK_MIRROR}/data/secrets"
+  else
+    printf '%s\n' "${SECRETS_DIR}" "${MSA_DIR}/.runtime/mindstone/secrets" "${COMPOSE_DIR}/.env"
+  fi
   [[ -n "${UAT_PROVIDER_KEY_FILE:-}" ]] && printf '%s\n' "${UAT_PROVIDER_KEY_FILE}"
   return 0
 }
@@ -279,6 +304,12 @@ write_redaction_pairs() {
   } | awk -F'\t' 'length($1) >= 3' >"${out}"
 }
 
+# Stack mode: the stack's install steps, and msa_env, mindstone and gateway_cmd against the gateway container.
+if [[ "${INSTALL_MODE}" == stack ]]; then
+  # shellcheck source=lib/stack.sh
+  source "${HERE}/lib/stack.sh"
+fi
+
 # ---------------------------------------------------------------- teardown ----
 teardown() {
   local rc=$?
@@ -301,6 +332,8 @@ teardown() {
     compose logs --no-color --timestamps mongodb >"${LOG_DIR}/mongodb.log" 2>&1
     compose down -v --remove-orphans --timeout 10 >>"${LOG_DIR}/teardown.log" 2>&1
   fi
+  # Stack mode: the logs, `install-stack.sh --uninstall`, then this project's volumes (lib/stack.sh).
+  [[ "${INSTALL_MODE}" == stack ]] && stack_teardown
   # Belt and braces: anything still labelled with our project (the X2 image check's container too), and only that.
   local ids
   ids=$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null)
@@ -308,8 +341,14 @@ teardown() {
   ids=$(docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null)
   [[ -n "${ids}" ]] && docker volume rm ${ids} >>"${LOG_DIR}/teardown.log" 2>&1
   docker network rm "${PROJECT}_default" >/dev/null 2>&1
+  if [[ "${INSTALL_MODE}" == stack ]]; then # the stack's own networks (app, db), and only this project's
+    ids=$(docker network ls -q --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null)
+    [[ -n "${ids}" ]] && docker network rm ${ids} >>"${LOG_DIR}/teardown.log" 2>&1
+  fi
   if [[ "${UAT_KEEP_IMAGE:-0}" != 1 ]]; then
-    docker image rm "${PROJECT}-console:local" >>"${LOG_DIR}/teardown.log" 2>&1
+    for img in ${HARNESS_IMAGES}; do
+      docker image inspect "${img}" >/dev/null 2>&1 && docker image rm "${img}" >>"${LOG_DIR}/teardown.log" 2>&1
+    done
   fi
 
   if [[ -d "${MSA_DIR}" ]]; then
@@ -370,16 +409,21 @@ teardown() {
 
   if [[ "${STARTED}" == 1 ]]; then
     # X4: nothing left behind (what the run was asked to keep doesn't count).
-    local n_cont n_vol img scratch_left port_left stub_left leftovers=()
+    local n_cont n_vol img one scratch_left port_left stub_left console_left=no leftovers=()
     n_cont=$(docker ps -aq --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null | wc -l | tr -d ' ')
     n_vol=$(docker volume ls -q --filter "label=com.docker.compose.project=${PROJECT}" 2>/dev/null | wc -l | tr -d ' ')
-    img=$(docker image inspect "${PROJECT}-console:local" >/dev/null 2>&1 && echo present || echo removed)
+    img=removed
+    for one in ${HARNESS_IMAGES}; do docker image inspect "${one}" >/dev/null 2>&1 && img=present; done
     scratch_left=$([[ -e "${SCRATCH}" ]] && echo yes || echo no)
     port_left=$([[ -n "${GW_PORT}" ]] && ! port_free "${GW_PORT}" && echo yes || echo no)
     stub_left=$({ [[ -n "${ENT_STUB_PORT}" ]] && ! port_free "${ENT_STUB_PORT}"; } || { [[ "${ENT_STUB_PID}" =~ ^[0-9]+$ ]] && kill -0 "${ENT_STUB_PID}" 2>/dev/null; } && echo yes || echo no)
+    # The stack publishes the Console's port itself (natively compose down frees it with the containers, as above).
+    [[ "${INSTALL_MODE}" == stack && -n "${CONSOLE_PORT}" ]] && ! port_free "${CONSOLE_PORT}" && console_left=yes
     {
-      echo "containers: ${n_cont}"; echo "volumes: ${n_vol}"; echo "image ${PROJECT}-console:local: ${img}"
+      echo "containers: ${n_cont}"; echo "volumes: ${n_vol}"; echo "image ${HARNESS_IMAGES// /, }: ${img}"
       echo "scratch exists: ${scratch_left}"; echo "gateway port ${GW_PORT:-none} listening: ${port_left}"
+      [[ "${INSTALL_MODE}" == stack ]] && echo "Console port ${CONSOLE_PORT:-none} listening: ${console_left}"
+      [[ "${INSTALL_MODE}" == stack ]] && echo "stack --uninstall and down -v: $([[ "${STACK_PROJECT_OK}" == 1 && "${STACK_COMPOSE_OK}" == 1 ]] && echo ran || echo "skipped (${STACK_TEARDOWN_SKIP:-unchecked}); label sweep only")"
       echo "J11 stub (port ${ENT_STUB_PORT:-none}) still running: ${stub_left}"
     } >"${EVIDENCE}/cleanup.txt" 2>/dev/null
     [[ "${n_cont}" == 0 ]] || leftovers+=("${n_cont} containers")
@@ -387,6 +431,7 @@ teardown() {
     [[ "${img}" == removed || "${UAT_KEEP_IMAGE:-0}" == 1 ]] || leftovers+=("the image")
     [[ "${scratch_left}" == no || "${UAT_KEEP_SCRATCH:-0}" == 1 ]] || leftovers+=("the scratch dir")
     [[ "${port_left}" == no ]] || leftovers+=("a listener on ${GW_PORT}")
+    [[ "${console_left}" == no ]] || leftovers+=("a listener on ${CONSOLE_PORT}")
     [[ "${stub_left}" == no ]] || leftovers+=("the J11 stub Azure endpoint (port ${ENT_STUB_PORT})")
     if [[ ${#leftovers[@]} -eq 0 ]]; then
       record X4 PASS "cleanup: nothing left behind" "${EVIDENCE}/cleanup.txt" "$(tr '\n' ';' <"${EVIDENCE}/cleanup.txt")"
@@ -419,7 +464,7 @@ teardown() {
 summary() {
   local rc="$1" id status title ev note reasons=() count row_status
   echo
-  log "summary: MindStone-Agent@${MSA_REF}  mindstone-console@${CONSOLE_REF}  (run ${RUN_ID}, $(elapsed "${T0}"))"
+  log "summary: MindStone-Agent@${MSA_REF}  mindstone-console@${CONSOLE_REF}  install ${INSTALL_MODE}  (run ${RUN_ID}, $(elapsed "${T0}"))"
   echo
   printf '  %-7s %-4s %s\n' STATUS ID STEP
   if [[ -f "${STEPS_TSV}" ]]; then
@@ -543,6 +588,12 @@ summary() {
     echo
     echo "MindStone-Agent \`${MSA_REF}\` ($(grep '^msa_sha=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2)), mindstone-console \`${CONSOLE_REF}\` ($(grep '^console_sha=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2)); provider $(grep '^provider=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2) $(grep '^provider_model=' "${EVIDENCE}/run.env" 2>/dev/null | cut -d= -f2); duration $(elapsed "${T0}")."
     echo
+    if [[ "${INSTALL_MODE}" == stack ]]; then
+      echo "Install mode: **stack** (\`UAT_INSTALL=stack\`): MindStone-Agent's \`install-stack.sh\` $([[ -n "${UAT_STACK_INSTALLER_FILE:-}" ]] && echo "from a local file (\`UAT_STACK_INSTALLER_FILE\`), not the raw URL" || echo "from \`${STACK_INSTALLER_URL}\`") with \`--ref ${STACK_MSA_INSTALL_REF} --console-ref ${STACK_CONSOLE_INSTALL_REF}\`$([[ "${STACK_PIN}" != 0 ]] && echo " (\`${MSA_REF}\` and \`${CONSOLE_REF}\` as the run started: installed at exactly these commits)"): the gateway, the Console and MongoDB in one Compose project (\`${PROJECT}\`), MindStone-Agent README install guide path A."
+    else
+      echo "Install mode: **native** (\`UAT_INSTALL\` unset): MindStone-Agent's \`install.sh\` at \`${MSA_REF}\` on this host, and the Console at \`${CONSOLE_REF}\` from \`mindstone/docker-compose.yml\`."
+    fi
+    echo
     echo "**GATE: ${gate}**"
     echo
     echo "**DEMO SUBSET (J1–J6, J9 + S/C/X): ${demo}**"
@@ -624,7 +675,7 @@ fi
 
 GW_PORT="$(pick_port)" || die "no free port in ${PORT_MIN}-${PORT_MAX}"
 CONSOLE_PORT="$(pick_port "${GW_PORT}")" || die "no second free port in ${PORT_MIN}-${PORT_MAX}"
-if [[ "$(uname -s)" == Linux ]]; then
+if [[ "$(uname -s)" == Linux && "${INSTALL_MODE}" == native ]]; then # the stack publishes the gateway on 127.0.0.1 itself
   MINDSTONE_AGENT_GATEWAY_HOST_OVERRIDE="${UAT_GATEWAY_BRIDGE_HOST:-172.17.0.1}"
   GW_HOST="${MINDSTONE_AGENT_GATEWAY_HOST_OVERRIDE}"
 else
@@ -632,10 +683,14 @@ else
   GW_HOST="127.0.0.1"
 fi
 GW_URL="http://${GW_HOST}:${GW_PORT}"
+# Stack mode: the commits the stack is installed at, resolved now (lib/stack.sh).
+[[ "${INSTALL_MODE}" == stack ]] && stack_pin_refs
 CONSOLE_URL="http://localhost:${CONSOLE_PORT}"
 
 {
   echo "run_id=${RUN_ID}"; echo "msa_ref=${MSA_REF}"; echo "console_ref=${CONSOLE_REF}"
+  echo "install_mode=${INSTALL_MODE}"
+  [[ "${INSTALL_MODE}" == stack ]] && { echo "stack_installer=${UAT_STACK_INSTALLER_FILE:-${STACK_INSTALLER_URL}}"; echo "stack_dir=${STACK_DIR}"; echo "stack_ollama_base_url=${STACK_OLLAMA_BASE_URL}"; }
   echo "msa_repo=${MSA_REPO}"; echo "console_repo=${CONSOLE_REPO}"
   echo "compose_project=${PROJECT}"; echo "scratch=${SCRATCH}"
   echo "gateway=${GW_URL}"; echo "console=${CONSOLE_URL}"
@@ -651,7 +706,7 @@ CONSOLE_URL="http://localhost:${CONSOLE_PORT}"
   echo "started=$(date -u +%FT%TZ)"
 } >"${EVIDENCE}/run.env"
 
-log "journey UAT ${RUN_ID}: MindStone-Agent@${MSA_REF}, mindstone-console@${CONSOLE_REF}"
+log "journey UAT ${RUN_ID}: MindStone-Agent@${MSA_REF}, mindstone-console@${CONSOLE_REF} (install: ${INSTALL_MODE})"
 log "gateway port ${GW_PORT}, Console port ${CONSOLE_PORT}, compose project ${PROJECT}"
 log "scratch ${SCRATCH}"
 log "evidence ${EVIDENCE}"
@@ -659,12 +714,20 @@ if [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" 
   log "${c_red}${c_bold}SELF-TEST: message bodies will be blanked on purpose (UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES}); J4 must FAIL${c_reset}"
   deviation "SELF-TEST: \`UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES}\` hides $([[ "${UAT_SELFTEST_BLANK_MESSAGES}" == assistant ]] && echo "the agent's rendered replies (the user's bubbles stay)" || echo 'every rendered message body'), to prove J4/J6's on-screen checks fire. This run can't pass."
 fi
-deviation "Ports: the gateway listens on ${GW_PORT} (\`MINDSTONE_AGENT_GATEWAY_PORT\` in its environment, plus \`gateway.port\` **and \`gateway.host\` (${GW_HOST})** written to config.json so the CLI's health checks agree) and the Console on ${CONSOLE_PORT} (a compose override with its own container names and image tag), not 19789/3080; \`MINDSTONE_GATEWAY_URL\` in the Console's \`.env\` points at ${GW_PORT}."
-deviation "HOME is a scratch dir for every MindStone-Agent command, so the README's \`\$HOME/.mindstone-admin-credential\` lands in scratch; inherited MINDSTONE_*/PI_* variables are dropped."
-deviation "The README's \`curl … | bash\` runs \`install.sh\` downloaded from ${MSA_RAW}/${MSA_REF} with \`--dir <scratch> --no-link --branch ${MSA_REF} --repo ${MSA_REPO}\`$([[ "${MSA_REPO}" == "${MSA_REPO_DEFAULT}" ]] && echo ' (the default repo, passed explicitly)')."
-deviation "The READMEs put secrets on command lines (\`curl -H \"Authorization: Bearer \$(cat …)\"\`; the Console's \`sed \"s|^KEY=.*|KEY=\$(…)|\"\`). The harness sends curl headers from 0600 files (\`curl -H @file\`) and writes each \`.env\` secret with \`lib/env-set.mjs\`, which reads the value from a 0600 file, so no secret is in any process's argv."
-if [[ "$(uname -s)" == Linux ]]; then
-  deviation "Linux: the gateway runs with \`MINDSTONE_AGENT_GATEWAY_HOST=${GW_HOST}\` (MSA README 5.5; \`UAT_GATEWAY_BRIDGE_HOST\`), on every start and restart."
+if [[ "${INSTALL_MODE}" == native ]]; then
+  deviation "Ports: the gateway listens on ${GW_PORT} (\`MINDSTONE_AGENT_GATEWAY_PORT\` in its environment, plus \`gateway.port\` **and \`gateway.host\` (${GW_HOST})** written to config.json so the CLI's health checks agree) and the Console on ${CONSOLE_PORT} (a compose override with its own container names and image tag), not 19789/3080; \`MINDSTONE_GATEWAY_URL\` in the Console's \`.env\` points at ${GW_PORT}."
+  deviation "HOME is a scratch dir for every MindStone-Agent command, so the README's \`\$HOME/.mindstone-admin-credential\` lands in scratch; inherited MINDSTONE_*/PI_* variables are dropped."
+  deviation "The README's \`curl … | bash\` runs \`install.sh\` downloaded from ${MSA_RAW}/${MSA_REF} with \`--dir <scratch> --no-link --branch ${MSA_REF} --repo ${MSA_REPO}\`$([[ "${MSA_REPO}" == "${MSA_REPO_DEFAULT}" ]] && echo ' (the default repo, passed explicitly)')."
+  deviation "The READMEs put secrets on command lines (\`curl -H \"Authorization: Bearer \$(cat …)\"\`; the Console's \`sed \"s|^KEY=.*|KEY=\$(…)|\"\`). The harness sends curl headers from 0600 files (\`curl -H @file\`) and writes each \`.env\` secret with \`lib/env-set.mjs\`, which reads the value from a 0600 file, so no secret is in any process's argv."
+  if [[ "$(uname -s)" == Linux ]]; then
+    deviation "Linux: the gateway runs with \`MINDSTONE_AGENT_GATEWAY_HOST=${GW_HOST}\` (MSA README 5.5; \`UAT_GATEWAY_BRIDGE_HOST\`), on every start and restart."
+  fi
+else
+  deviation "Stack mode (\`UAT_INSTALL=stack\`, MindStone-Agent README install guide path A): the README's \`curl -fsSL …/install-stack.sh | bash -s -- …\` runs $([[ -n "${UAT_STACK_INSTALLER_FILE:-}" ]] && echo "a local install-stack.sh (\`UAT_STACK_INSTALLER_FILE\`) piped to bash" || echo "the installer from ${STACK_INSTALLER_URL}")$([[ "${STACK_PIN}" != 0 ]] && echo ", pinned to the commits ${MSA_REF} and ${CONSOLE_REF} named at the start of the run (\`UAT_STACK_PIN=0\` passes the refs as given)") with \`--dir <scratch>/stack --ref ${STACK_MSA_INSTALL_REF} --console-ref ${STACK_CONSOLE_INSTALL_REF} --admin-email ${UAT_ADMIN_EMAIL:-uat-admin@example.com} --admin-name \"UAT Admin\"\` and, on bash's environment, \`CONSOLE_PORT=${CONSOLE_PORT} MINDSTONE_GATEWAY_PORT=${GW_PORT} MINDSTONE_PROJECT=${PROJECT}\` (not 3080/19789/mindstone)$([[ -n "${UAT_STACK_OLLAMA_BASE_URL:-}" ]] && echo ", plus \`--ollama-url ${STACK_OLLAMA_BASE_URL}\`")."
+  deviation "Stack mode: every \`docker compose\` the harness runs names its project and file (\`-p ${PROJECT} --project-directory <scratch>/stack -f <scratch>/stack/compose.yml\`) instead of the README's \`cd ~/.mindstone && docker compose …\`; the CLI runs as the README's \`docker compose exec gateway ./scripts/mindstone <command>\`, and gateway restarts are \`docker compose restart gateway\`."
+  deviation "Stack mode: the gateway's data, transcripts, Pi sessions and log are in its container's volumes, so the journey reads copies, taken with \`docker compose cp\` and \`docker compose logs\` just before each read (\`lib/stack-files.js\`); J12's USER.md restore removes the file with \`docker compose exec\`."
+  deviation "Stack mode, J11: the gateway's container reaches the stub as host.docker.internal, not loopback, and MindStone-Agent #126 allows plain http to loopback only. So the stub speaks https with a per-run test CA, and the harness puts \`MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1\` and \`NODE_EXTRA_CA_CERTS\` (that CA, mounted from the install folder) in the stack's \`compose.override.yml\` (the stack's place for local changes, which install-stack.sh includes), then \`docker compose up -d gateway\` (S3; the file is \`stack-compose.override.yml\`). The Playwright process trusts the same CA for its own stub checks."
+  deviation "Stack mode: the Console's secrets, the gateway token, the admin credential (only its sha256 on the gateway) and the admin password are generated by install-stack.sh; the harness reads them from the stack's 600 files into its own 600 files, never printed, for its probes and the secret check (X1)."
 fi
 
 # ------------------------------------------------- the model provider ------
@@ -760,6 +823,12 @@ EMBED_MODELS_PULLED=""
 { echo "provider=${PROVIDER}"; echo "provider_model=${PROVIDER_MODEL}"; echo "embed_model=${EMBED_MODEL:-none}"; echo "embed_models_pulled=${EMBED_MODELS_PULLED}"; echo "alt_model=${ALT_MODEL:-unset}"; } >>"${EVIDENCE}/run.env"
 log "model provider: ${PROVIDER}${PROVIDER_MODEL:+ (${PROVIDER_MODEL})}; embedding model: ${EMBED_MODEL:-none}; J12's other model: ${ALT_MODEL:-unset}"
 
+if [[ "${INSTALL_MODE}" == stack ]]; then
+  # The whole stack from install-stack.sh (MindStone-Agent README path A): rows S0-S5 and C0-C3 (lib/stack.sh).
+  stack_install_steps
+fi
+# The native install, rows S0-S5 and C0-C3 (MindStone-Agent #106). Not indented, to keep its history readable.
+if [[ "${INSTALL_MODE}" == native ]]; then
 # =============================================================================
 # MindStone-Agent README, "Install guide for AI agents"
 # =============================================================================
@@ -812,7 +881,9 @@ CURRENT_STEP=""
 # exists, and the fresh config says placeholder.
 CURRENT_STEP=S2
 CONFIG="${MSA_DIR}/.runtime/mindstone/config.json"
-step2=$(awk '/^### 2\./{on=1; print; next} on && /^### /{exit} on' "${MSA_README}")
+# README step 2 is "### 2." (single path) or "#### B2." (path B, native, since MindStone-Agent #171): take that
+# section down to the next heading at the same level or higher.
+step2=$(awk '!on && /^#+ B?2\. /{lvl=index($0," ")-1; on=1; print; next} on && /^#+ /{if (index($0," ")-1 <= lvl) exit} on' "${MSA_README}")
 printf '%s\n' "${step2}" >"${LOG_DIR}/msa-readme-step2.txt"
 s2_problems=()
 if printf '%s' "${step2}" | grep -q '(b)' && printf '%s' "${step2}" | grep -qi 'console'; then has_2b=1; else has_2b=0; s2_problems+=("README step 2 has no (b) Console-first path"); fi
@@ -1039,25 +1110,44 @@ else
   die "Console didn't start"
 fi
 CURRENT_STEP=""
+fi # the native install, S0-C3
 
 # X2: the built image carries no secrets: no /app/mindstone (its .env), /app/.env empty or
 # absent, no non-empty .env files anywhere under /app. A throwaway container, labelled with
 # our project so teardown removes it if anything goes wrong; no network.
 CURRENT_STEP=X2
-if docker run --rm --network none --label "com.docker.compose.project=${PROJECT}" --entrypoint sh "${PROJECT}-console:local" -c '
+# Stack mode (X2_GIT_CONTEXT=1): the image is built from the Console's git URL, a clean clone, and BuildKit doesn't
+# apply .dockerignore to a git context, so /app/mindstone is there with the tracked files only (finding F-STACK-2).
+# There, what that .dockerignore rule keeps out is checked instead: mindstone/'s .env and its live data.
+if docker run --rm --network none --label "com.docker.compose.project=${PROJECT}" --entrypoint sh \
+  -e X2_GIT_CONTEXT="$([[ "${INSTALL_MODE}" == stack ]] && echo 1 || echo 0)" "${CONSOLE_IMAGE}" -c '
   fail=0
-  if [ -e /app/mindstone ]; then echo "FOUND: /app/mindstone"; fail=1; else echo "absent: /app/mindstone"; fi
+  if [ "$X2_GIT_CONTEXT" = 1 ] && [ -d /app/mindstone ]; then
+    echo "present: /app/mindstone (git-URL build context; .dockerignore not applied): $(ls -A /app/mindstone | tr "\n" " ")"
+    for f in .env data-node uploads logs; do
+      if [ -e "/app/mindstone/$f" ]; then echo "FOUND: /app/mindstone/$f"; fail=1; else echo "absent: /app/mindstone/$f"; fi
+    done
+  elif [ -e /app/mindstone ]; then echo "FOUND: /app/mindstone"; fail=1; else echo "absent: /app/mindstone"; fi
   if [ -s /app/.env ]; then echo "FOUND: /app/.env is not empty"; fail=1; else echo "empty or absent: /app/.env"; fi
   found=$(find /app -name node_modules -prune -o -type f \( -name ".env" -o -name ".env.*" \) ! -name "*.example" -size +0c -print 2>/dev/null)
   if [ -n "$found" ]; then echo "FOUND non-empty env files:"; echo "$found"; fail=1; else echo "no non-empty .env files under /app (node_modules skipped)"; fi
   exit $fail' >"${LOG_DIR}/image-check.log" 2>&1; then
-  record X2 PASS "the Console image holds no secrets (/app/mindstone absent, /app/.env empty or absent)" "${LOG_DIR}/image-check.log"
+  if grep -q '^present: /app/mindstone' "${LOG_DIR}/image-check.log"; then
+    record X2 PASS "the Console image holds no secrets (stack: /app/mindstone from the git clone has no .env, data-node, uploads or logs; /app/.env empty or absent)" "${LOG_DIR}/image-check.log" \
+      "$(grep '^present:' "${LOG_DIR}/image-check.log")"
+    finding F-STACK-2 "The stack builds the Console from its git URL (\`deploy/docker/compose.yml\`, \`CONSOLE_BUILD_CONTEXT\` unset), and BuildKit doesn't apply the Console's \`.dockerignore\` to a git context, so its image has what that file keeps out of the native image: \`/app/mindstone\` (tracked files only: $(grep '^present:' "${LOG_DIR}/image-check.log" | sed 's/^.*: //')), and \`docs\`, \`e2e\`, hidden files, \`Dockerfile\`. A git clone has no \`.env\` or live data, so no secret is baked in (X2 checks that), but the image isn't the one the \`.dockerignore\` describes."
+  else
+    record X2 PASS "the Console image holds no secrets (/app/mindstone absent, /app/.env empty or absent)" "${LOG_DIR}/image-check.log"
+  fi
 else
   record X2 FAIL "the Console image may hold secrets" "${LOG_DIR}/image-check.log" "$(grep FOUND "${LOG_DIR}/image-check.log" | head -3 | tr '\n' ' ')"
 fi
 CURRENT_STEP=""
 
 # --- step 4: create the admin account ------------------------------------------------
+if [[ "${INSTALL_MODE}" == stack ]]; then
+  stack_admin_step # install-stack.sh made the admin; README A3's sign-in check (lib/stack.sh)
+else
 CURRENT_STEP=C4
 ADMIN_EMAIL="${UAT_ADMIN_EMAIL:-uat-admin@example.com}"
 (umask 077; openssl rand -base64 24 | tr -d '/+=' | cut -c1-24 >"${SECRETS_DIR}/admin-password")
@@ -1071,6 +1161,7 @@ fi
 # Console step 2: once the Console runs, delete the admin credential; .env is then the only copy.
 rm -f "${SCRATCH_HOME}/.mindstone-admin-credential"
 CURRENT_STEP=""
+fi # the native C4
 
 # =============================================================================
 # The journey, in the UI only (journey.spec.ts)
@@ -1147,15 +1238,21 @@ provider_key_file=""
 ENT_TOKEN="$(printf 'quartz-heron-%s' "$(openssl rand -hex 5)")"
 ENT_DEPLOYMENT="uat-gpt-4o"
 ENT_STUB_URL=""
+ENT_STUB_GATEWAY_URL="" # the stub as the gateway reaches it, where that isn't ENT_STUB_URL (stack mode)
+# Stack mode: https, with the per-run CA the gateway container trusts (S3, lib/stack.sh); natively plain http.
+ENT_STUB_SCHEME=http
+[[ "${INSTALL_MODE}" == stack ]] && ENT_STUB_SCHEME=https
 (umask 077; printf 'uat-fake-azure-key-%s\n' "$(openssl rand -hex 16)" >"${SECRETS_DIR}/ent-azure-key")
 if ENT_STUB_PORT="$(pick_port "${GW_PORT}" "${CONSOLE_PORT}")"; then
   UAT_ENT_STUB_PORT="${ENT_STUB_PORT}" UAT_ENT_KEY_FILE="${SECRETS_DIR}/ent-azure-key" UAT_ENT_TOKEN="${ENT_TOKEN}" \
     UAT_ENT_STUB_LOG="${LOG_DIR}/j11-azure-stub-requests.jsonl" UAT_ENT_STUB_PARENT_PID="$$" \
-    UAT_ENT_FORBIDDEN_FILES="${MSA_DIR}/.runtime/mindstone/secrets/gateway-token:${SECRETS_DIR}/admin-credential" \
+    UAT_ENT_FORBIDDEN_FILES="${GW_TOKEN_FILE}:${SECRETS_DIR}/admin-credential" \
+    UAT_ENT_STUB_TLS_CERT="${STACK_STUB_CERT:-}" UAT_ENT_STUB_TLS_KEY="${STACK_STUB_KEY:-}" \
     node "${HERE}/lib/azure-stub.mjs" >"${LOG_DIR}/j11-azure-stub.log" 2>&1 &
   ENT_STUB_PID=$!
   for _ in $(seq 1 20); do
-    curl -sf -m 2 "http://127.0.0.1:${ENT_STUB_PORT}/__stub/health" >/dev/null 2>&1 && { ENT_STUB_URL="http://127.0.0.1:${ENT_STUB_PORT}"; break; }
+    curl -sf -m 2 ${STACK_CA_FILE:+--cacert "${STACK_CA_FILE}"} "${ENT_STUB_SCHEME}://127.0.0.1:${ENT_STUB_PORT}/__stub/health" >/dev/null 2>&1 \
+      && { ENT_STUB_URL="${ENT_STUB_SCHEME}://127.0.0.1:${ENT_STUB_PORT}"; break; }
     kill -0 "${ENT_STUB_PID}" 2>/dev/null || break
     sleep 0.5
   done
@@ -1163,14 +1260,38 @@ fi
 if [[ -n "${ENT_STUB_URL}" ]]; then
   log "  J11 stub Azure endpoint on port ${ENT_STUB_PORT} (fake per-run key; token ${ENT_TOKEN})"
   deviation "J11: a stub Azure OpenAI endpoint (\`lib/azure-stub.mjs\`, not part of either README) listens on 127.0.0.1:${ENT_STUB_PORT} with a fake per-run key and stands in for the enterprise's Azure resource. Its request log, key redacted, is \`logs/j11-azure-stub-requests.jsonl\`."
+  if [[ "${INSTALL_MODE}" == stack ]]; then
+    ENT_STUB_GATEWAY_URL="https://host.docker.internal:${ENT_STUB_PORT}"
+    deviation "J11 in stack mode: the Endpoint typed in the UI is ${ENT_STUB_GATEWAY_URL}/openai/v1 (the stub over https, as the gateway's container reaches this host)."
+  fi
 else
   log "  ${c_yellow}J11 stub Azure endpoint didn't start (${LOG_DIR}/j11-azure-stub.log)${c_reset}"
   stop_ent_stub
 fi
 { echo "ent_stub_port=${ENT_STUB_PORT}"; echo "ent_token=${ENT_TOKEN}"; } >>"${EVIDENCE}/run.env"
+# Where the journey finds the gateway's files and Ollama. Stack mode: copies of the container's files
+# (lib/stack-files.js), and Ollama as the gateway's container reaches it (the harness's own probes use OLLAMA_URL).
+if [[ "${INSTALL_MODE}" == stack ]]; then
+  PW_GATEWAY_LOG="${STACK_MIRROR}/gateway.log"
+  PW_DATA_DIR="${STACK_MIRROR}/data"
+  PW_OLLAMA_BASE_URL="${STACK_OLLAMA_BASE_URL}"
+else
+  PW_GATEWAY_LOG="${MSA_DIR}/.runtime/mindstone/gateway/gateway.log"
+  PW_DATA_DIR="${MSA_DIR}/.runtime/mindstone"
+  PW_OLLAMA_BASE_URL="${OLLAMA_URL}/v1"
+fi
 rm -f "${EVIDENCE}/journey-results.tsv" "${EVIDENCE}/journey-state.json" "${EVIDENCE}/journey-flow.txt" "${EVIDENCE}/stalls.tsv" "${EVIDENCE}/restore-failures.tsv"
 set +e
 (cd "${PW_DIR}" && \
+  { [[ -z "${STACK_CA_FILE:-}" ]] || export NODE_EXTRA_CA_CERTS="${STACK_CA_FILE}"; } && \
+  UAT_INSTALL="${INSTALL_MODE}" \
+  UAT_STACK_PROJECT="$([[ "${INSTALL_MODE}" == stack ]] && echo "${PROJECT}")" \
+  UAT_STACK_DIR="${STACK_DIR:-}" \
+  UAT_STACK_MIRROR="${STACK_MIRROR:-}" \
+  UAT_STACK_GATEWAY_DATA_DIR="${STACK_GATEWAY_DATA_DIR:-}" \
+  UAT_STACK_GATEWAY_SESSIONS_DIR="${STACK_GATEWAY_SESSIONS_DIR:-}" \
+  UAT_OLLAMA_HOST_URL="${OLLAMA_URL}/v1" \
+  UAT_ENT_STUB_GATEWAY_URL="${ENT_STUB_GATEWAY_URL}" \
   UAT_CONSOLE_URL="${CONSOLE_URL}" \
   UAT_EVIDENCE_DIR="${EVIDENCE}" \
   UAT_ADMIN_EMAIL="${ADMIN_EMAIL}" \
@@ -1178,16 +1299,16 @@ set +e
   UAT_PROVIDER="${PROVIDER}" \
   UAT_PROVIDER_MODEL="${PROVIDER_MODEL}" \
   UAT_PROVIDER_KEY_FILE="${provider_key_file}" \
-  UAT_OLLAMA_BASE_URL="${OLLAMA_URL}/v1" \
+  UAT_OLLAMA_BASE_URL="${PW_OLLAMA_BASE_URL}" \
   UAT_OLLAMA_EMBED_MODEL="${EMBED_MODEL}" \
   UAT_ALT_MODEL="${ALT_MODEL}" \
   UAT_OLLAMA_EMBED_MODELS="${EMBED_MODELS_PULLED}" \
   UAT_GATEWAY_URL="${GW_URL}" \
   UAT_GATEWAY_AUTH_HEADER_FILE="${SECRETS_DIR}/h-auth" \
   UAT_GATEWAY_ADMIN_HEADER_FILE="${SECRETS_DIR}/h-admin" \
-  UAT_GATEWAY_LOG="${MSA_DIR}/.runtime/mindstone/gateway/gateway.log" \
-  UAT_TRANSCRIPT_DIR="${MSA_DIR}/.runtime/mindstone/transcripts" \
-  UAT_DATA_DIR="${MSA_DIR}/.runtime/mindstone" \
+  UAT_GATEWAY_LOG="${PW_GATEWAY_LOG}" \
+  UAT_TRANSCRIPT_DIR="${PW_DATA_DIR}/transcripts" \
+  UAT_DATA_DIR="${PW_DATA_DIR}" \
   UAT_EXPECT_ENTERPRISE="${EXPECT_ENTERPRISE}" \
   UAT_EXPECT_PERSONA_BUILDER="${EXPECT_PERSONA_BUILDER}" \
   UAT_EXPECT_SETTINGS_PARITY="${EXPECT_SETTINGS_PARITY}" \

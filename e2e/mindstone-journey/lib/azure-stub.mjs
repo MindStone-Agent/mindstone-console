@@ -37,9 +37,15 @@
 // It listens on 127.0.0.1 only, and exits by itself when its parent (the
 // harness) is gone or after UAT_ENT_STUB_MAX_MS (default 3 h), so a killed
 // harness can't leave it running.
+//
+// With UAT_ENT_STUB_TLS_CERT and UAT_ENT_STUB_TLS_KEY (PEM files) it speaks
+// https instead of http. The harness's stack mode (UAT_INSTALL=stack) needs it:
+// the gateway in its container reaches the stub as host.docker.internal, which
+// isn't loopback, and MindStone-Agent #126 allows plain http to loopback only.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
 import { fileURLToPath } from 'node:url';
 
 /** Where the Responses API is called, as a path suffix. Pi posts to `<endpoint>/responses`; adjust here if that changes. */
@@ -139,9 +145,10 @@ export function responseEvents(text, model) {
 /**
  * Starts the stub. Options: port, key (the fake key's value), token, log (the
  * request log path), forbidden ([{ value, label }]: credentials that must
- * never arrive), host (127.0.0.1). Resolves to { server, port, url, close() }.
+ * never arrive), host (127.0.0.1), tls ({ cert, key } in PEM: https instead
+ * of http). Resolves to { server, port, url, close() }.
  */
-export async function startAzureStub({ port, key, token, log, forbidden = [], host = '127.0.0.1', deltaDelayMs = 15 }) {
+export async function startAzureStub({ port, key, token, log, forbidden = [], host = '127.0.0.1', deltaDelayMs = 15, tls }) {
   if (!key || key.length < 8) throw new Error('azure stub: no key (at least 8 characters)');
   if (!token) throw new Error('azure stub: no token');
   if (!log) throw new Error('azure stub: no request log path');
@@ -153,7 +160,7 @@ export async function startAzureStub({ port, key, token, log, forbidden = [], ho
     fs.appendFileSync(log, `${scrub(JSON.stringify(entry), secrets)}\n`);
   };
 
-  const server = http.createServer((req, res) => {
+  const handler = (req, res) => {
     const chunks = [];
     let size = 0;
     req.on('data', (chunk) => {
@@ -233,7 +240,8 @@ export async function startAzureStub({ port, key, token, log, forbidden = [], ho
       };
       next();
     });
-  });
+  };
+  const server = tls ? https.createServer({ cert: tls.cert, key: tls.key }, handler) : http.createServer(handler);
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -243,7 +251,7 @@ export async function startAzureStub({ port, key, token, log, forbidden = [], ho
   return {
     server,
     port: actual,
-    url: `http://${host}:${actual}`,
+    url: `${tls ? 'https' : 'http'}://${host}:${actual}`,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
@@ -271,7 +279,10 @@ async function main() {
     .split(':')
     .filter(Boolean)
     .map((file, i) => ({ value: readValue(file, `UAT_ENT_FORBIDDEN_FILES entry ${i + 1}`), label: `<forbidden credential ${i + 1}>` }));
-  const stub = await startAzureStub({ port, key, token: env.UAT_ENT_TOKEN, log: env.UAT_ENT_STUB_LOG, forbidden });
+  // https (stack mode): both PEM files, or neither.
+  if (!env.UAT_ENT_STUB_TLS_CERT !== !env.UAT_ENT_STUB_TLS_KEY) throw new Error('UAT_ENT_STUB_TLS_CERT and UAT_ENT_STUB_TLS_KEY go together');
+  const tls = env.UAT_ENT_STUB_TLS_CERT ? { cert: fs.readFileSync(env.UAT_ENT_STUB_TLS_CERT), key: fs.readFileSync(env.UAT_ENT_STUB_TLS_KEY) } : undefined;
+  const stub = await startAzureStub({ port, key, token: env.UAT_ENT_TOKEN, log: env.UAT_ENT_STUB_LOG, forbidden, tls });
   console.log(`azure stub listening on ${stub.url} (responses at *${RESPONSES_SUFFIX}, key in the ${KEY_HEADER} header; ${forbidden.length} forbidden credential(s) watched)`);
   // Never outlive the harness.
   const parent = Number(env.UAT_ENT_STUB_PARENT_PID);

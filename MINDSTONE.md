@@ -28,6 +28,7 @@ This repository is **MindStone Console**, the web interface for [MindStone-Agent
 | Approvals | Approve or reject actions the agent proposes. |
 | Diagnostics | The gateway's doctor report and its log. |
 | Restart | Restart the gateway from the settings page. The gateway checks which supervisor it runs under before exiting. |
+| Journey UAT (MindStone-Agent #106, #171) | `e2e/mindstone-journey/run-journey.sh` is the fresh-install acceptance gate. It installs natively by default; with `UAT_INSTALL=stack` it installs the whole stack in Docker instead, with MindStone-Agent's `install-stack.sh` piped to bash from the raw URL at the ref (MindStone-Agent README path A), on the harness's own ports and Compose project. The same rows, gate and DEMO SUBSET apply; the CLI and gateway restarts go through the gateway container, the journey reads copies of the gateway's files taken out of its volumes, and J11's stub endpoint speaks https with a per-run CA the gateway trusts. Teardown runs `install-stack.sh --uninstall`, then removes only that project's volumes and images. |
 
 Still to come is everything else on the CLI-parity checklist: [#6](https://github.com/MindStone-Agent/mindstone-console/issues/6).
 

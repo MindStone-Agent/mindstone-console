@@ -125,8 +125,18 @@ export async function attachText(testInfo: TestInfo, name: string, text: string)
   return file;
 }
 
+// The gateway's files in the harness's stack mode (UAT_INSTALL=stack): copied out of its container into a host
+// mirror before they are read. Natively a no-op (lib/stack-files.js).
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const stackFiles = require('./stack-files.js') as {
+  refresh: (what: 'data' | 'sessions' | 'log') => boolean;
+  hostPath: (file: string) => string;
+  removeInGateway: (relative: string) => boolean;
+};
+
 /** The last lines of the gateway log, as a log excerpt for the step. */
 export async function gatewayExcerpt(testInfo: TestInfo, lines = 80): Promise<void> {
+  stackFiles.refresh('log');
   const log = process.env.UAT_GATEWAY_LOG;
   if (!log || !fs.existsSync(log)) return;
   const tail = fs.readFileSync(log, 'utf8').split('\n').slice(-lines).join('\n');
@@ -670,6 +680,7 @@ function lastModelPair(file: string): { provider?: string; model?: string } {
  * the provider and model that were actually called.
  */
 export function answeredBy(replyText: string): AnsweredBy | undefined {
+  stackFiles.refresh('data');
   const dir = process.env.UAT_TRANSCRIPT_DIR;
   if (!dir || !fs.existsSync(dir)) return undefined;
   const head = replyText.trim().slice(0, 40);
@@ -700,7 +711,8 @@ export function answeredBy(replyText: string): AnsweredBy | undefined {
         transcriptFile: path.relative(dir, file),
         sessionFile: pi?.sessionFile ? path.basename(pi.sessionFile) : undefined,
       };
-      if (pi?.sessionFile && fs.existsSync(pi.sessionFile)) Object.assign(result, lastModelPair(pi.sessionFile));
+      const sessionFile = pi?.sessionFile ? stackFiles.hostPath(pi.sessionFile) : undefined;
+      if (sessionFile && fs.existsSync(sessionFile)) Object.assign(result, lastModelPair(sessionFile));
       return result;
     }
   }
@@ -731,6 +743,7 @@ const { sessionLines, recallEvidence, controlEvidence, isInvariantMarkdown } = r
 
 /** A Console conversation's gateway transcript entries (session key ending in its id), in order. */
 function conversationEntries(conversationId: string): SessionEntry[] {
+  stackFiles.refresh('data');
   const dir = process.env.UAT_TRANSCRIPT_DIR;
   if (!dir || !fs.existsSync(dir) || !conversationId) return [];
   const entries: SessionEntry[] = [];
@@ -813,7 +826,8 @@ export function answeredInConversation(conversationId: string): AnsweredBy | und
     modelFallbackMessage: pi?.modelFallbackMessage,
     sessionFile: pi?.sessionFile ? path.basename(pi.sessionFile) : undefined,
   };
-  if (pi?.sessionFile && fs.existsSync(pi.sessionFile)) Object.assign(result, lastModelPair(pi.sessionFile));
+  const sessionFile = pi?.sessionFile ? stackFiles.hostPath(pi.sessionFile) : undefined;
+  if (sessionFile && fs.existsSync(sessionFile)) Object.assign(result, lastModelPair(sessionFile));
   return result;
 }
 
@@ -842,9 +856,16 @@ export type ControlEvidence = { entries: number; assistantAt: number; recallEven
 
 /** The gateway's data dir (<checkout>/.runtime/mindstone); J5 and J9 read its records. */
 function dataDir(): string {
+  stackFiles.refresh('data');
   const dir = process.env.UAT_DATA_DIR ?? '';
   if (!dir || !fs.existsSync(dir)) throw new Error("UAT_DATA_DIR is not set or doesn't exist: the gateway's data dir (run through run-journey.sh)");
   return dir;
+}
+
+/** The gateway's data dir, up to date (stack mode: its mirror, copied out of the container just now). */
+export function gatewayDataDir(): string {
+  stackFiles.refresh('data');
+  return process.env.UAT_DATA_DIR ?? '';
 }
 
 /**
@@ -861,7 +882,8 @@ export function removeAgentUserFile(userPath: string): string | undefined {
     throw new Error(`refusing to remove ${userPath}: not a USER.md under the data dir's agents/ folder`);
   }
   if (!fs.existsSync(file)) return undefined;
-  fs.rmSync(file);
+  // Stack mode: the file is in the gateway container (dataDir() is a copy of it), so it goes there.
+  if (!stackFiles.removeInGateway(path.relative(root, file))) fs.rmSync(file);
   return path.relative(root, file);
 }
 
@@ -872,7 +894,9 @@ export function removeAgentUserFile(userPath: string): string | undefined {
  * Read-only use of a model already there; nothing is pulled. Returns how it went, never throws.
  */
 export async function warmOllamaEmbedModel(model: string, timeoutMs = 120_000): Promise<{ ok: boolean; ms: number; error?: string }> {
-  const base = (process.env.UAT_OLLAMA_BASE_URL ?? '').replace(/\/v1\/?$/, '');
+  // UAT_OLLAMA_HOST_URL: Ollama as this host reaches it, where that isn't how the gateway does (stack mode:
+  // the gateway's container reaches it as host.docker.internal).
+  const base = (process.env.UAT_OLLAMA_HOST_URL || process.env.UAT_OLLAMA_BASE_URL || '').replace(/\/v1\/?$/, '');
   const started = Date.now();
   if (!base) return { ok: false, ms: 0, error: 'UAT_OLLAMA_BASE_URL is not set' };
   try {
@@ -1246,7 +1270,9 @@ export function enterpriseStub():
   if (!url || !token || !keyFile || !log) return undefined;
   return {
     url,
-    endpoint: `${url}${enterprise.ENDPOINT_PATH}`,
+    // The Endpoint typed in the UI: the stub as the gateway reaches it (stack mode: from its container,
+    // UAT_ENT_STUB_GATEWAY_URL); natively the same origin the harness checks.
+    endpoint: `${process.env.UAT_ENT_STUB_GATEWAY_URL || url}${enterprise.ENDPOINT_PATH}`,
     deployment: process.env.UAT_ENT_DEPLOYMENT ?? 'uat-gpt-4o',
     token,
     keyFile,
