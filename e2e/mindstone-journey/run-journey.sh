@@ -752,6 +752,7 @@ if [[ "${PROVIDER}" == ollama && "${ALT_MODEL}" != none ]]; then
   done <<<"${alt_candidates}"
   deviation "J12: to pick the other default model it switches to on Settings, the harness sent one short chat (\"Say hello in one short sentence.\") to ${alt_from}, until one answered: ${ALT_MODEL} (\`logs/provider.log\`)."
 fi
+[[ "${PROVIDER}" == ollama ]] && deviation "J12: when the memory step's Test times out on a pulled embedding model that isn't loaded yet (the gateway's 10 s embed timeout is shorter than the load, and its abort cancels it), the harness loads that model through Ollama's own \`/api/embed\` (read-only; nothing is pulled) and presses Test again. The first result is kept in J12's note."
 # J12 changes the embedding model to another one that is pulled: the embedding models Ollama lists (a Test that
 # fails for one of these is the product's failure, not a missing model).
 EMBED_MODELS_PULLED=""

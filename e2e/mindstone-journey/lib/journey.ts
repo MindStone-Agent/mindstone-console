@@ -853,6 +853,31 @@ export function removeAgentUserFile(userPath: string): string | undefined {
   return path.relative(root, file);
 }
 
+/**
+ * Loads an already-pulled embedding model into the harness's Ollama (J12): one embed of a short text through
+ * Ollama's own `/api/embed`, kept loaded for 10 minutes. A cold model's first load can outlast the gateway's 10 s
+ * embed timeout, and the gateway's abort cancels the load, so the memory step's Test alone never gets it loaded.
+ * Read-only use of a model already there; nothing is pulled. Returns how it went, never throws.
+ */
+export async function warmOllamaEmbedModel(model: string, timeoutMs = 120_000): Promise<{ ok: boolean; ms: number; error?: string }> {
+  const base = (process.env.UAT_OLLAMA_BASE_URL ?? '').replace(/\/v1\/?$/, '');
+  const started = Date.now();
+  if (!base) return { ok: false, ms: 0, error: 'UAT_OLLAMA_BASE_URL is not set' };
+  try {
+    const response = await fetch(`${base}/api/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, input: 'warm up', keep_alive: '10m' }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const body = (await response.json().catch(() => ({}))) as { embeddings?: unknown[]; error?: string };
+    const ok = response.ok && Array.isArray(body.embeddings) && body.embeddings.length > 0;
+    return { ok, ms: Date.now() - started, ...(ok ? {} : { error: `HTTP ${response.status} ${body.error ?? ''}`.trim() }) };
+  } catch (error) {
+    return { ok: false, ms: Date.now() - started, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /** The recall index the gateway's sqlite-vec recall reads (MindStone-Agent: <dataDir>/vectors/memory.sqlite). */
 function recallIndexPath(): string {
   return path.join(dataDir(), 'vectors', 'memory.sqlite');

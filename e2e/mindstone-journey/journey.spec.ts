@@ -91,6 +91,7 @@ import {
   recallHitsForConversation,
   recallIndexVectors,
   settledIndexVectors,
+  warmOllamaEmbedModel,
   otherModelCount,
   restoreOutcome,
   removeAgentUserFile,
@@ -1602,14 +1603,18 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
         return ((await check.textContent()) ?? '').trim();
       };
       /**
-       * A pulled model that isn't loaded yet can outlast the gateway's embed timeout on its first Test ("This operation
-       * was aborted"); Ollama goes on loading it, so the Test is pressed again (twice at most), as a person would.
+       * A pulled model that isn't loaded yet outlasts the gateway's 10 s embed timeout on its first Test ("This operation
+       * was aborted"), and the abort cancels Ollama's load, so pressing Test again never gets it loaded. The first
+       * result is kept (as the product's behaviour on a cold model, in the note and evidence); then the harness loads
+       * the model through Ollama itself (warmOllamaEmbedModel, read-only) and presses Test again, at most twice.
        */
+      const coldTests: { spec: string; first: string; warm: Awaited<ReturnType<typeof warmOllamaEmbedModel>> }[] = [];
       const testWithRetry = async (spec: string): Promise<string[]> => {
         const results = [await testEmbedding(spec)];
-        while (J12_TEST_AGAIN.test(results[results.length - 1]) && results.length < 3) {
-          await page.waitForTimeout(5_000);
-          results.push(await testEmbedding(spec));
+        if (J12_TEST_AGAIN.test(results[0]) && spec.startsWith('ollama:')) {
+          const warm = await warmOllamaEmbedModel(spec.slice('ollama:'.length));
+          coldTests.push({ spec, first: results[0], warm });
+          while (J12_TEST_AGAIN.test(results[results.length - 1]) && results.length < 3) results.push(await testEmbedding(spec));
         }
         return results;
       };
@@ -1672,7 +1677,10 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       await expect(page).toHaveURL(/\/mindstone$/);
       const memoryRow = page.getByTestId('ms-setup-memory');
       const memory = (await readConfig()).config?.memory ?? {};
-      proof.memory = { before: { spec: beforeSpec, dims: beforeDims ?? null, chunks: chunksBefore }, after: after ?? null, safeField: safeField ?? null, tried, warned: warned ?? null, check: lastCheck ?? null, saved: memory, indexBefore };
+      proof.memory = { before: { spec: beforeSpec, dims: beforeDims ?? null, chunks: chunksBefore }, after: after ?? null, safeField: safeField ?? null, tried, coldTests, warned: warned ?? null, check: lastCheck ?? null, saved: memory, indexBefore };
+      for (const cold of coldTests) {
+        note(testInfo, `cold model: the memory step's Test for ${cold.spec} first said "${cold.first}" (the gateway's embed timeout is shorter than the model's load, and its abort cancels the load); the harness loaded it through Ollama (${cold.warm.ok ? `in ${Math.round(cold.warm.ms / 1000)} s` : `failed: ${cold.warm.error}`}) and pressed Test again`);
+      }
       await saveProof();
       if (!after) {
         const why = others.length
@@ -1812,8 +1820,13 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
         await expect(tab.getByTestId('ms-about-text'), 'the typed text is kept').toHaveValue(stale);
         await shot(tab, testInfo, 'about-stale');
         expect((await readUser()).json.markdown, 'the stale save did not overwrite USER.md').toBe(edited);
+        // "Load the current file" keeps the typed text and shows the file as it is now beside it (#140 review); "Use the
+        // current file instead" then takes it.
         await tab.getByTestId('ms-about-reload').click();
-        await expect(tab.getByTestId('ms-about-text'), '"Load the current file" shows the saved text').toHaveValue(edited);
+        await expect(tab.getByTestId('ms-about-current'), '"Load the current file" shows the file as it is now').toContainText(`Settings check ${marker}`);
+        await expect(tab.getByTestId('ms-about-text'), 'the typed text is still kept').toHaveValue(stale);
+        await tab.getByTestId('ms-about-use-current').click();
+        await expect(tab.getByTestId('ms-about-text'), '"Use the current file instead" puts the saved text in the editor').toHaveValue(edited);
       } finally {
         await tab.close();
       }
