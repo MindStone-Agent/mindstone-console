@@ -318,7 +318,7 @@ function componentOutcome(
     const unused = result.listed === false;
     const notInUse = (l: ReturnType<typeof useLocalize>) =>
       unused
-        ? ` ${l('com_mindstone_appr_component_not_joined', {
+        ? ` ${l('com_mindstone_appr_kb_not_in_use', {
             0: visibleText(result.note?.trim() || l('com_mindstone_appr_persona_not_loading')),
           })}`
         : '';
@@ -451,27 +451,40 @@ export default function MindStoneApprovalsView() {
 
   // The card clicked last: an answer for an earlier click is dropped (#125 review).
   const opening = useRef<string | null>(null);
+  // After a decision, focus goes to what it says, not back to the top of the page.
+  const statusLine = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    if (message) statusLine.current?.focus();
+  }, [message]);
   // The gateway said this card's persona card no longer exists (persona_missing).
   const [parentGone, setParentGone] = useState(false);
-  const open = async (id: string) => {
+  // Each card read is numbered: an older read of the same card answering
+  // late never replaces a newer one (#125 review).
+  const cardRead = useRef(0);
+  /** `keepForm`: a re-read of the same card after a decision keeps the reject note typed for a retry. */
+  const open = async (id: string, keepForm = false) => {
+    const read = ++cardRead.current;
     // A re-read of the same card keeps what the gateway said about its persona.
     if (opening.current !== id) setParentGone(false);
     opening.current = id;
     setMessage(null);
     setPersonasLink(false);
-    setConfirming(null);
     setNeedsForce(false);
-    setNote('');
+    if (!keepForm) {
+      setConfirming(null);
+      setNote('');
+    }
     // The previous card goes at once, so its buttons can't act while this one loads.
     setDetail(null);
     try {
       const result = await request.get<{ action: Detail }>(
         `${BASE}/approvals/${encodeURIComponent(id)}`,
       );
-      if (opening.current !== id) return;
+      if (opening.current !== id || read !== cardRead.current) return;
       setDetail(result.action);
+      if (keepForm && result.action.status !== 'pending') setConfirming(null);
     } catch (error) {
-      if (opening.current !== id) return;
+      if (opening.current !== id || read !== cardRead.current) return;
       setDetail(null);
       setMessage({
         ok: false,
@@ -525,6 +538,10 @@ export default function MindStoneApprovalsView() {
         return;
       }
       const { error: text, code } = errorBody(error);
+      // No answer at all (a dropped connection, a proxy's HTML page): the
+      // decision may have gone through, so the page doesn't say it didn't.
+      const shown =
+        text ?? localize(code ? 'com_mindstone_not_changed' : 'com_mindstone_appr_outcome_unknown');
       // An existing memory file or installed skill is only replaced on a second,
       // explicit click; a persona's new skill never replaces one (#125).
       setNeedsForce(
@@ -537,27 +554,30 @@ export default function MindStoneApprovalsView() {
       // Refusals that changed the card anyway (its persona was rejected, so it
       // was too; or the Console stopped waiting on an approve that went on):
       // the list and the card are read again (#125 review).
-      // A reject that didn't get through keeps the owner's note and form for a retry.
+      // A reject keeps the owner's note and form across the re-read, for a retry.
       if (
         code === 'persona_rejected' ||
         code === 'gateway_timeout' ||
         code === 'already_decided' ||
         code === 'queue_busy' ||
         code === 'changed' ||
-        (code === undefined && decision === 'approve')
+        code === undefined
       ) {
         void load();
-        void open(decided.id).then(() => {
-          if (stillOpen()) {
-            setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') });
-          }
+        void open(decided.id, decision === 'reject').then(() => {
+          if (stillOpen()) setMessage({ ok: false, text: shown });
         });
+      }
+      // The card is gone: it leaves the page, and the list is read again.
+      if (code === 'not_found') {
+        void load();
+        setDetail(null);
       }
       // A persona id that exists (persona_exists) is never overwritten, and
       // one the config already uses (persona_referenced) is never saved: the
       // gateway's text says to ask for a new name or reject.
       setPersonasLink(false);
-      setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') });
+      setMessage({ ok: false, text: shown });
     } finally {
       setBusy(false);
     }
@@ -583,7 +603,12 @@ export default function MindStoneApprovalsView() {
           </p>
         )}
         {message && (
-          <p role="status" className={message.ok ? 'text-green-600' : 'text-red-600'}>
+          <p
+            role="status"
+            ref={statusLine}
+            tabIndex={-1}
+            className={message.ok ? 'text-green-600' : 'text-red-600'}
+          >
             {message.text}
             {personasLink && (
               <>
@@ -612,15 +637,12 @@ export default function MindStoneApprovalsView() {
               {localize('com_mindstone_appr_show_all')}
             </label>
           </div>
-          {busy && (
-            <p
-              className="text-sm text-text-secondary"
-              aria-live="polite"
-              data-testid="ms-appr-deciding"
-            >
-              {localize('com_mindstone_appr_deciding')}
-            </p>
-          )}
+          {/* Always mounted, so a screen reader announces the text when it appears. */}
+          <p className="text-sm text-text-secondary" aria-live="polite">
+            {busy && (
+              <span data-testid="ms-appr-deciding">{localize('com_mindstone_appr_deciding')}</span>
+            )}
+          </p>
           {actions.length === 0 ? (
             <p className="text-sm text-text-secondary">{localize('com_mindstone_appr_none')}</p>
           ) : (
@@ -748,7 +770,10 @@ export default function MindStoneApprovalsView() {
                     type="button"
                     className={secondary}
                     disabled={busy}
-                    onClick={() => setConfirming(null)}
+                    onClick={() => {
+                      setConfirming(null);
+                      setNeedsForce(false);
+                    }}
                   >
                     {localize('com_mindstone_appr_cancel')}
                   </button>
@@ -780,7 +805,10 @@ export default function MindStoneApprovalsView() {
                     type="button"
                     className={secondary}
                     disabled={busy}
-                    onClick={() => setConfirming(null)}
+                    onClick={() => {
+                      setConfirming(null);
+                      setNeedsForce(false);
+                    }}
                   >
                     {localize('com_mindstone_appr_cancel')}
                   </button>

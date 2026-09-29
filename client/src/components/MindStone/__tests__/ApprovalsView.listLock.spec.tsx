@@ -222,8 +222,7 @@ describe('MindStone approvals: the locked list, failed decisions and not-in-use 
     fireEvent.click(await screen.findByText(plainA.summary));
     approve(await screen.findByRole('region', { name: plainA.summary }));
     const note = await screen.findByTestId('ms-appr-deciding');
-    expect(note.getAttribute('role') === 'status' || note.getAttribute('aria-live') !== null).toBe(
-      true,
-    );
+    // The live region is always mounted; the note appears inside it.
+    expect(note.closest('[aria-live]')).not.toBeNull();
   });
 });
