@@ -17,6 +17,7 @@
  *   node recall-index.js <dbPath> chunks <chunkId>...
  *   node recall-index.js <dbPath> dims
  *   node recall-index.js <dbPath> chunkdims <chunkId>...
+ *   node recall-index.js <dbPath> vectors
  */
 const { execFileSync } = require('node:child_process');
 
@@ -39,6 +40,21 @@ function queryRecallIndex(dbPath, mode, args = []) {
   const parsed = JSON.parse(out);
   if (!parsed || !Array.isArray(parsed.rows)) throw new Error('the recall index reader returned no rows array');
   return parsed.rows;
+}
+
+/**
+ * The SQL for the embedding model a chunk records: a column named for it (the first of EMBEDDING_MODEL_COLUMNS the
+ * table has), else a key in metadata_json, else NULL (the index records none). MindStone-Agent #140 adds the record;
+ * adjust the names here if it lands under another one.
+ */
+const EMBEDDING_MODEL_COLUMNS = ['embedding_model', 'embedding_provider', 'embedding_spec', 'embedded_by'];
+const EMBEDDING_MODEL_KEYS = ['$.embeddingModel', '$.embeddingProvider', '$.embedding.model'];
+function embeddingModelColumn(db) {
+  const columns = db.prepare('PRAGMA table_info(memory_chunks)').all().map((c) => c.name);
+  const column = EMBEDDING_MODEL_COLUMNS.find((name) => columns.includes(name));
+  if (column) return column;
+  if (!columns.includes('metadata_json')) return 'NULL';
+  return `CASE WHEN json_valid(metadata_json) THEN coalesce(${EMBEDDING_MODEL_KEYS.map((key) => `json_extract(metadata_json, '${key}')`).join(', ')}) END`;
 }
 
 /** The reader itself (run as a child). */
@@ -71,17 +87,22 @@ function read(dbPath, mode, args) {
         )
         .all();
     }
-    if (mode === 'chunkdims') {
-      // Given chunks' vector sizes (J12: what recall scored after the embedding change), as in `dims`.
-      if (!args.length) return [];
+    if (mode === 'chunkdims' || mode === 'vectors') {
+      // J12: each chunk's vector size (as in `dims`) and the embedding model it records, if the index records one
+      // (MindStone-Agent #140: every chunk records the model that embedded it). `chunkdims`: the given chunks (what
+      // recall scored); `vectors`: every chunk.
+      if (mode === 'chunkdims' && !args.length) return [];
+      const model = embeddingModelColumn(db);
       return db
         .prepare(
-          `SELECT chunk_id, CASE WHEN embedding_json IS NULL THEN NULL WHEN json_valid(embedding_json) THEN json_array_length(embedding_json) ELSE -1 END AS dims
-           FROM memory_chunks WHERE chunk_id IN (${args.map(() => '?').join(', ')})`,
+          `SELECT chunk_id,
+                  CASE WHEN embedding_json IS NULL THEN NULL WHEN json_valid(embedding_json) THEN json_array_length(embedding_json) ELSE -1 END AS dims,
+                  ${model} AS model
+           FROM memory_chunks${mode === 'chunkdims' ? ` WHERE chunk_id IN (${args.map(() => '?').join(', ')})` : ''}`,
         )
-        .all(...args);
+        .all(...(mode === 'chunkdims' ? args : []));
     }
-    throw new Error(`unknown mode "${mode}" (embedded, chunks, dims or chunkdims)`);
+    throw new Error(`unknown mode "${mode}" (embedded, chunks, dims, chunkdims or vectors)`);
   } finally {
     db.close();
   }

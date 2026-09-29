@@ -865,7 +865,7 @@ export function recallIndexExists(): boolean {
 // Out of process: Playwright's loader hook can't load node:sqlite in the test process (lib/recall-index.js).
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { queryRecallIndex } = require('./recall-index.js') as {
-  queryRecallIndex: (dbPath: string, mode: 'embedded' | 'chunks' | 'dims' | 'chunkdims', args: string[]) => Record<string, unknown>[];
+  queryRecallIndex: (dbPath: string, mode: 'embedded' | 'chunks' | 'dims' | 'chunkdims' | 'vectors', args: string[]) => Record<string, unknown>[];
 };
 
 /** Recall-index chunks whose text holds `token` and that are embedded (embedding_json set): the fact is ready to recall. */
@@ -900,11 +900,32 @@ export function recallIndexDims(): IndexDims {
   return out;
 }
 
+/** A recall-index chunk as J12 judges it: its vector's size (null: no vector or gone; -1: unreadable) and the model it records, if any. */
+export type IndexVector = { chunkId: string; dims: number | null; model: string | null };
+
+const toVector = (r: Record<string, unknown>): IndexVector => ({
+  chunkId: String(r.chunk_id),
+  dims: r.dims === null || r.dims === undefined ? null : Number(r.dims),
+  model: typeof r.model === 'string' && r.model ? r.model : null,
+});
+
 /**
- * The chunks recall supplied to a Console conversation (every memory_recall_injected event's hits), each with
- * its vector's size in the recall index now (J12): null when the chunk has no vector or is gone.
+ * Recall-index chunks with their vector size and model record (J12): the given ids (in that order; one that isn't
+ * in the index reads as { dims: null, model: null }), or, with no ids, every chunk. `present: false` when there is no index.
  */
-export function recallHitsForConversation(conversationId: string): { chunkId: string; dims: number | null }[] {
+export function recallIndexVectors(ids?: string[]): { present: boolean; chunks: IndexVector[] } {
+  const file = recallIndexPath();
+  if (!fs.existsSync(file)) return { present: false, chunks: (ids ?? []).map((chunkId) => ({ chunkId, dims: null, model: null })) };
+  if (!ids) return { present: true, chunks: queryRecallIndex(file, 'vectors', []).map(toVector) };
+  const found = new Map(ids.length ? queryRecallIndex(file, 'chunkdims', ids).map((r) => [String(r.chunk_id), toVector(r)]) : []);
+  return { present: true, chunks: ids.map((chunkId) => found.get(chunkId) ?? { chunkId, dims: null, model: null }) };
+}
+
+/**
+ * The chunks recall supplied to a Console conversation (every memory_recall_injected event's hits), each with its
+ * vector's size and model record in the recall index now (J12).
+ */
+export function recallHitsForConversation(conversationId: string): IndexVector[] {
   const ids = [
     ...new Set(
       conversationEntries(conversationId)
@@ -913,12 +934,7 @@ export function recallHitsForConversation(conversationId: string): { chunkId: st
         .filter((id): id is string => typeof id === 'string'),
     ),
   ];
-  if (!ids.length) return [];
-  const file = recallIndexPath();
-  const sizes = new Map(
-    fs.existsSync(file) ? queryRecallIndex(file, 'chunkdims', ids).map((r) => [String(r.chunk_id), r.dims === null || r.dims === undefined ? null : Number(r.dims)]) : [],
-  );
-  return ids.map((chunkId) => ({ chunkId, dims: sizes.get(chunkId) ?? null }));
+  return ids.length ? recallIndexVectors(ids).chunks : [];
 }
 
 /**
@@ -1231,9 +1247,13 @@ const settingsParity = require('./settings-parity-evidence.js') as {
     after: { spec?: string; dims?: number };
     warned?: string;
     index?: IndexDims;
-    probe?: { error: boolean; errorText?: string; text: string; hits: { chunkId: string; dims: number | null }[] };
+    probe?: { error: boolean; errorText?: string; text: string; fact: IndexVector[]; hits: IndexVector[] };
   }) => { verdict: 'pass' | 'fail' | 'pending'; why: string; reasons: string[]; unproven: string[]; stale: number };
-  restoredIndexReasons: (arg: { spec?: string; dims?: number; index?: IndexDims }) => string[];
+  restoredIndexReasons: (arg: { spec?: string; dims?: number; present: boolean; chunks: IndexVector[]; recalled?: IndexVector[] }) => string[];
+  restoreOutcome: (arg: {
+    settings: { ok: boolean; lines: string[] };
+    index?: { required: boolean; ran: boolean; reasons?: string[]; why?: string };
+  }) => { ok: boolean; lines: string[]; failures: string[] };
   EMBEDDING_WARNING: RegExp;
 };
 export const {
@@ -1247,6 +1267,7 @@ export const {
   modelMatchReasons,
   memoryChangeVerdict,
   restoredIndexReasons,
+  restoreOutcome,
   EMBEDDING_WARNING,
 } = settingsParity;
 

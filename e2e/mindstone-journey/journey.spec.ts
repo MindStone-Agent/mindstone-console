@@ -89,6 +89,8 @@ import {
   memoryChangeVerdict,
   recallIndexDims,
   recallHitsForConversation,
+  recallIndexVectors,
+  restoreOutcome,
   removeAgentUserFile,
   recordRestoreFailure,
   restoredIndexReasons,
@@ -97,7 +99,7 @@ import {
   CHANGE_STEPS,
   IN_PLACE_STEPS,
 } from './lib/journey';
-import type { FlowName, ParityRow, PersonaTurnEvidence, Reply, StoredMessage } from './lib/journey';
+import type { FlowName, IndexVector, ParityRow, PersonaTurnEvidence, Reply, StoredMessage } from './lib/journey';
 
 const ISSUES = {
   banner: 'mindstone-console#18 (PR #20)',
@@ -1220,8 +1222,10 @@ const J12_STEP_HEADINGS: Record<string, string> = {
 };
 /** How long J12 waits, after the restore and a chat under it, for the index to hold only the restored model's vectors. */
 const J12_RESTORED_INDEX_WAIT_MS = 60_000;
-/** J12's recall check after the embedding change: J9's question, whose fact a chat embedded with the old model holds. */
-const J12_RECALL_PROBE = "What is my dog's name? Answer with just the name.";
+/** J12's question after the embedding change: the fact it tells in a chat under the new model. */
+const J12_RECALL_PROBE = "What is my cat's name? Answer with just the name.";
+/** J12's question under the restored memory setting (the restore check's chat): the same fact. */
+const J12_RESTORED_PROBE = "What is my cat's name? If you don't know, say so in one short sentence.";
 /** The memory step's Test (the Console's proxy gives the embed check 25 s; a model's first load can take longer). */
 const J12_MEMORY_CHECK_MS = 90_000;
 /** A memory Test result that says the check ran out of time (a cold model load), not that the model can't embed. */
@@ -1353,6 +1357,36 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
   const pendingParts: string[] = [];
   /** Set once the embedding model was changed: the model the restore puts back, whose vectors the index must hold again. */
   let restoredModel: { spec: string; dims?: number } | undefined;
+  /** The chat that ran under the restored memory setting, whose recall shows whether another model's chunks are left out. */
+  let restoredChat: string | undefined;
+  /**
+   * The index check after the restore (A2): runs in the finally, after putBack, whenever an embedding change was about
+   * to be saved. With no chat under the restored setting yet (something threw first), it runs one. Then it waits up to
+   * J12_RESTORED_INDEX_WAIT_MS for every chunk to be the restored model's, or another model's that recall left out.
+   */
+  const checkRestoredIndex = async (model: { spec: string; dims?: number }): Promise<string[]> => {
+    if (!restoredChat) {
+      await navigate(page, '/c/new');
+      await ensureMindStoneModel(page, testInfo);
+      const reply = await sendAndWaitForReply(page, J12_RESTORED_PROBE);
+      restoredChat = reply.conversationId;
+      if (reply.error || !reply.text.trim()) return [`the chat under the restored ${model.spec} did not answer (${reply.errorText ?? 'an empty reply'}): recall with it doesn't work`];
+    }
+    const started = Date.now();
+    const read = () => {
+      const index = recallIndexVectors();
+      const recalled = recallHitsForConversation(restoredChat!);
+      return { index, recalled, reasons: restoredIndexReasons({ ...model, present: index.present, chunks: index.chunks, recalled }) };
+    };
+    let now = read();
+    while (now.reasons.length && Date.now() - started < J12_RESTORED_INDEX_WAIT_MS) {
+      await page.waitForTimeout(3_000);
+      now = read();
+    }
+    const other = now.index.chunks.filter((c) => c.dims !== null && c.dims !== model.dims);
+    proof.restoredIndex = { model, chat: restoredChat, waitedMs: Date.now() - started, chunks: now.index.chunks.length, otherModel: other, recalled: now.recalled, reasons: now.reasons };
+    return now.reasons;
+  };
   try {
     await test.step('Access: advanced settings on, from the Advanced settings card on Settings', async () => {
       // J4's Start a chat turned them off and J7 turned them on; they last an hour. Saving on Settings needs them.
@@ -1593,6 +1627,9 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
           .filter((sentence) => EMBEDDING_WARNING.test(sentence) && !sentencesBefore.has(sentence))
           .join(' ') || undefined;
       await shot(page, testInfo, 'memory-change');
+      // From here on the index may hold another model's vectors: the finally checks it after the restore, whatever
+      // throws from now on (set before the Save, so no failure after it can skip the check).
+      if (after) restoredModel = { spec: beforeSpec, dims: beforeDims };
       const saved = await uiResponse(page, { method: 'PATCH', path: '/api/mindstone/admin/config/memory' }, () =>
         section.getByRole('button', { name: 'Save', exact: true }).click(),
       );
@@ -1624,24 +1661,40 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       expect(memory.vectorStore, 'config.memory.vectorStore is unchanged').toBe(original.memory.vectorStore);
       expect(memory.autoRecall, 'config.memory.autoRecall is unchanged').toBe(original.memory.autoRecall);
 
-      // Recall after the change: a fresh chat asks for J9's fact (told in a chat embedded by the old model). It must
-      // answer (a failed or empty chat is a FAIL, never clean evidence), and the chunks recall supplied to it are judged
-      // by their vector size: none may be the old model's, and one whose size can't be read leaves it unproven.
-      let probe: { error: boolean; errorText?: string; text: string; hits: { chunkId: string; dims: number | null }[] } | undefined;
+      // Recall after the change, proven positively (#140): a fact told in one chat is captured by the new model, and a
+      // fresh chat asks for it. Both chats must answer (a failed or empty chat is a FAIL, never clean evidence); the
+      // fact's chunks must be the new model's, and no chunk recall supplies may be another model's (vectorOf): J9's
+      // older facts, embedded by the old model, are in the index to be scored if the product doesn't leave them out.
+      let probe: { error: boolean; errorText?: string; text: string; fact: IndexVector[]; hits: IndexVector[] } | undefined;
       if (memory.autoRecall === true) {
+        const token = `${['quince', 'sorrel', 'tamarack', 'wren'][Date.now() % 4]}-${Date.now().toString(36)}`;
+        const failed = (reply: Reply) => reply.error || !reply.text.trim() || ERROR_REPLY.test(reply.text);
         await navigate(page, '/c/new');
         await ensureMindStoneModel(page, testInfo);
-        const reply = await sendAndWaitForReply(page, J12_RECALL_PROBE);
-        await shot(page, testInfo, 'recall-after-change');
-        await attachText(testInfo, 'recall-after-change.txt', replyLog(reply));
-        const errorShown = !reply.error && ERROR_REPLY.test(reply.text);
+        const told = await sendAndWaitForReply(page, `My cat's name is ${token}. Please remember it.`);
+        await attachText(testInfo, 'recall-after-change-told.txt', replyLog(told));
+        const captured = failed(told) ? { chunks: [], waitedMs: 0 } : await waitForEmbeddedChunk(page, token, RECALL_CAPTURE_WAIT_MS);
+        const fact = recallIndexVectors(captured.chunks.map((c) => c.chunkId)).chunks;
+        let asked: Reply | undefined;
+        if (!failed(told)) {
+          await navigate(page, '/c/new');
+          await ensureMindStoneModel(page, testInfo);
+          asked = await sendAndWaitForReply(page, J12_RECALL_PROBE);
+          await shot(page, testInfo, 'recall-after-change');
+          await attachText(testInfo, 'recall-after-change.txt', replyLog(asked));
+        }
+        const bad = failed(told) ? told : asked && failed(asked) ? asked : undefined;
         probe = {
-          error: reply.error || errorShown,
-          errorText: reply.error ? reply.errorText : errorShown ? reply.text.slice(0, 200) : undefined,
-          text: reply.text,
-          hits: recallHitsForConversation(reply.conversationId),
+          error: Boolean(bad && (bad.error || ERROR_REPLY.test(bad.text))),
+          errorText: bad ? (bad.errorText ?? bad.text.slice(0, 200)) : undefined,
+          text: bad ? bad.text : (asked?.text ?? ''),
+          fact,
+          hits: asked ? recallHitsForConversation(asked.conversationId) : [],
         };
-        proof.memory = { ...(proof.memory as object), recallProbe: { conversationId: reply.conversationId, error: probe.error, errorText: probe.errorText ?? null, hits: probe.hits } };
+        proof.memory = {
+          ...(proof.memory as object),
+          recallProbe: { token, told: told.conversationId, asked: asked?.conversationId ?? null, capturedAfterMs: captured.waitedMs, fact, hits: probe.hits, error: probe.error, errorText: probe.errorText ?? null },
+        };
       }
       const index = recallIndexDims();
       const verdict = memoryChangeVerdict({ before: { spec: beforeSpec, dims: beforeDims, chunks: chunksBefore }, after, warned, index, probe });
@@ -1650,15 +1703,14 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       note(
         testInfo,
         `embedding ${beforeSpec} (${beforeDims ?? '?'} dims, ${chunksBefore} chunks embedded) -> ${after.spec} (${after.dims} dims); warning before Save: ${warned ? `"${warned}"` : 'none'}; ` +
-          `recall after the change: ${probe ? `${probe.error ? 'the chat FAILED; ' : ''}${probe.hits.length} chunk(s) at sizes ${JSON.stringify(probe.hits.map((h) => h.dims))}` : 'not run (automatic recall off)'}; ` +
+          `recall after the change: ${probe ? `${probe.error || !probe.text.trim() ? 'a chat FAILED; ' : ''}the fact in ${probe.fact.length} chunk(s); ${probe.hits.length} chunk(s) recalled ${JSON.stringify(probe.hits.map((h) => [h.dims, h.model]))}` : 'not run (automatic recall off)'}; ` +
           `recall index before ${JSON.stringify(indexBefore.byDims)}, after ${JSON.stringify(index.byDims)} (${index.pending} pending); ${verdict.why}`,
       );
       if (verdict.verdict === 'fail') deferred.push(verdict.why);
       if (verdict.verdict === 'pending') pendingParts.push(`the embedding-model part: ${verdict.unproven.join('; ')}`);
-      // What the restore must bring the index back to, checked after the chat that follows it.
-      restoredModel = { spec: beforeSpec, dims: beforeDims };
     });
-    // Put the memory setting back at once: no chat should embed with the changed model, and J10 recalls with the original.
+    // Put the memory setting back at once: no later chat embeds with the changed model, and J10 recalls with the original.
+    // The finally checks the index the restore left (restoredIndexReasons), after the chat below runs under it.
     const memoryBack = await putBack(['memory']);
     note(testInfo, `memory put back right after it was judged: ${memoryBack.lines.join('; ')}`);
     if (!memoryBack.ok) deferred.push(`the memory setting could not be put back: ${memoryBack.lines.join('; ')}`);
@@ -1777,7 +1829,10 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
     await test.step('one chat after the changes: answered, on the model chosen on Settings', async () => {
       await navigate(page, '/c/new');
       await ensureMindStoneModel(page, testInfo);
-      const reply = await sendAndWaitForReply(page, 'Settings check: please reply in one short sentence.');
+      // Under the restored memory setting: the fact the chat after the embedding change told is the chunk most tempting
+      // to recall from another model, so asking for it is the restore check's evidence too (the finally judges it).
+      const reply = await sendAndWaitForReply(page, J12_RESTORED_PROBE);
+      if (restoredModel) restoredChat = reply.conversationId;
       await attachText(testInfo, 'reply.txt', replyLog(reply));
       await shot(page, testInfo, 'chat');
       await gatewayExcerpt(testInfo, 40);
@@ -1795,25 +1850,6 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       expect(reasons, `the chat ran on the model chosen on Settings (${chosenModel}): the saved route, the Settings row and the Pi session agree`).toEqual([]);
     });
 
-    await test.step('the recall index is back to the restored embedding model (J10 recalls with it)', async () => {
-      if (!restoredModel) return;
-      // The memory setting went back right after it was judged, and the chat above ran under it: the chunks J12's
-      // chat after the change embedded with the other model must have been re-embedded (or removed) by now.
-      const model = restoredModel;
-      const started = Date.now();
-      let index = recallIndexDims();
-      let reasons = restoredIndexReasons({ ...model, index });
-      while (reasons.length && Date.now() - started < J12_RESTORED_INDEX_WAIT_MS) {
-        await page.waitForTimeout(3_000);
-        index = recallIndexDims();
-        reasons = restoredIndexReasons({ ...model, index });
-      }
-      proof.restoredIndex = { model, index, waitedMs: Date.now() - started, reasons };
-      await saveProof();
-      note(testInfo, `recall index after the restore and a chat under ${model.spec}: ${JSON.stringify(index.byDims)} (${index.pending} pending)${reasons.length ? `; ${reasons.join('; ')}` : `; every vector at ${model.dims}`}`);
-      deferred.push(...reasons);
-    });
-
     expect(deferred, 'J12 checks that failed along the way (each is in the notes and logs/j12-evidence.json)').toEqual([]);
     completed = true;
     if (pendingParts.length) {
@@ -1829,16 +1865,25 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
     throw error;
   } finally {
     // Whatever happened above: the default model, the memory setting and USER.md go back to what they were (USER.md
-    // absent when there was none), for J10, J11 and later runs.
-    const restored = await putBack(['model', 'memory', 'user']).catch((error: Error) => ({ ok: false, lines: [`the settings could not be put back: ${error.message}`] }));
+    // absent when there was none), for J10, J11 and later runs; then, once an embedding change was about to be saved,
+    // the recall index must be usable by the restored model.
+    const settings = await putBack(['model', 'memory', 'user']).catch((error: Error) => ({ ok: false, lines: [`the settings could not be put back: ${error.message}`] }));
+    let index: { required: boolean; ran: boolean; reasons?: string[]; why?: string } = { required: false, ran: false };
+    if (restoredModel) {
+      const model = restoredModel;
+      index = await checkRestoredIndex(model)
+        .then((reasons) => ({ required: true, ran: true, reasons }))
+        .catch((error: Error) => ({ required: true, ran: false, why: error.message.split('\n')[0] }));
+    }
+    const restored = restoreOutcome({ settings, index });
     note(testInfo, `put back in the finally: ${restored.lines.join('; ')}`);
     proof.restore = restored;
     await saveProof().catch(() => undefined);
     if (!restored.ok) {
-      // Always surfaced, whatever J12's own verdict: the gate and the DEMO SUBSET fail on it even when J12 isn't counted
-      // (restore-failures.tsv), and a J12 that failed already keeps its own error, with this one added.
-      recordRestoreFailure('J12', restored.lines.join('; '));
-      const what = `J12 could not put the settings back: ${restored.lines.join('; ')}`;
+      // Always a restore failure, whatever J12's own verdict: the gate and the DEMO SUBSET fail on it even when J12
+      // isn't counted (restore-failures.tsv), and a J12 that failed already keeps its own error, with this one added.
+      recordRestoreFailure('J12', restored.failures.join('; '));
+      const what = `J12 could not put things back: ${restored.failures.join('; ')}`;
       if (completed) throw new Error(what);
       throw new Error(`${failure instanceof Error ? failure.message : String(failure)} | AND ${what}`);
     }
