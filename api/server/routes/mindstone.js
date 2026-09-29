@@ -55,6 +55,9 @@ const ALLOWED = [
   { method: 'POST', path: /^memory\/check$/ },
   { method: 'POST', path: /^memory\/pull$/ },
   { method: 'GET', path: /^personas$/ },
+  // What the agent knows about the owner, its USER.md (MindStone-Agent #140).
+  { method: 'GET', path: /^user$/ },
+  { method: 'PATCH', path: /^user$/ },
   // The persona builder (MindStone-Agent #125): personas, workflows, the
   // global KB list, and a persona's private knowledge bases.
   { method: 'POST', path: /^personas$/ },

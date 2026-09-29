@@ -103,6 +103,9 @@ const ENDPOINTS = [
   { method: 'get', path: 'personas/analyst/knowledgebases/notes/sources', write: false },
   { method: 'post', path: 'personas/analyst/knowledgebases/notes/sources', write: true },
   { method: 'post', path: 'personas/analyst/knowledgebases/notes/ingest', write: true },
+  // USER.md from Settings (MindStone-Agent #140).
+  { method: 'get', path: 'user', write: false },
+  { method: 'patch', path: 'user', write: true },
 ];
 
 /** What each caller should get from an allowlisted endpoint. */
@@ -399,6 +402,12 @@ describe('MindStone admin proxy', () => {
       ['get', 'personas/analyst/knowledgebases/notes/ingest'],
       ['delete', 'personas/analyst/knowledgebases/notes'],
       ['post', 'personas/analyst/knowledgebases/notes/sources%2F..%2F..'],
+      // USER.md (#140): read and replace only, at exactly that path.
+      ['post', 'user'],
+      ['delete', 'user'],
+      ['get', 'user/x'],
+      ['patch', 'users'],
+      ['get', 'user%2F..%2Fconfig'],
     ];
     for (const [method, path] of outside) {
       const response = await call('manage', { method, path });
