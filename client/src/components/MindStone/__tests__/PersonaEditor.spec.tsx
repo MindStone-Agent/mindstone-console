@@ -327,6 +327,33 @@ describe('persona editor (MindStone-Agent #125)', () => {
     );
   });
 
+  it.each([
+    ['exactly 300 characters, shown whole', 'y'.repeat(300), 'y'.repeat(300)],
+    ['an emoji at the cut, kept whole', `${'y'.repeat(299)}😀z`, `${'y'.repeat(299)}😀…`],
+  ])('a refusal of %s (MindStone-Agent #166)', async (_label, refusal, shown) => {
+    serve({
+      persona: ATLAS,
+      privateKbs: [
+        {
+          id: 'notes',
+          name: 'Notes',
+          indexed: true,
+          entryCount: 2,
+          sourceCount: 1,
+          reembed: { failures: 5, gaveUp: true },
+        },
+      ],
+    });
+    mockPost.mockImplementation(() =>
+      Promise.reject({ response: { status: 409, data: { error: refusal } } }),
+    );
+    await renderEditor('atlas');
+    fireEvent.click(await screen.findByTestId('ms-pkb-reembed-notes-retry'));
+    expect((await screen.findByTestId('ms-pkb-reembed-notes-retry-failed')).textContent).toBe(
+      `com_mindstone_kb_reembed_retry_refused:${shown}`,
+    );
+  });
+
   it('every given-up shared KB gets Try again, whatever its folder name (MindStone-Agent #166)', async () => {
     const id = "HR Policies #1 é?% it's";
     serve({

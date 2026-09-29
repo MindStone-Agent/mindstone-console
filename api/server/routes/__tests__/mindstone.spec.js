@@ -111,6 +111,8 @@ const ENDPOINTS = [
     path: 'knowledgebases/HR%20Policies%20%231%20%C3%A9%3F%25/reembed',
     write: true,
   },
+  // The longest name a folder can have is accepted too (255 characters).
+  { method: 'post', path: `knowledgebases/${'k'.repeat(255)}/reembed`, write: true },
   { method: 'post', path: 'personas/analyst/knowledgebases/notes/reembed', write: true },
   // USER.md from Settings (MindStone-Agent #140).
   { method: 'get', path: 'user', write: false },
