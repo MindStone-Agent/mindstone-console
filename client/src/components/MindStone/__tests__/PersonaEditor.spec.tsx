@@ -243,6 +243,35 @@ describe('persona editor (MindStone-Agent #125)', () => {
     expect(mockPost).toHaveBeenCalledWith(`${BASE}/personas/atlas/knowledgebases/notes/reembed`, {});
   });
 
+  it('a given-up shared knowledge base can be tried again too, with its folder-name id (MindStone-Agent #158)', async () => {
+    let reset = false;
+    mockGet.mockReset();
+    serve({ persona: ATLAS });
+    const served = mockGet.getMockImplementation()!;
+    mockGet.mockImplementation((url: string) =>
+      url === `${BASE}/knowledgebases`
+        ? Promise.resolve({
+            knowledgebases: [
+              { id: 'HR_Hand.book', name: 'HR', indexed: true, entryCount: 1, sourceCount: 1, ...(reset ? {} : { reembed: { failures: 5, gaveUp: true } }) },
+            ],
+          })
+        : served(url),
+    );
+    mockPost.mockImplementation((url: string) => {
+      if (url === `${BASE}/knowledgebases/HR_Hand.book/reembed`) {
+        reset = true;
+        return Promise.resolve({ ok: true });
+      }
+      return Promise.reject(new Error(`unexpected POST ${url}`));
+    });
+    await renderEditor('atlas');
+    const checkbox = await screen.findByTestId('ms-pe-global-kb-HR_Hand.book');
+    expect(checkbox.closest('label')?.textContent).not.toContain('com_mindstone_kb_reembed');
+    fireEvent.click(await screen.findByTestId('ms-pe-global-kb-reembed-HR_Hand.book-retry'));
+    await waitFor(() => expect(screen.queryByTestId('ms-pe-global-kb-reembed-HR_Hand.book')).not.toBeInTheDocument());
+    expect(mockPost).toHaveBeenCalledWith(`${BASE}/knowledgebases/HR_Hand.book/reembed`, {});
+  });
+
   it("a reembed with a reason that isn't text, or no count, still renders (MindStone-Agent #158)", async () => {
     serve({
       persona: ATLAS,

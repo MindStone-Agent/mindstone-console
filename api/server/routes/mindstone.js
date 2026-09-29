@@ -83,7 +83,8 @@ const ALLOWED = [
     path: /^personas\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\/knowledgebases\/[a-z0-9][a-z0-9-]{0,39}\/ingest$/,
   },
   // Try again after a give-up (MindStone-Agent #158): clears a KB's re-embed state.
-  { method: 'POST', path: /^knowledgebases\/[a-z0-9][a-z0-9-]{0,39}\/reembed$/ },
+  // A shared KB's id is its folder's name: capitals, _ and . too, but not a dot folder.
+  { method: 'POST', path: /^knowledgebases\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\/reembed$/ },
   {
     method: 'POST',
     path: /^personas\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\/knowledgebases\/[a-z0-9][a-z0-9-]{0,39}\/reembed$/,
