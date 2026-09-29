@@ -500,7 +500,7 @@ summary() {
   j12_line="J12 settings parity (every setup choice on Settings): ${j12_status:-MISSING}; $([[ "${EXPECT_SETTINGS_PARITY}" == 1 ]] && echo "in the gate (UAT_EXPECT_SETTINGS_PARITY=1)" || echo "not in the gate (set UAT_EXPECT_SETTINGS_PARITY=1 to require it)"); never in the DEMO SUBSET"
 
   if [[ -f "${EVIDENCE}/findings.md" ]]; then
-    echo; log "README findings (followed literally):"; sed 's/^/  /' "${EVIDENCE}/findings.md"
+    echo; log "findings (the READMEs followed literally, and product findings the journey recorded):"; sed 's/^/  /' "${EVIDENCE}/findings.md"
   fi
   if [[ -f "${EVIDENCE}/deviations.md" ]]; then
     echo; log "harness deviations from the READMEs:"; sed 's/^/  /' "${EVIDENCE}/deviations.md"
@@ -592,7 +592,7 @@ summary() {
     echo "| Status | ID | Step | Evidence | Note |"
     echo "|---|---|---|---|---|"
     awk -F'\t' '{printf "| %s | %s | %s | %s | %s |\n", $2, $1, $3, $4, $5}' "${STEPS_TSV}" 2>/dev/null
-    [[ -f "${EVIDENCE}/findings.md" ]] && { echo; echo "## README findings"; echo; cat "${EVIDENCE}/findings.md"; }
+    [[ -f "${EVIDENCE}/findings.md" ]] && { echo; echo "## Findings (READMEs and product)"; echo; cat "${EVIDENCE}/findings.md"; }
     [[ -f "${EVIDENCE}/deviations.md" ]] && { echo; echo "## Harness deviations"; echo; cat "${EVIDENCE}/deviations.md"; }
     echo; echo "## Cleanup"; echo; sed 's/^/- /' "${EVIDENCE}/cleanup.txt" 2>/dev/null
   } >"${EVIDENCE}/SUMMARY.md"
@@ -752,7 +752,7 @@ if [[ "${PROVIDER}" == ollama && "${ALT_MODEL}" != none ]]; then
   done <<<"${alt_candidates}"
   deviation "J12: to pick the other default model it switches to on Settings, the harness sent one short chat (\"Say hello in one short sentence.\") to ${alt_from}, until one answered: ${ALT_MODEL} (\`logs/provider.log\`)."
 fi
-[[ "${PROVIDER}" == ollama ]] && deviation "J12: when the memory step's Test times out on a pulled embedding model that isn't loaded yet (the gateway's 10 s embed timeout is shorter than the load, and its abort cancels it), the harness loads that model through Ollama's own \`/api/embed\` (read-only; nothing is pulled) and presses Test again. The first result is kept in J12's note."
+[[ "${PROVIDER}" == ollama ]] && deviation "J12: when the memory step's Test times out on a pulled embedding model that isn't loaded yet (the product finding F-MSA-147, MindStone-Agent #147: the gateway's 10 s embed timeout is shorter than the load, and its abort cancels it), the harness loads that model through Ollama's own \`/api/embed\` (read-only; nothing is pulled) and presses Test again. The finding is recorded when it happens."
 # J12 changes the embedding model to another one that is pulled: the embedding models Ollama lists (a Test that
 # fails for one of these is the product's failure, not a missing model).
 EMBED_MODELS_PULLED=""

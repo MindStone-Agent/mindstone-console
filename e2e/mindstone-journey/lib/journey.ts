@@ -225,6 +225,18 @@ export function recordRestoreFailure(step: string, what: string): void {
   fs.appendFileSync(RESTORE_FAILURES_FILE, `${step}\t${what.replace(/\s+/g, ' ').trim()}\n`);
 }
 
+/**
+ * Records a product finding in findings.md, the file run-journey.sh prints under "findings" in the summary and
+ * SUMMARY.md, like its own README findings (`- **<id>** <text>`). Once per id.
+ */
+export function recordFinding(id: string, text: string): void {
+  const file = path.join(EVIDENCE, 'findings.md');
+  const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  if (existing.includes(`**${id}**`)) return;
+  fs.mkdirSync(EVIDENCE, { recursive: true });
+  fs.appendFileSync(file, `- **${id}** ${text.replace(/\s+/g, ' ').trim()}\n`);
+}
+
 /** Records a StallError (anything else passes through) and rethrows it. */
 function stallRecorded(error: unknown): never {
   if (stall.isStall(error)) recordStall((error as Error).message);
@@ -1301,9 +1313,9 @@ const settingsParity = require('./settings-parity-evidence.js') as {
     warned?: string;
     reported?: number;
     index?: IndexDims;
-    probe?: { error: boolean; errorText?: string; text: string; fact: IndexVector[]; hits: IndexVector[] };
+    probe?: { error: boolean; errorText?: string; text: string; fact: IndexVector[]; hits: IndexVector[]; snapshotOther?: number };
     reembedded?: { otherLeft: number; waitedMs: number };
-  }) => { verdict: 'pass' | 'fail' | 'pending'; why: string; reasons: string[]; unproven: string[]; stale: number };
+  }) => { verdict: 'pass' | 'fail' | 'pending'; why: string; reasons: string[]; unproven: string[]; notExercised: string[]; stale: number };
   restoredIndexReasons: (arg: { spec?: string; dims?: number; present: boolean; chunks: IndexVector[]; recalled?: IndexVector[] }) => string[];
   otherModelCount: (chunks: IndexVector[], model: { spec?: string; dims?: number }) => number;
   hitsAsScored: (arg: { modes: [string, string | undefined][]; snapshot?: IndexVector[]; now?: IndexVector[] }) => IndexVector[];
@@ -1312,6 +1324,8 @@ const settingsParity = require('./settings-parity-evidence.js') as {
     index?: { required: boolean; ran: boolean; reasons?: string[]; why?: string };
   }) => { ok: boolean; lines: string[]; failures: string[] };
   EMBEDDING_WARNING: RegExp;
+  CROSS_MODEL_NOT_EXERCISED: string;
+  COLD_MODEL_FINDING: { id: string; issue: string; text: (spec: string, first: string) => string };
 };
 export const {
   SETUP_STEPS,
@@ -1327,6 +1341,7 @@ export const {
   restoreOutcome,
   otherModelCount,
   EMBEDDING_WARNING,
+  COLD_MODEL_FINDING,
 } = settingsParity;
 
 /** Text that means the Console showed an error, not an answer. */

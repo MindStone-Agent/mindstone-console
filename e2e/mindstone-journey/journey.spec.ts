@@ -93,6 +93,8 @@ import {
   settledIndexVectors,
   warmOllamaEmbedModel,
   otherModelCount,
+  recordFinding,
+  COLD_MODEL_FINDING,
   restoreOutcome,
   removeAgentUserFile,
   recordRestoreFailure,
@@ -1679,7 +1681,13 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       const memory = (await readConfig()).config?.memory ?? {};
       proof.memory = { before: { spec: beforeSpec, dims: beforeDims ?? null, chunks: chunksBefore }, after: after ?? null, safeField: safeField ?? null, tried, coldTests, warned: warned ?? null, check: lastCheck ?? null, saved: memory, indexBefore };
       for (const cold of coldTests) {
-        note(testInfo, `cold model: the memory step's Test for ${cold.spec} first said "${cold.first}" (the gateway's embed timeout is shorter than the model's load, and its abort cancels the load); the harness loaded it through Ollama (${cold.warm.ok ? `in ${Math.round(cold.warm.ms / 1000)} s` : `failed: ${cold.warm.error}`}) and pressed Test again`);
+        // R2: a product finding (MindStone-Agent #147), in the summary's findings and SUMMARY.md, not only a note.
+        recordFinding(COLD_MODEL_FINDING.id, COLD_MODEL_FINDING.text(cold.spec, cold.first));
+        note(
+          testInfo,
+          `FINDING ${COLD_MODEL_FINDING.id} (${COLD_MODEL_FINDING.issue}): the memory step's Test for ${cold.spec} first said "${cold.first}"; ` +
+            `the harness loaded the model through Ollama (${cold.warm.ok ? `in ${Math.round(cold.warm.ms / 1000)} s` : `failed: ${cold.warm.error}`}) and pressed Test again`,
+        );
       }
       await saveProof();
       if (!after) {
@@ -1704,7 +1712,7 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       // fresh chat asks for it. Both chats must answer (a failed or empty chat is a FAIL, never clean evidence); the
       // fact's chunks must be the new model's, and no chunk recall supplies may be another model's (vectorOf): J9's
       // older facts, embedded by the old model, are in the index to be scored if the product doesn't leave them out.
-      let probe: { error: boolean; errorText?: string; text: string; fact: IndexVector[]; hits: IndexVector[] } | undefined;
+      let probe: { error: boolean; errorText?: string; text: string; fact: IndexVector[]; hits: IndexVector[]; snapshotOther?: number } | undefined;
       if (memory.autoRecall === true) {
         const token = `${['quince', 'sorrel', 'tamarack', 'wren'][Date.now() % 4]}-${Date.now().toString(36)}`;
         const failed = (reply: Reply) => reply.error || !reply.text.trim() || ERROR_REPLY.test(reply.text);
@@ -1736,6 +1744,8 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
         // The fact's chunks as they were when recall scored them.
         if (snapshot) fact = fact.map((chunk) => snapshot!.chunks.find((c) => c.chunkId === chunk.chunkId) ?? chunk);
         probe.fact = fact;
+        // How many chunks of another model recall could have scored (R3): with none, the cross-model rule isn't exercised.
+        if (snapshot) probe.snapshotOther = otherModelCount(snapshot.chunks, after);
         proof.memory = {
           ...(proof.memory as object),
           recallProbe: {
@@ -1743,7 +1753,7 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
             told: told.conversationId,
             asked: asked?.conversationId ?? null,
             capturedAfterMs: captured.waitedMs,
-            snapshot: snapshot ? { chunks: snapshot.chunks.length, settled: snapshot.settled, waitedMs: snapshot.waitedMs } : null,
+            snapshot: snapshot ? { chunks: snapshot.chunks.length, otherModel: probe.snapshotOther ?? null, settled: snapshot.settled, waitedMs: snapshot.waitedMs } : null,
             fact,
             hits: probe.hits,
             error: probe.error,
@@ -1776,6 +1786,7 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       );
       if (verdict.verdict === 'fail') deferred.push(verdict.why);
       if (verdict.verdict === 'pending') pendingParts.push(`the embedding-model part: ${verdict.unproven.join('; ')}`);
+      for (const text of verdict.notExercised) note(testInfo, `NOT EXERCISED: ${text}`);
     });
     // Put the memory setting back at once: no later chat embeds with the changed model, and J10 recalls with the original.
     // The finally checks the index the restore left (restoredIndexReasons), after the chat below runs under it.

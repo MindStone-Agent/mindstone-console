@@ -221,6 +221,29 @@ function recalledFrom(hits, model) {
 }
 
 /**
+ * MindStone-Agent #147, found by J12: the memory step's Test on a pulled embedding model that isn't loaded yet
+ * ("This operation was aborted"). The gateway's 10 s embed timeout is shorter than a larger model's load (mxbai-embed-
+ * large took about 12.7 s), and its abort cancels Ollama's load, so pressing Test again never loads it: a user of the
+ * Memory panel can't switch to such a model until something else has loaded it. J12 loads it through Ollama and goes on.
+ */
+const COLD_MODEL_FINDING = {
+  id: 'F-MSA-147',
+  issue: 'https://github.com/MindStone-Agent/MindStone-Agent/issues/147',
+  text: (spec, first) =>
+    `MindStone-Agent #147: the memory step's Test on ${spec}, pulled but not loaded yet, said "${first}". The gateway's 10 s embed timeout is ` +
+    "shorter than the model's load, and its abort cancels Ollama's load, so pressing Test again never loads it: from the Memory panel alone the " +
+    'model cannot be chosen until something else has loaded it. (J12 loaded it through Ollama and went on.) https://github.com/MindStone-Agent/MindStone-Agent/issues/147',
+};
+
+/**
+ * What J12 says when the asking chat's snapshot held no chunk from another model: the backfill after the told turn
+ * (newest first) had re-embedded everything before recall ran, so "recall never scores another model's vector" was
+ * not exercised here. A note, not a pass claim; MindStone-Agent's own smoke covers it.
+ */
+const CROSS_MODEL_NOT_EXERCISED =
+  "cross-model recall not exercised: the index held no chunk from another model when recall ran (the backfill finished first); covered by MindStone-Agent's scripts/smoke-memory-model-switch.sh";
+
+/**
  * The chunks recall supplied, as they were when it scored them: `modes` the hits' [chunkId, recallMode] in order,
  * `snapshot` the index read just before the chat, `now` the index read after it (for a chunk the snapshot doesn't
  * have). What the chat's own turn embeds afterwards (the backfill re-embedding an old chunk) can't change the verdict.
@@ -255,13 +278,15 @@ function hitsAsScored({ modes, snapshot, now }) {
  *   recalled by its vector (recallMode "embedding"); no chunk recalled by its vector may be another model's (one
  *   found by its words is #140's design). PENDING only when there was genuinely nothing to recall (the fact
  *   wasn't captured), or a vector hit can't be told apart.
+ * - `probe.snapshotOther`: how many chunks of another model the index held just before the asking chat. With 0, the
+ *   cross-model rule was not exercised: the result says so (`notExercised`), never that it passed.
  * - the re-embed (`reembedded` { otherLeft, waitedMs }): after those chats, the per-turn backfill must bring the
  *   count of embedded chunks that aren't the new model's (otherModelCount) to 0.
  * Returns { verdict: 'pass' | 'fail' | 'pending', why, reasons, unproven, stale } (`stale`: embedded chunks whose
  * size isn't the new model's).
  */
 function memoryChangeVerdict({ before, after, warned, reported, index, probe, reembedded }) {
-  const done = (verdict, why, extra = {}) => ({ verdict, why, reasons: [], unproven: [], stale: 0, ...extra });
+  const done = (verdict, why, extra = {}) => ({ verdict, why, reasons: [], unproven: [], notExercised: [], stale: 0, ...extra });
   if (!before?.spec || !after?.spec) return done('fail', 'the embedding model before or after the change is not known');
   if (before.spec === after.spec) return done('fail', `the embedding model did not change (${after.spec})`);
   if (!(after.dims > 0)) return done('fail', `the new model's Test gave no dimension count (${after.spec})`);
@@ -341,11 +366,17 @@ function memoryChangeVerdict({ before, after, warned, reported, index, probe, re
 
   if (reasons.length) return done('fail', reasons.join('; '), { reasons, unproven, stale });
   if (unproven.length) return done('pending', `not proven: ${unproven.join('; ')}; ${state}`, { unproven, stale });
+  // R3: "never scored across models" is exercised only when the index held another model's chunks when recall ran.
+  const exercised = probe.snapshotOther === undefined || probe.snapshotOther > 0;
+  const notExercised = exercised ? [] : [CROSS_MODEL_NOT_EXERCISED];
   return done(
     'pass',
-    `the Console warned before Save ("${warned}"); recall after the change supplied ${recalled} chunk(s), none by another model's vector${lexicalNote}; ${state}` +
-      `${before.dims === after.dims ? ' (the same size: without a model record, old vectors cannot be told apart by size)' : ''}`,
-    { stale },
+    `the Console warned before Save ("${warned}"); the new fact recalled by the new model's vector; ` +
+      (exercised
+        ? `recall after the change supplied ${recalled} chunk(s), none by another model's vector (${probe.snapshotOther} of another model's in the index then)${lexicalNote}`
+        : `recall after the change supplied ${recalled} chunk(s); ${CROSS_MODEL_NOT_EXERCISED}`) +
+      `; ${state}${before.dims === after.dims ? ' (the same size: without a model record, old vectors cannot be told apart by size)' : ''}`,
+    { stale, notExercised },
   );
 }
 
@@ -429,5 +460,7 @@ module.exports = {
   otherModelCount,
   byVector,
   hitsAsScored,
+  CROSS_MODEL_NOT_EXERCISED,
+  COLD_MODEL_FINDING,
   EMBEDDING_WARNING,
 };

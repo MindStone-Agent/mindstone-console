@@ -27,7 +27,9 @@
 //   fact captured FAIL; a chunk found by its words (recallMode "lexical",
 //   #140's design until the backfill re-embeds it) is never judged; the
 //   check's index.otherModel must count the old memories, and the warning
-//   (ms-onb-memory-reembed) must show that count;
+//   (ms-onb-memory-reembed) must show that count; with no chunk of another
+//   model in the snapshot, the cross-model rule is reported not exercised,
+//   never passed (R3); the cold-model Test is finding F-MSA-147 (R2);
 //   what couldn't be exercised is PENDING, never a pass;
 // - restoredIndexReasons: after the restore, every chunk is the restored
 //   model's, or records another model that recall under it left out;
@@ -74,6 +76,7 @@ const {
   otherModelCount,
   byVector,
   hitsAsScored,
+  COLD_MODEL_FINDING,
   EMBEDDING_WARNING,
 } = require('./settings-parity-evidence.js');
 const { queryRecallIndex } = require('./recall-index.js');
@@ -208,6 +211,29 @@ check(mv({ probe: probeOf([], { fact: [] }) }).verdict === 'pending' && /not cap
 check(mv({ probe: probeOf([vec(newTagged), vec(v('gone', null))]) }).verdict === 'pending' && mv({ probe: probeOf([vec(newTagged), vec(v('bad', -1))]) }).verdict === 'pending', "change: a vector hit that can't be told apart (no vector, unreadable, no record): PENDING, not clean");
 check(mv({ probe: probeOf([vec(newTagged), vec(v('gone', null)), vec(oldTagged)]) }).verdict === 'fail', 'change: another model\'s chunk still fails next to an unknown one');
 check(mv({ before: { ...NOMIC, chunks: 0 }, index: idx({ 1024: 1 }) }).verdict === 'pending' && mv({ probe: undefined }).verdict === 'pending', 'change: nothing to warn about, or no chat (recall off): PENDING, never a vacuous pass');
+// R3: the cross-model rule is exercised only when the snapshot held another model's chunks; otherwise J12 says so.
+{
+  const none = mv({ probe: probeOf([vec(newTagged)], { snapshotOther: 0 }) });
+  check(
+    none.verdict === 'pass' && none.notExercised.length === 1 && /cross-model recall not exercised.*smoke-memory-model-switch\.sh/.test(none.why) && !/none by another model's vector/.test(none.why),
+    'R3: no chunk of another model in the snapshot: the cross-model rule is reported NOT EXERCISED (MindStone-Agent\'s smoke covers it), never as passed',
+  );
+  const some = mv({ probe: probeOf([vec(newTagged), lex(oldTagged)], { snapshotOther: 26 }) });
+  check(some.verdict === 'pass' && some.notExercised.length === 0 && /none by another model's vector \(26 of another model's in the index then\)/.test(some.why), 'R3: 26 chunks of another model in the snapshot, none scored by vector: exercised, and passed');
+  check(mv({ probe: probeOf([vec(newTagged), vec(oldTagged)], { snapshotOther: 0 }) }).verdict === 'fail', 'R3: a vector hit from another model still FAILs, whatever the snapshot count');
+  check(mv({ probe: probeOf([vec(newTagged)], { snapshotOther: 0 }), warned: undefined }).verdict === 'fail', 'R3: not exercised never excuses another failure');
+}
+// R2: the cold-model Test is a product finding (MindStone-Agent #147), with its issue.
+{
+  const text = COLD_MODEL_FINDING.text('ollama:mxbai-embed-large', 'This operation was aborted');
+  check(
+    COLD_MODEL_FINDING.id === 'F-MSA-147' && /MindStone-Agent\/issues\/147/.test(COLD_MODEL_FINDING.issue) && /^MindStone-Agent #147: .*ollama:mxbai-embed-large.*"This operation was aborted".*issues\/147$/.test(text),
+    'R2: the cold-model finding names #147, the model and what the Test said, and links the issue',
+  );
+  const spec = fs.readFileSync(path.join(HERE, '..', 'journey.spec.ts'), 'utf8');
+  check(/recordFinding\(COLD_MODEL_FINDING\.id, COLD_MODEL_FINDING\.text\(/.test(spec) && /FINDING \$\{COLD_MODEL_FINDING\.id\}/.test(spec), "R2: J12 records it in findings.md (the summary's findings, SUMMARY.md) and its row's note, not only a note");
+}
+
 // The re-embed after the change (#140: the backfill after each owner turn re-embeds another model's chunks).
 check(mv({ reembedded: { otherLeft: 12, waitedMs: 120_000 } }).verdict === 'fail' && /12 embedded chunk\(s\) were still another model's 120 s after/.test(mv({ reembedded: { otherLeft: 12, waitedMs: 120_000 } }).why), "change: another model's chunks left after the wait: FAIL (the backfill didn't re-embed them)");
 check(mv({ reembedded: undefined }).verdict === 'pending', 'change: the index-clean count not read: PENDING, not a pass');
