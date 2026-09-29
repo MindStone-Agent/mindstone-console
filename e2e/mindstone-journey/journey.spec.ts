@@ -1256,12 +1256,13 @@ test('J10 persona builder in the Console: a skill and a private KB, saved not ac
     `installed skills: ${installed.join(', ')} (picked ${picked}); global KBs: ${globalKb ?? 'none on this install, so none attached'}; active persona before: ${activeBefore ?? 'none'}`,
   );
 
-  // Fresh ids and a fact token only this run uses, so nothing earlier can match.
+  // Fresh ids and a fact token only this run uses, so nothing earlier can match. The token shares nothing with the
+  // ids (its own random part), so an id in a transcript entry can't read as the fact.
   const stamp = Date.now().toString(36);
   const A = `j10-a-${stamp}`;
   const B = `j10-b-${stamp}`;
   const KB = `j10-facts-${stamp}`;
-  const token = `${['lumen', 'beacon', 'corvid', 'tallow'][Date.now() % 4]}-${stamp}`;
+  const token = `${['lumen', 'corvid', 'tallow', 'quill'][Date.now() % 4]}-${Math.random().toString(36).slice(2, 8).padEnd(6, '7')}`;
   const descA = 'Built by the journey test: one skill and a private knowledge base.';
   const proof: Record<string, unknown> = { A, B, KB, token, picked, installed, globalKb: globalKb ?? null, activeBefore };
   const saveProof = () => attachText(testInfo, 'evidence.json', JSON.stringify(proof, null, 2));
@@ -1293,7 +1294,7 @@ test('J10 persona builder in the Console: a skill and a private KB, saved not ac
   };
 
   await test.step('build persona A: the picked skill, a global KB if there is one, saved', async () => {
-    await build(A, 'Lighthouse', descA, { skill: picked, globalKb });
+    await build(A, 'Northwind', descA, { skill: picked, globalKb });
     await shot(page, testInfo, 'built');
   });
 
@@ -1341,7 +1342,7 @@ test('J10 persona builder in the Console: a skill and a private KB, saved not ac
   });
 
   await test.step('build persona B, the control: no skills listed, no KB of its own', async () => {
-    await build(B, 'Harbour control', 'The journey test control persona: no skills listed, no private knowledge base.');
+    await build(B, 'Southgate', 'The journey test control persona: no skills listed, no private knowledge base.');
     await editor.getByRole('button', { name: 'Close', exact: true }).click();
     expect((await listPersonas()).active ?? null, 'saving B left the active persona unchanged').toBe(activeBefore);
   });
