@@ -18,6 +18,10 @@
  * - nodeFetch: a request from node (the gateway probes), same timeout and label.
  * - gotoOrStall: page.goto with Playwright's own timeout, its timeout labelled
  *   "STALL: navigation to <path> didn't load in Ns".
+ * - responseOrStall: a UI action (a click) whose request the Console's own page
+ *   sends, awaited up to a timeout: no response is a StallError "STALL: <method>
+ *   <path> no response in Ns (sent by the page)". A response with an error
+ *   status is an answer, not a stall; the step judges it.
  */
 const DEFAULT_API_TIMEOUT_MS = 30_000;
 const GRACE_MS = 5_000;
@@ -177,6 +181,28 @@ async function gotoOrStall(page, url, options = {}, defaultTimeoutMs = 60_000) {
   }
 }
 
+/**
+ * Runs `action` (a click that makes the page send `method` `path`) and waits
+ * for the page's response to it, up to `timeoutMs`. Listens before acting, so
+ * a fast answer isn't missed. Returns { status }; no response in time is a
+ * StallError. `path` is the request's exact path (no query).
+ */
+async function responseOrStall(page, { method, path, timeoutMs = apiTimeoutMs() }, action) {
+  const waiting = page.waitForResponse(
+    (response) => response.request().method() === method && new URL(response.url()).pathname === path,
+    { timeout: timeoutMs },
+  );
+  waiting.catch(() => undefined); // settles after the action throws, too: nothing left to report
+  await action();
+  try {
+    const response = await waiting;
+    return { status: response.status() };
+  } catch (error) {
+    if (error && error.name === 'TimeoutError') throw new StallError(`${apiStallMessage(method, path, timeoutMs)} (sent by the page)`);
+    throw error;
+  }
+}
+
 module.exports = {
   DEFAULT_API_TIMEOUT_MS,
   apiTimeoutMs,
@@ -192,4 +218,5 @@ module.exports = {
   pollBefore,
   nodeFetch,
   gotoOrStall,
+  responseOrStall,
 };

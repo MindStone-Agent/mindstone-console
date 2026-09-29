@@ -10,10 +10,12 @@
  * drives it; an unknown list FAILs. J3 and J5 are real tests in the `102`
  * flow and PENDING in `pre-102`. J9 (recall across chats) is PENDING while
  * setup leaves automatic recall off, and real once it's on by default.
+ * J10 (the persona builder, MindStone-Agent #125) is PENDING while the
+ * Personas page has no "Build a persona"; it is in the gate only with
+ * UAT_EXPECT_PERSONA_BUILDER=1, and never in the DEMO SUBSET.
  * J11 (an enterprise Azure OpenAI endpoint, against the harness's stub) is
  * PENDING while the Console has no enterprise form; it is in the gate only
- * with UAT_EXPECT_ENTERPRISE=1, and never in the DEMO SUBSET. (J10 is kept
- * for the persona builder.)
+ * with UAT_EXPECT_ENTERPRISE=1, and never in the DEMO SUBSET.
  *
  * PENDING steps first assert the flow's exact state: the setup step list, the
  * gateway's onboarding checklist keys, the links on /mindstone, and 404 from
@@ -67,8 +69,14 @@ import {
   stubHealth,
   stubLeakReasons,
   waitForStubProof,
+  j10Decision,
+  builtPersonaReasons,
+  isolationReasons,
+  skillsVerdict,
+  personaTurnForConversation,
+  uiResponse,
 } from './lib/journey';
-import type { FlowName, Reply, StoredMessage } from './lib/journey';
+import type { FlowName, PersonaTurnEvidence, Reply, StoredMessage } from './lib/journey';
 
 const ISSUES = {
   banner: 'mindstone-console#18 (PR #20)',
@@ -78,6 +86,7 @@ const ISSUES = {
   persona: 'MindStone-Agent#105',
   recall: 'MindStone-Agent#106 (automatic memory recall, on by default)',
   enterprise: 'MindStone-Agent#126 (enterprise model endpoints)',
+  personaBuilder: 'MindStone-Agent#125 (persona builder: admin API #142, Console #36)',
 };
 
 /** The phrase as a phone or autocomplete types it: a capital and a trailing space (#18). */
@@ -135,7 +144,8 @@ test.beforeAll(async ({ browser }) => {
 // json report puts it in J11's result, located at this hook's line). Where J11 isn't counted (no
 // UAT_EXPECT_ENTERPRISE, and always for the DEMO SUBSET), J11's excuse must not cover it: lib/gate-rows.mjs
 // excuses a failure only when every error is located inside the test's own lines, so an error from here (or
-// from afterEach) still fails the verdicts. Keep hooks above the tests, and J11 last. Never swallow an error here.
+// from afterEach, which is charged to each test, J10 included) still fails the verdicts. Keep hooks above the
+// tests, and J11 last. Never swallow an error here.
 test.afterAll(async () => {
   await context?.close();
 });
@@ -1175,6 +1185,310 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
   } finally {
     const restored = await setAutoRecall(true).catch((error: Error) => ({ status: 0, json: { error: error.message } }));
     note(testInfo, `memory.autoRecall put back on: HTTP ${restored.status}${restored.status >= 300 || restored.status === 0 ? ` ${JSON.stringify(restored.json)}` : ''}`);
+  }
+});
+
+/**
+ * J10's private-KB fact, asked in words no other step uses (J6 plants a project codename, J9 a dog's name),
+ * so no other memory can answer it.
+ */
+const J10_ASK = 'What is the harbour lighthouse call sign? Answer with just the call sign.';
+/** How long J10 waits for the page's Ingest to answer: the Console's proxy gives a private-KB ingest 4 minutes (#125). */
+const J10_INGEST_TIMEOUT_MS = 270_000;
+
+type PersonaList = { active?: string | null; personas?: { id: string; name: string; description?: string; error?: string }[] };
+type LoadedPersona = {
+  persona?: {
+    description?: string;
+    skills?: string[];
+    knowledgebases?: string[];
+    privateKnowledgebases?: { id: string; indexed?: boolean; entryCount?: number }[];
+    active?: boolean;
+  };
+};
+
+test('J10 persona builder in the Console: a skill and a private KB, saved not active, recalled only under its persona, edited', async ({}, testInfo) => {
+  testInfo.setTimeout(20 * 60_000);
+  const expectBuilder = process.env.UAT_EXPECT_PERSONA_BUILDER === '1';
+  testInfo.annotations.push({ type: 'label', description: expectBuilder ? 'gated: UAT_EXPECT_PERSONA_BUILDER=1' : 'not gated' });
+  await ensureSignedIn(page);
+  const listPersonas = async () => (await consoleApi<PersonaList>(page, 'GET', '/api/mindstone/admin/personas')).json;
+  const row = (id: string) => page.getByTestId(`ms-persona-${id}`);
+
+  // Is the feature here? Positive first: the Personas page rendered its list; only then does "no Build a persona" mean something.
+  await navigate(page, '/mindstone/personas');
+  const listed = await consoleApi<PersonaList>(page, 'GET', '/api/mindstone/admin/personas');
+  const listShown = listed.status === 200 && (await appears(page.locator('section[aria-labelledby="ms-per-list"]'), 30_000));
+  const createOffered = listShown && (await appears(page.getByTestId('ms-persona-create'), 10_000));
+  const probe = await probeGatewayAdmin('/admin/knowledgebases');
+  await shot(page, testInfo, 'personas');
+  note(testInfo, `Personas page: list ${listShown ? 'shown' : 'not shown'} (GET personas ${listed.status}); "Build a persona" ${createOffered ? 'offered' : 'absent'}; gateway GET /admin/knowledgebases ${probe.status}`);
+  const decision = j10Decision({ listShown, createOffered, expectPersonaBuilder: expectBuilder, gatewayRoutes: probe.status === 200 });
+  if (decision.verdict === 'pending') {
+    test.fixme(
+      true,
+      `PENDING ${ISSUES.personaBuilder}: ${decision.why}. Not gated (set UAT_EXPECT_PERSONA_BUILDER=1 to require it). ` +
+        'Done when: "Build a persona" on the Personas page builds persona A with an installed skill and a private knowledge base whose text source ' +
+        "holds a per-run fact, ingested; saving leaves the active persona unchanged; under another persona a fresh chat's recall has no pkb:<A>: hit " +
+        "and no fact; with A made active, a fresh chat's reply holds the fact, and its gateway transcript shows persona A answered, a pkb:<A>:<kb>: hit " +
+        "in the reply's own run, and only the picked skill in A's prompt; an edit to A persists after a reload.",
+    );
+    return;
+  }
+  if (decision.verdict === 'fail') throw new Error(decision.why);
+
+  // The real test. It needs finished setup (J2), automatic recall (a private KB is searched by recall) and an installed skill (J7).
+  requireSetupDone();
+  const config = await consoleApi<{ config?: { memory?: { autoRecall?: boolean } } }>(page, 'GET', '/api/mindstone/admin/config');
+  if (config.json.config?.memory?.autoRecall !== true) {
+    throw new Error('blocked: memory.autoRecall is not on, so no turn runs recall and a private KB is never searched (J9 judges that setting); J10 was not judged');
+  }
+  const skillList = await consoleApi<{ skills?: { id: string; source: string; error?: string }[] }>(page, 'GET', '/api/mindstone/admin/skills');
+  const installed = (skillList.json.skills ?? []).filter((s) => s.source === 'installed' && !s.error).map((s) => s.id).sort();
+  if (!installed.length) throw new Error('blocked: no installed skill to pick (J7 installs two); J10 was not judged');
+  const picked = installed[0];
+  const globals = await consoleApi<{ knowledgebases?: { id: string; error?: string }[] }>(page, 'GET', '/api/mindstone/admin/knowledgebases');
+  expect(globals.status, 'GET /api/mindstone/admin/knowledgebases (the editor lists global collections from it)').toBe(200);
+  const globalKb = (globals.json.knowledgebases ?? []).find((kb) => !kb.error)?.id;
+  const activeBefore = (await listPersonas()).active ?? null;
+  note(
+    testInfo,
+    `installed skills: ${installed.join(', ')} (picked ${picked}); global KBs: ${globalKb ?? 'none on this install, so none attached'}; active persona before: ${activeBefore ?? 'none'}`,
+  );
+
+  // Fresh ids and a fact token only this run uses, so nothing earlier can match. The token shares nothing with the
+  // ids (its own random part), so an id in a transcript entry can't read as the fact.
+  const stamp = Date.now().toString(36);
+  const A = `j10-a-${stamp}`;
+  const B = `j10-b-${stamp}`;
+  const KB = `j10-facts-${stamp}`;
+  const token = `${['lumen', 'corvid', 'tallow', 'quill'][Date.now() % 4]}-${Math.random().toString(36).slice(2, 8).padEnd(6, '7')}`;
+  const descA = 'Built by the journey test: one skill and a private knowledge base.';
+  const proof: Record<string, unknown> = { A, B, KB, token, picked, installed, globalKb: globalKb ?? null, activeBefore };
+  const saveProof = () => attachText(testInfo, 'evidence.json', JSON.stringify(proof, null, 2));
+  const editor = page.getByTestId('ms-persona-editor');
+
+  /** "Build a persona": the text, the picked skill, a global KB; Save. Leaves the editor open on the saved persona. */
+  const build = async (id: string, name: string, description: string, opts: { skill?: string; globalKb?: string } = {}) => {
+    await navigate(page, '/mindstone/personas');
+    await page.getByTestId('ms-persona-create').click();
+    await expect(editor, 'the persona editor opens').toBeVisible({ timeout: 30_000 });
+    await editor.getByTestId('ms-pe-id').fill(id);
+    await editor.getByTestId('ms-pe-name').fill(name);
+    await editor.getByTestId('ms-pe-description').fill(description);
+    await editor.getByTestId('ms-pe-markdown').fill(`# ${name}\n\nYou are ${name}, a persona built in the journey test. Answer briefly and plainly.`);
+    if (opts.skill) {
+      const picker = editor.getByTestId('ms-skill-picker');
+      await picker.getByRole('combobox', { name: 'Add an installed skill' }).selectOption(opts.skill);
+      await picker.getByRole('button', { name: 'Add', exact: true }).click();
+      await expect(picker.getByTestId(`ms-skill-picker-selected-${opts.skill}`), `the picker lists ${opts.skill}`).toBeVisible();
+    }
+    if (opts.globalKb) await editor.getByTestId(`ms-pe-global-kb-${opts.globalKb}`).check();
+    const saved = await uiResponse(page, { method: 'POST', path: '/api/mindstone/admin/personas' }, () => editor.getByTestId('ms-pe-save').click());
+    const status = editor.getByRole('status').filter({ hasText: `Saved ${id}.` });
+    const shown = await appears(status, 15_000);
+    const said = ((await editor.getByRole('status').allTextContents()).join(' | ') || '').trim();
+    expect(saved.status, `POST /api/mindstone/admin/personas for ${id} (the editor says: "${said}")`).toBeLessThan(300);
+    expect(shown, `the editor says ${id} was saved (it says: "${said}")`).toBe(true);
+    await expect(status, 'the save says it is not active').toContainText("It isn't active");
+  };
+
+  await test.step('build persona A: the picked skill, a global KB if there is one, saved', async () => {
+    await build(A, 'Northwind', descA, { skill: picked, globalKb });
+    await shot(page, testInfo, 'built');
+  });
+
+  await test.step("A's private KB: created, a text source with the fact, ingested", async () => {
+    const pkbs = editor.getByTestId('ms-private-kbs');
+    await expect(pkbs, "once A is saved, the editor offers its own knowledge bases").toBeVisible();
+    await pkbs.getByTestId('ms-pkb-new-id').fill(KB);
+    const base = `/api/mindstone/admin/personas/${A}/knowledgebases`;
+    const created = await uiResponse(page, { method: 'POST', path: base }, () => pkbs.getByTestId('ms-pkb-create').click());
+    expect(created.status, `POST ${base}`).toBeLessThan(300);
+    const kb = pkbs.getByTestId(`ms-pkb-${KB}`);
+    await expect(kb).toContainText('not ingested yet');
+    const ingest = kb.getByTestId(`ms-pkb-${KB}-ingest`);
+    await expect(ingest, 'Ingest is disabled until the KB has a source').toBeDisabled();
+    await kb.getByTestId(`ms-pkb-${KB}-text-name`).fill('harbour');
+    await kb.getByTestId(`ms-pkb-${KB}-text`).fill(`The harbour lighthouse call sign is ${token}.\n`);
+    const added = await uiResponse(page, { method: 'POST', path: `${base}/${KB}/sources` }, () => kb.getByTestId(`ms-pkb-${KB}-add-text`).click());
+    expect(added.status, `POST ${base}/${KB}/sources (a text source)`).toBeLessThan(300);
+    await expect(kb, 'the source is listed').toContainText('harbour.md');
+    await expect(ingest, 'Ingest is enabled once the KB has a source').toBeEnabled();
+    await shot(page, testInfo, 'private-kb');
+    const ingested = await uiResponse(page, { method: 'POST', path: `${base}/${KB}/ingest`, timeoutMs: J10_INGEST_TIMEOUT_MS }, () => ingest.click());
+    const said = ((await pkbs.getByRole('status').allTextContents()).join(' | ') || '').trim();
+    expect(ingested.status, `POST ${base}/${KB}/ingest (the page says: "${said}")`).toBeLessThan(300);
+    await expect(pkbs.getByRole('status')).toContainText(/Ingested: [1-9]\d* entries/);
+    await expect(kb, 'the KB is listed as ingested').toContainText(/ingested, [1-9]\d* entries/);
+    await shot(page, testInfo, 'ingested');
+  });
+
+  await test.step('saving did not make A active; the gateway has its components', async () => {
+    const detail = await consoleApi<LoadedPersona>(page, 'GET', `/api/mindstone/admin/personas/${A}`);
+    proof.savedA = detail.json.persona;
+    await saveProof();
+    const persona = detail.json.persona;
+    expect(detail.status, `GET /api/mindstone/admin/personas/${A}`).toBe(200);
+    expect(persona?.skills, "A's skills are the picked one").toEqual([picked]);
+    expect(persona?.knowledgebases ?? [], "A's global KBs").toEqual(globalKb ? [globalKb] : []);
+    expect(persona?.privateKnowledgebases?.find((kb) => kb.id === KB)?.indexed, `A's private KB ${KB} is ingested`).toBe(true);
+    expect(persona?.active, 'A is not active').toBe(false);
+    expect((await listPersonas()).active ?? null, 'saving A left the active persona unchanged').toBe(activeBefore);
+    await editor.getByRole('button', { name: 'Close', exact: true }).click();
+    await expect(row(A)).toBeVisible();
+    await expect(row(A).getByText('Active', { exact: true }), 'the list does not mark A active').toHaveCount(0);
+    await shot(page, testInfo, 'not-active');
+  });
+
+  await test.step('build persona B, the control: no skills listed, no KB of its own', async () => {
+    await build(B, 'Southgate', 'The journey test control persona: no skills listed, no private knowledge base.');
+    await editor.getByRole('button', { name: 'Close', exact: true }).click();
+    expect((await listPersonas()).active ?? null, 'saving B left the active persona unchanged').toBe(activeBefore);
+  });
+
+  /** The Personas page's Make active, then the list and the gateway agree it is active. */
+  const makeActive = async (id: string) => {
+    await navigate(page, '/mindstone/personas');
+    await expect(row(id)).toBeVisible({ timeout: 30_000 });
+    const patched = await uiResponse(page, { method: 'PATCH', path: '/api/mindstone/admin/config/personas' }, () =>
+      row(id).getByRole('button', { name: 'Make active' }).click(),
+    );
+    expect(patched.status, `Make active ${id}: PATCH /api/mindstone/admin/config/personas`).toBeLessThan(300);
+    await expect(row(id).getByText('Active', { exact: true })).toBeVisible({ timeout: 15_000 });
+    expect((await listPersonas()).active, `${id} is the active persona`).toBe(id);
+  };
+  /** A fresh chat asking for the fact; the stored reply, and the gateway transcript's evidence for it. */
+  const ask = async (name: string) => {
+    await navigate(page, '/c/new');
+    await ensureMindStoneModel(page, testInfo);
+    const reply = await sendAndWaitForReply(page, J10_ASK);
+    await shot(page, testInfo, name);
+    await attachText(testInfo, `${name}.txt`, replyLog(reply));
+    return { reply, turn: personaTurnForConversation(reply.conversationId, token) };
+  };
+  const brief = (turn: PersonaTurnEvidence) => ({
+    persona: turn.personaId ?? null,
+    components: turn.components ?? null,
+    recallInTurn: turn.recallAt >= 0,
+    hits: turn.allHits.map((h) => h.id),
+    entriesWithToken: turn.withToken.map((i) => turn.outline[i]),
+    outline: turn.outline,
+  });
+
+  // The negative control first, while no chat has ever held the token: under B, A's private KB must not be searched.
+  const control = await test.step('isolation: under B, before any chat held the fact, no pkb hit from A and no fact', async () => {
+    await makeActive(B);
+    const { reply, turn } = await ask('control-chat');
+    const reasons = isolationReasons(turn, { builtPersonaId: A, controlPersonaId: B });
+    proof.control = { conversationId: reply.conversationId, ...brief(turn), reasons };
+    await saveProof();
+    note(testInfo, `control chat ${reply.conversationId} under ${B}: ${reasons.length ? `BROKEN: ${reasons.join('; ')}` : `no pkb:${A}: hit, no fact`}; reply "${reply.text.slice(0, 100)}"`);
+    expectAnswer(reply, 'the control chat under B');
+    expect(reply.text.toLowerCase(), "under B, the reply doesn't have A's fact").not.toContain(token);
+    expect(reasons, `the gateway transcript for the control chat (${reply.conversationId})`).toEqual([]);
+    return turn;
+  });
+
+  const built = await test.step("A made active: a fresh chat's reply has the fact, from A's private KB, with only A's skill", async () => {
+    await makeActive(A);
+    const { reply, turn } = await ask('chat');
+    const reasons = builtPersonaReasons(turn, { personaId: A, kbId: KB });
+    proof.built = { conversationId: reply.conversationId, ...brief(turn), reasons };
+    await saveProof();
+    await gatewayExcerpt(testInfo, 40);
+    note(
+      testInfo,
+      `chat ${reply.conversationId} under ${A}: ${reasons.length ? `NOT proven: ${reasons.join('; ')}` : `persona ${turn.personaId}, recall hit ${turn.turnHits.filter((h) => h.id?.startsWith(`pkb:${A}:`)).map((h) => h.id).join(', ')}`}; ` +
+        `reply "${reply.text.slice(0, 100)}"`,
+    );
+    expect(reply.error, `the reply is not an error: ${(reply.errorText ?? '').slice(0, 300)}`).toBe(false);
+    expect(
+      reasons,
+      `the gateway transcript for the chat under A (${reply.conversationId}) proves the private KB supplied the fact: A answered (personaContext), ` +
+        `a pkb:${A}:${KB}: hit in the reply's own recall event, no other persona's private KB, the token in no other entry`,
+    ).toEqual([]);
+    expect(turn.components?.globalKnowledgebases, "A's turn searched its listed global KBs (every one when it lists none)").toEqual(globalKb ? [globalKb] : 'all');
+    expect(turn.components?.privateKnowledgebases, "A's turn searched its own private KBs").toBe('own');
+    if (PROVIDER === 'mock') {
+      // The mock route echoes; whether the reply uses the fact can't be judged. MOCK counts as not passed.
+      testInfo.annotations.push({ type: 'mock', description: 'mock provider' }, { type: 'label', description: 'MOCK' });
+    } else {
+      expect(reply.text.toLowerCase(), `the reply under A has the fact from its private KB (${token})`).toContain(token);
+      await expectOnScreen(page, token, "the fact in A's reply", { role: 'assistant', messageId: reply.messageId });
+    }
+    return turn;
+  });
+
+  // Only the picked skill in A's prompt, from the turn records; B (none listed) is the positive control.
+  const skills = skillsVerdict({ picked, installed, built: built.components, control: control.components });
+  proof.skills = skills;
+  await saveProof();
+  note(testInfo, `skills: ${skills.reasons.length ? `NOT shown: ${skills.reasons.join('; ')}` : skills.provable ? `only ${picked} in A's prompt; ${skills.why}` : skills.why}`);
+  expect(skills.reasons, `only the picked skill (${picked}) is in A's prompt (personaComponents.skillsInPrompt)`).toEqual([]);
+
+  await test.step('isolation again: back under B after the chat under A, no pkb hit from A', async () => {
+    await makeActive(B);
+    const { reply, turn } = await ask('control-after');
+    // A's reply is in the shared transcripts now (#125 design §2), so the fact may come back through transcript recall:
+    // only the private-KB rule is judged here, and a token in the reply is noted.
+    const reasons = isolationReasons(turn, { builtPersonaId: A, controlPersonaId: B, tokenMayLeak: true });
+    proof.controlAfter = { conversationId: reply.conversationId, ...brief(turn), reasons };
+    await saveProof();
+    note(
+      testInfo,
+      `control chat after A (${reply.conversationId}) under ${B}: ${reasons.length ? `BROKEN: ${reasons.join('; ')}` : `no pkb:${A}: hit`}` +
+        `${reply.text.toLowerCase().includes(token) ? '; the reply has the fact, through the shared transcripts, not the private KB' : '; the reply has no fact'}`,
+    );
+    expectAnswer(reply, 'the control chat under B, after A');
+    expect(reasons, `the gateway transcript for the second control chat (${reply.conversationId})`).toEqual([]);
+  });
+
+  await test.step('edit A: a new description, saved, still there after a reload', async () => {
+    const edited = `${descA} Edited ${stamp}.`;
+    await navigate(page, '/mindstone/personas');
+    await page.getByTestId(`ms-persona-edit-${A}`).click();
+    await expect(editor.getByTestId('ms-pe-description'), 'the editor loads A').toHaveValue(descA, { timeout: 30_000 });
+    await expect(editor.getByTestId(`ms-skill-picker-selected-${picked}`), 'the editor shows A\'s skill').toBeVisible();
+    await editor.getByTestId('ms-pe-description').fill(edited);
+    const patched = await uiResponse(page, { method: 'PATCH', path: `/api/mindstone/admin/personas/${A}` }, () => editor.getByTestId('ms-pe-save').click());
+    expect(patched.status, `PATCH /api/mindstone/admin/personas/${A}`).toBeLessThan(300);
+    await expect(editor.getByRole('status').filter({ hasText: /^Saved\./ }), 'the edit is saved, and A is still not active').toContainText("It isn't active");
+    await shot(page, testInfo, 'edited');
+    await navigate(page, '/mindstone/personas');
+    await expect(row(A), 'the list shows the new description after a reload').toContainText(edited);
+    await page.getByTestId(`ms-persona-edit-${A}`).click();
+    await expect(editor.getByTestId('ms-pe-description'), 'the editor shows the new description after a reload').toHaveValue(edited, { timeout: 30_000 });
+    await expect(editor.getByTestId(`ms-skill-picker-selected-${picked}`), 'the skill is kept').toBeVisible();
+    await expect(editor.getByTestId(`ms-pkb-${KB}`), 'the private KB is kept, ingested').toContainText(/ingested, [1-9]\d* entries/);
+    await shot(page, testInfo, 'reloaded');
+    const reread = await consoleApi<LoadedPersona>(page, 'GET', `/api/mindstone/admin/personas/${A}`);
+    proof.editedA = reread.json.persona;
+    await saveProof();
+    expect(reread.json.persona?.description, "the gateway has A's new description").toBe(edited);
+    expect(reread.json.persona?.skills, "the edit kept A's skill").toEqual([picked]);
+    expect((await listPersonas()).active, 'editing A did not make it active').toBe(B);
+    await editor.getByRole('button', { name: 'Close', exact: true }).click();
+  });
+
+  // Put the active persona back as it was, through the same page (J11 and later runs shouldn't answer as B).
+  await test.step('the active persona put back', async () => {
+    if (activeBefore && (await listPersonas()).personas?.some((p) => p.id === activeBefore)) {
+      await makeActive(activeBefore);
+    } else {
+      await navigate(page, '/mindstone/personas');
+      await page.getByRole('button', { name: 'Use no persona' }).click();
+      await expect.poll(async () => (await listPersonas()).active ?? null, { timeout: 15_000 }).toBe(null);
+    }
+    note(testInfo, `active persona put back to ${activeBefore ?? 'none'}`);
+  });
+
+  if (!skills.provable) {
+    test.fixme(
+      true,
+      `PENDING ${ISSUES.personaBuilder} (skills part): everything else passed, but ${skills.why}. ` +
+        "Done when: with a second skill installed (J7 installs two), A's prompt holds only the picked one.",
+    );
   }
 });
 
