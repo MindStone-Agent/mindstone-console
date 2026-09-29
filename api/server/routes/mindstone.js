@@ -83,8 +83,9 @@ const ALLOWED = [
     path: /^personas\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\/knowledgebases\/[a-z0-9][a-z0-9-]{0,39}\/ingest$/,
   },
   // Try again after a give-up (MindStone-Agent #158): clears a KB's re-embed state.
-  // A shared KB's id is its folder's name: capitals, _ and . too, but not a dot folder.
-  { method: 'POST', path: /^knowledgebases\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\/reembed$/ },
+  // A shared KB's id is its folder's name, any name the list shows (MindStone-Agent #166):
+  // one segment (checked decoded, so an encoded / is refused), never a dot folder.
+  { method: 'POST', path: /^knowledgebases\/[^/.][^/]{0,1023}\/reembed$/ },
   {
     method: 'POST',
     path: /^personas\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}\/knowledgebases\/[a-z0-9][a-z0-9-]{0,39}\/reembed$/,
@@ -212,7 +213,11 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
     res.headersSent ? res.end(JSON.stringify(body)) : res.status(status).json(body);
   let heartbeat;
   try {
-    const response = await fetch(`${base}/admin/${path}${query}`, {
+    // Each segment encoded again, as it arrived decoded: a KB folder name may hold a space, # or ? (MindStone-Agent #166).
+    const upstreamPath = Array.isArray(segments)
+      ? segments.map((segment) => encodeURIComponent(segment)).join('/')
+      : path;
+    const response = await fetch(`${base}/admin/${upstreamPath}${query}`, {
       method: req.method,
       headers,
       body: req.method === 'GET' ? undefined : JSON.stringify(req.body ?? {}),

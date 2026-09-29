@@ -23,7 +23,6 @@ import { useLocalize } from '~/hooks';
 
 const BASE = '/api/mindstone/admin';
 /** A shared KB id the gateway's reset route and the proxy take: its folder name (MindStone-Agent #158). */
-const SHARED_KB_ID = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
 
 function errorText(error: unknown): string | undefined {
   const data = (error as { response?: { data?: { error?: unknown } } })?.response?.data;
@@ -408,13 +407,9 @@ export default function PersonaEditor({
                 {kb.reembed && (
                   <KbReembedNote
                     reembed={kb.reembed}
-                    kbId={kb.id}
                     testId={`ms-pe-global-kb-reembed-${kb.id}`}
-                    retryPath={
-                      SHARED_KB_ID.test(kb.id)
-                        ? `${BASE}/knowledgebases/${encodeURIComponent(kb.id)}/reembed`
-                        : undefined
-                    }
+                    // Any folder name the list shows, as one encoded segment (MindStone-Agent #166).
+                    retryPath={`${BASE}/knowledgebases/${encodeURIComponent(kb.id)}/reembed`}
                     onRetried={() => {
                       void request
                         .get<{ knowledgebases: KnowledgebaseSummary[] }>(`${BASE}/knowledgebases`)
