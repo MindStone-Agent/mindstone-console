@@ -3404,7 +3404,6 @@
   "com_mindstone_kb_reembed_retry": "Try again",
   "com_mindstone_kb_reembed_retry_failed": "Couldn't reset it; try again.",
   "com_mindstone_kb_reembed_retry_refused": "The gateway refused the reset: {{0}}",
-  "com_mindstone_kb_reembed_cli": "Its name can't be sent from here: run `mindstone kb ingest {{0}}` on the gateway host to try again.",
   "com_mindstone_kb_reembed_reason": "Last try: {{0}}",
   "com_mindstone_pkb_not_indexed": "not ingested yet",
   "com_mindstone_pkb_sources": "Sources",

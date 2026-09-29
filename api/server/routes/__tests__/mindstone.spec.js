@@ -105,6 +105,14 @@ const ENDPOINTS = [
   { method: 'post', path: 'personas/analyst/knowledgebases/notes/ingest', write: true },
   { method: 'post', path: 'knowledgebases/g1/reembed', write: true },
   { method: 'post', path: 'knowledgebases/HR_Hand.book/reembed', write: true },
+  // Any folder name the list shows (MindStone-Agent #166): spaces, # ? % and an accent, encoded.
+  {
+    method: 'post',
+    path: 'knowledgebases/HR%20Policies%20%231%20%C3%A9%3F%25/reembed',
+    write: true,
+  },
+  // The longest name a folder can have is accepted too (255 characters).
+  { method: 'post', path: `knowledgebases/${'k'.repeat(255)}/reembed`, write: true },
   { method: 'post', path: 'personas/analyst/knowledgebases/notes/reembed', write: true },
   // USER.md from Settings (MindStone-Agent #140).
   { method: 'get', path: 'user', write: false },
@@ -400,6 +408,12 @@ describe('MindStone admin proxy', () => {
       ['get', 'knowledgebases/g1'],
       ['get', 'knowledgebases/g1/reembed'],
       ['post', 'knowledgebases/.hidden/reembed'],
+      ['post', 'knowledgebases/%2Ehidden/reembed'],
+      ['post', 'knowledgebases/a%2Fb/reembed'],
+      ['post', 'knowledgebases/..%2Fpersonas/reembed'],
+      ['post', 'knowledgebases/%2E%2E/reembed'],
+      // Past the length a folder name can have (MindStone-Agent #166).
+      ['post', `knowledgebases/${'a'.repeat(1025)}/reembed`],
       ['post', 'knowledgebases/g1/reembed/x'],
       ['patch', 'personas/analyst/knowledgebases'],
       ['post', 'personas/analyst/knowledgebases/Notes/sources'],
@@ -420,6 +434,18 @@ describe('MindStone admin proxy', () => {
       expect([path, response.status]).toEqual([path, 404]);
     }
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('sends a KB folder name to the gateway as one encoded segment (MindStone-Agent #166)', async () => {
+    const response = await request(app)
+      .post('/api/mindstone/admin/knowledgebases/HR%20Policies%20%231%20%C3%A9%3F%25/reembed')
+      .set('x-test-caller', 'manage')
+      .send({});
+    expect(response.status).toBe(200);
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      'http://gateway.test:19790/admin/knowledgebases/HR%20Policies%20%231%20%C3%A9%3F%25/reembed',
+    );
   });
 
   it('calls the gateway with its own credentials and the session user, not the browser headers', async () => {
