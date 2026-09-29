@@ -95,6 +95,38 @@ describe("MindStone approvals: a persona's component cards (MindStone-Agent #125
     expect(listed).not.toHaveTextContent('com_mindstone_appr_persona_workflows');
   });
 
+  it("says what empty lists mean and shows each listed workflow's steps", async () => {
+    const section = await openDetail(
+      personaAction({
+        components: { skills: [], workflows: ['triage', 'gone'], knowledgebases: [] },
+        listedWorkflows: [
+          { id: 'triage', steps: [{ id: 'hand-off', kind: 'route', personaId: 'other' }] },
+          { id: 'gone', steps: null },
+        ],
+      }),
+    );
+    const listed = within(section).getByTestId('ms-appr-persona-components');
+    expect(listed).toHaveTextContent('com_mindstone_appr_persona_all_skills');
+    expect(listed).toHaveTextContent('com_mindstone_appr_persona_all_kbs');
+    expect(within(listed).getByTestId('ms-appr-listed-workflow-triage')).toHaveTextContent(
+      '"personaId": "other"',
+    );
+    expect(listed).toHaveTextContent('com_mindstone_appr_persona_workflow_missing:gone');
+  });
+
+  it("says a persona's new skill is installed for everyone who uses all skills", async () => {
+    const section = await openDetail({
+      id: ID,
+      status: 'pending',
+      kind: 'skill_install',
+      connectorId: 'console',
+      summary: 'install skill beta for persona wren: Beta',
+      parentApprovalId: 'parent-1',
+      skill: { id: 'beta', label: 'Beta', description: 'A skill.', instructions: '# Beta' },
+    });
+    expect(within(section).getByTestId('ms-appr-skill-everyone')).toBeInTheDocument();
+  });
+
   it('shows a proposed workflow as text, says it is part of a persona, and what approving does', async () => {
     const section = await openDetail({
       id: ID,

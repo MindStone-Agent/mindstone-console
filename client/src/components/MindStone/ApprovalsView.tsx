@@ -58,6 +58,8 @@ type Detail = Summary & {
   persona?: Persona;
   /** A proposed persona's existing components (#125). */
   components?: { skills: string[]; workflows: string[]; knowledgebases: string[] };
+  /** The steps of each workflow a proposed persona lists; null when it doesn't exist (#125). */
+  listedWorkflows?: Array<{ id: string; steps: unknown[] | null }>;
   /** A workflow proposed with a persona (#125). */
   workflow?: {
     id: string;
@@ -287,21 +289,60 @@ function ComponentFields({ detail }: { detail: Detail }) {
   return null;
 }
 
-/** The existing components a proposed persona lists (#125). */
-function PersonaComponents({ components }: { components: NonNullable<Detail['components']> }) {
+/**
+ * The existing components a proposed persona lists (#125): what an empty
+ * list means, and each listed workflow's steps, since a workflow can route a
+ * turn to another persona.
+ */
+function PersonaComponents({
+  components,
+  listedWorkflows,
+}: {
+  components: NonNullable<Detail['components']>;
+  listedWorkflows?: Detail['listedWorkflows'];
+}) {
   const localize = useLocalize();
-  const line = (label: TranslationKeys, ids: string[]) =>
-    ids.length ? (
+  const line = (label: TranslationKeys, ids: string[], empty?: TranslationKeys) => {
+    if (!ids.length) {
+      return empty ? <p className="text-sm">{localize(empty)}</p> : null;
+    }
+    return (
       <p className="text-sm">
         {localize(label)}:{' '}
         <span className="font-mono">{ids.map((id) => visibleText(id)).join(', ')}</span>
       </p>
-    ) : null;
+    );
+  };
   return (
     <div className="mt-2 flex flex-col gap-1" data-testid="ms-appr-persona-components">
-      {line('com_mindstone_appr_persona_skills', components.skills)}
+      {line(
+        'com_mindstone_appr_persona_skills',
+        components.skills,
+        'com_mindstone_appr_persona_all_skills',
+      )}
       {line('com_mindstone_appr_persona_workflows', components.workflows)}
-      {line('com_mindstone_appr_persona_kbs', components.knowledgebases)}
+      {listedWorkflows?.map((workflow) =>
+        workflow.steps ? (
+          <pre
+            key={workflow.id}
+            className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-secondary p-2 text-xs"
+            data-testid={`ms-appr-listed-workflow-${workflow.id}`}
+          >
+            {visibleText(`${workflow.id}:\n${JSON.stringify(workflow.steps, null, 2)}`)}
+          </pre>
+        ) : (
+          <p key={workflow.id} className="text-sm text-text-secondary">
+            {localize('com_mindstone_appr_persona_workflow_missing', {
+              0: visibleText(workflow.id),
+            })}
+          </p>
+        ),
+      )}
+      {line(
+        'com_mindstone_appr_persona_kbs',
+        components.knowledgebases,
+        'com_mindstone_appr_persona_all_kbs',
+      )}
     </div>
   );
 }
@@ -494,7 +535,12 @@ export default function MindStoneApprovalsView() {
             {detail.persona ? (
               <>
                 <PersonaFields persona={detail.persona} />
-                {detail.components && <PersonaComponents components={detail.components} />}
+                {detail.components && (
+                  <PersonaComponents
+                    components={detail.components}
+                    listedWorkflows={detail.listedWorkflows}
+                  />
+                )}
                 {detail.status === 'pending' && (
                   <>
                     {/* The approve confirmation says the same, so it isn't shown twice. */}
@@ -511,6 +557,11 @@ export default function MindStoneApprovalsView() {
               </>
             ) : null}
             {detail.skill && <SkillFields skill={detail.skill} />}
+            {detail.skill && detail.parentApprovalId && (
+              <p className="mt-1 text-sm" data-testid="ms-appr-skill-everyone">
+                {localize('com_mindstone_appr_skill_everyone')}
+              </p>
+            )}
             {(detail.workflow || detail.knowledgebase) && <ComponentFields detail={detail} />}
             {!detail.persona && !detail.skill && !detail.workflow && !detail.knowledgebase && (
               <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-secondary p-2 text-sm">
