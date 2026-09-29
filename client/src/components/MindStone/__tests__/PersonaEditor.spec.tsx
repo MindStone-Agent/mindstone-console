@@ -272,6 +272,25 @@ describe('persona editor (MindStone-Agent #125)', () => {
     expect(mockPost).toHaveBeenCalledWith(`${BASE}/knowledgebases/HR_Hand.book/reembed`, {});
   });
 
+  it('a refused reset shows the gateway\'s own text; an id the route can\'t take points to the CLI (MindStone-Agent #164)', async () => {
+    serve({
+      persona: ATLAS,
+      globalKbs: [{ id: 'HR Policies', name: 'HR', indexed: true, entryCount: 1, sourceCount: 1, reembed: { failures: 5, gaveUp: true } }],
+      privateKbs: [{ id: 'notes', name: 'Notes', indexed: true, entryCount: 2, sourceCount: 1, reembed: { failures: 5, gaveUp: true } }],
+    });
+    mockPost.mockImplementation(() =>
+      Promise.reject({ response: { status: 404, data: { error: 'persona "atlas" has no knowledge base named "notes"' } } }),
+    );
+    await renderEditor('atlas');
+    expect(screen.queryByTestId('ms-pe-global-kb-reembed-HR Policies-retry')).not.toBeInTheDocument();
+    expect(screen.getByTestId('ms-pe-global-kb-reembed-HR Policies-cli').textContent).toBe('com_mindstone_kb_reembed_cli:HR Policies');
+    expect(screen.queryByTestId('ms-pkb-reembed-notes-cli')).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByTestId('ms-pkb-reembed-notes-retry'));
+    expect((await screen.findByTestId('ms-pkb-reembed-notes-retry-failed')).textContent).toBe(
+      'com_mindstone_kb_reembed_retry_refused:persona "atlas" has no knowledge base named "notes"',
+    );
+  });
+
   it("a reembed with a reason that isn't text, or no count, still renders (MindStone-Agent #158)", async () => {
     serve({
       persona: ATLAS,

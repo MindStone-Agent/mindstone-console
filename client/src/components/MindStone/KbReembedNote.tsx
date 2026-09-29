@@ -12,11 +12,14 @@ import { useLocalize } from '~/hooks';
 
 export default function KbReembedNote({
   reembed,
+  kbId,
   testId,
   retryPath,
   onRetried,
 }: {
   reembed: NonNullable<KnowledgebaseSummary['reembed']>;
+  /** For the CLI hint when there is no retry here (MindStone-Agent #164). */
+  kbId: string;
   testId: string;
   /** The gateway's reset for this KB; with it, a given-up KB gets a "Try again". */
   retryPath?: string;
@@ -24,6 +27,8 @@ export default function KbReembedNote({
 }) {
   const localize = useLocalize();
   const [retry, setRetry] = useState<'idle' | 'busy' | 'failed'>('idle');
+  /** The gateway's own refusal, shown as given (MindStone-Agent #164). */
+  const [refusal, setRefusal] = useState<string | undefined>(undefined);
   const next = typeof reembed.nextAttemptAt === 'string' ? new Date(reembed.nextAttemptAt) : undefined;
   const when = next && !Number.isNaN(next.getTime()) ? next.toLocaleString() : '';
   const failures = Number.isInteger(reembed.failures) ? String(reembed.failures) : '?';
@@ -45,11 +50,14 @@ export default function KbReembedNote({
           data-testid={`${testId}-retry`}
           onClick={async () => {
             setRetry('busy');
+            setRefusal(undefined);
             try {
               await request.post(retryPath, {});
               setRetry('idle');
               onRetried?.();
-            } catch {
+            } catch (error) {
+              const said = (error as { response?: { data?: { error?: unknown } } })?.response?.data?.error;
+              setRefusal(typeof said === 'string' && said ? said : undefined);
               setRetry('failed');
             }
           }}
@@ -57,9 +65,16 @@ export default function KbReembedNote({
           {localize('com_mindstone_kb_reembed_retry')}
         </button>
       )}
+      {reembed.gaveUp && !retryPath && (
+        <span className="block" data-testid={`${testId}-cli`}>
+          {localize('com_mindstone_kb_reembed_cli', { 0: visibleText(kbId) })}
+        </span>
+      )}
       {retry === 'failed' && (
         <span className="ml-2" data-testid={`${testId}-retry-failed`}>
-          {localize('com_mindstone_kb_reembed_retry_failed')}
+          {refusal
+            ? localize('com_mindstone_kb_reembed_retry_refused', { 0: visibleText(refusal) })
+            : localize('com_mindstone_kb_reembed_retry_failed')}
         </span>
       )}
     </span>
