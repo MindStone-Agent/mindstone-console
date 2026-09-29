@@ -9,7 +9,10 @@
  * or the console. A persona proposal (MindStone-Agent #105) is shown field by
  * field as plain text, never as HTML or markdown, with any non-printing
  * character shown as \u{XXXX}. Approving one only saves it to the personas;
- * making it active is a separate switch on the Personas page.
+ * making it active is a separate switch on the Personas page. A persona can
+ * bring new components (MindStone-Agent #125): each is its own card (a skill,
+ * a workflow, a private knowledge base), marked as part of the persona,
+ * approved after it, and shown as plain text.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -26,13 +29,17 @@ type Summary = {
     | 'connector_mutation'
     | 'memory_write'
     | 'persona_create'
-    | 'skill_install';
+    | 'skill_install'
+    | 'workflow_create'
+    | 'persona_kb_create';
   connectorId: string;
   summary: string;
   createdAt?: string;
   decidedAt?: string;
   decidedBy?: string;
   decisionNote?: string;
+  /** A persona's component card (MindStone-Agent #125): its persona card. */
+  parentApprovalId?: string;
 };
 type Detail = Summary & {
   send?: { text?: string; chatId?: string };
@@ -49,6 +56,21 @@ type Detail = Summary & {
     instructions?: string;
   };
   persona?: Persona;
+  /** A proposed persona's existing components (#125). */
+  components?: { skills: string[]; workflows: string[]; knowledgebases: string[] };
+  /** A workflow proposed with a persona (#125). */
+  workflow?: {
+    id: string;
+    personaId: string;
+    definition: { name?: string; description?: string; steps: unknown[] };
+  };
+  /** A private knowledge base proposed with a persona (#125). */
+  knowledgebase?: {
+    personaId: string;
+    id: string;
+    name?: string;
+    sources: Array<{ name: string; text: string }>;
+  };
 };
 /** A persona the agent proposed (the gateway's PersonaProposalPayload). */
 type Persona = {
@@ -68,6 +90,8 @@ const CONFIRM_APPROVE: Partial<Record<Summary['kind'], TranslationKeys>> = {
   memory_write: 'com_mindstone_appr_confirm_memory',
   persona_create: 'com_mindstone_appr_persona_effect',
   skill_install: 'com_mindstone_appr_confirm_skill',
+  workflow_create: 'com_mindstone_appr_confirm_workflow',
+  persona_kb_create: 'com_mindstone_appr_confirm_kb',
 };
 
 function errorBody(error: unknown): { error?: string; code?: string } {
@@ -89,7 +113,10 @@ function payloadText(detail: Detail): string {
 
 /** A persona's or a skill's summary carries text the agent wrote, so it is shown the same way. */
 function summaryText(action: Summary): string {
-  return action.kind === 'persona_create' || action.kind === 'skill_install'
+  return action.kind === 'persona_create' ||
+    action.kind === 'skill_install' ||
+    action.kind === 'workflow_create' ||
+    action.kind === 'persona_kb_create'
     ? visibleText(action.summary)
     : action.summary;
 }
@@ -210,6 +237,72 @@ function PersonaFields({ persona }: { persona: Persona }) {
         </div>
       ) : null}
     </dl>
+  );
+}
+
+/**
+ * A persona's component card (MindStone-Agent #125): the proposed workflow's
+ * steps or knowledge base's sources, as plain text with non-printing
+ * characters shown.
+ */
+function ComponentFields({ detail }: { detail: Detail }) {
+  const localize = useLocalize();
+  const block =
+    'max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-secondary p-2 text-sm';
+  if (detail.workflow) {
+    return (
+      <div className="flex flex-col gap-1" data-testid="ms-appr-workflow">
+        <p className="text-sm">
+          {localize('com_mindstone_appr_workflow_for', {
+            0: visibleText(detail.workflow.id),
+            1: visibleText(detail.workflow.personaId),
+          })}
+        </p>
+        <pre className={block}>
+          {visibleText(JSON.stringify(detail.workflow.definition, null, 2))}
+        </pre>
+      </div>
+    );
+  }
+  if (detail.knowledgebase) {
+    const kb = detail.knowledgebase;
+    return (
+      <div className="flex flex-col gap-1" data-testid="ms-appr-kb">
+        <p className="text-sm">
+          {localize('com_mindstone_appr_kb_for', {
+            0: visibleText(kb.id),
+            1: visibleText(kb.personaId),
+          })}
+        </p>
+        {kb.sources.map((source) => (
+          <pre key={source.name} className={block}>
+            {collapseBlankRuns(visibleText(source.text), (count) =>
+              localize('com_mindstone_appr_skill_blank_lines', { 0: String(count) }),
+            )}
+          </pre>
+        ))}
+      </div>
+    );
+  }
+  return null;
+}
+
+/** The existing components a proposed persona lists (#125). */
+function PersonaComponents({ components }: { components: NonNullable<Detail['components']> }) {
+  const localize = useLocalize();
+  const line = (label: TranslationKeys, ids: string[]) =>
+    ids.length ? (
+      <p className="text-sm">
+        {localize(label)}:{' '}
+        <span className="font-mono">{ids.map((id) => visibleText(id)).join(', ')}</span>
+      </p>
+    ) : null;
+  return (
+    <div className="mt-2 flex flex-col gap-1" data-testid="ms-appr-persona-components">
+      {line('com_mindstone_appr_persona_skills', components.skills)}
+      {line('com_mindstone_appr_persona_workflows', components.workflows)}
+      {line('com_mindstone_appr_persona_kbs', components.knowledgebases)}
+    </div>
   );
 }
 
@@ -393,9 +486,15 @@ export default function MindStoneApprovalsView() {
                 {localize('com_mindstone_appr_memory_path', { 0: detail.memory.path })}
               </p>
             )}
+            {detail.parentApprovalId && (
+              <p className="mb-1 text-sm text-text-secondary" data-testid="ms-appr-part-of-persona">
+                {localize('com_mindstone_appr_part_of_persona')}
+              </p>
+            )}
             {detail.persona ? (
               <>
                 <PersonaFields persona={detail.persona} />
+                {detail.components && <PersonaComponents components={detail.components} />}
                 {detail.status === 'pending' && (
                   <>
                     {/* The approve confirmation says the same, so it isn't shown twice. */}
@@ -412,7 +511,8 @@ export default function MindStoneApprovalsView() {
               </>
             ) : null}
             {detail.skill && <SkillFields skill={detail.skill} />}
-            {!detail.persona && !detail.skill && (
+            {(detail.workflow || detail.knowledgebase) && <ComponentFields detail={detail} />}
+            {!detail.persona && !detail.skill && !detail.workflow && !detail.knowledgebase && (
               <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-secondary p-2 text-sm">
                 {payloadText(detail)}
               </pre>
