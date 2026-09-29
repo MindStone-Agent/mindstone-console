@@ -525,6 +525,9 @@ describe('MindStone admin proxy', () => {
         // A private KB's ingest fetches its URL sources (#125).
         ['post', 'personas/analyst/knowledgebases/notes/ingest', 4 * 60_000],
         ['post', 'personas/analyst/knowledgebases/notes/sources', 15_000],
+        // Approving a proposed private KB ingests it before answering.
+        ['post', 'approvals/0b5e7c1a-1111-4222-8333-444455556666/approve', 4 * 60_000],
+        ['post', 'approvals/0b5e7c1a-1111-4222-8333-444455556666/reject', 15_000],
       ]) {
         timeout.mockClear();
         await call('manage', { method, path });
@@ -608,5 +611,19 @@ describe('MindStone admin proxy', () => {
     const response = await call('manage', { method: 'get', path: 'config' });
     expect(response.status).toBe(502);
     expect(response.text).not.toMatch(/token|ECONNREFUSED/);
+  });
+
+  it('a gateway that takes too long is a 504 gateway_timeout, not a 502', async () => {
+    fetchMock.mockImplementation(async () => {
+      const error = new Error('The operation was aborted due to timeout');
+      error.name = 'TimeoutError';
+      throw error;
+    });
+    const response = await call('manage', {
+      method: 'post',
+      path: 'personas/analyst/knowledgebases/notes/ingest',
+    });
+    expect(response.status).toBe(504);
+    expect(response.body.code).toBe('gateway_timeout');
   });
 });
