@@ -12,6 +12,12 @@ e2e/mindstone-journey/run-journey.sh main main
 
 Every step prints **PASS**, **FAIL**, **PENDING** or **MOCK**, with an evidence path.
 
+It installs MindStone one of two ways, `UAT_INSTALL`:
+- **`native`** (the default): MindStone-Agent's `install.sh` on this host, then the Console from `mindstone/docker-compose.yml` (below);
+- **`stack`**: the whole stack in Docker, the gateway, the Console and MongoDB in one Compose project, from MindStone-Agent's `install-stack.sh` ([MindStone-Agent #171](https://github.com/MindStone-Agent/MindStone-Agent/issues/171), its README's install guide path A). See [Stack mode](#stack-mode-uat_installstack).
+
+The journey after the install, the gate and the DEMO SUBSET are the same in both. `SUMMARY.md` states the install mode and the refs.
+
 **The gate** passes, and the script exits 0, only when all of these hold:
 - every required row (S0, S1, S2, S3, S5, C0 to C4, J1 to J9, X1 to X5, plus J10 with `UAT_EXPECT_PERSONA_BUILDER=1`, J11 with `UAT_EXPECT_ENTERPRISE=1` and J12 with `UAT_EXPECT_SETTINGS_PARITY=1`) appears exactly once, and each one is PASS;
 - there are no unknown rows (J10, J11 and J12 are always known rows);
@@ -89,6 +95,51 @@ Needs: git, Node 22.19 or newer, npm, Docker with Compose v2, curl, openssl, and
 | X5 | (harness) the on-screen check, stall detection, and J10's, J11's and J12's pieces | `lib/screen-check.selftest.mjs` runs the same in-page matcher J4 and J6 use (`lib/screen-match.js`) in a real Chromium page. A reply in its assistant row must be found. It must NOT be found when the text is only in the user's own bubble (J6's codeword and "Noted." are there), when the assistant body is hidden, or when it's in a different message's row. `lib/stall.selftest.mjs` runs the harness's own request and page-load code (`lib/stall.js`) against a local server that never answers: no response, a body that never ends (from the page and from node), a page stuck in `evaluate`, and a page load that never finishes must each throw a named STALL within their timeout; an answered request must come back. In a polling loop, a call its deadline cut short (every poll slow, the last one out of time) must end as the loop's own limit, never as a stall, and a call with its full timeout left must still stall. A 60 s watchdog stops the self-test if it hangs itself. `lib/enterprise.selftest.mjs` checks J11's own pieces offline, `lib/persona-builder.selftest.mjs` J10's and `lib/settings-parity.selftest.mjs` J12's (below, under Harness self-tests). |
 | X4 | (harness) cleanup | Nothing is left: no containers or volumes with the project label, no image (unless `UAT_KEEP_IMAGE=1`), no scratch dir (unless `UAT_KEEP_SCRATCH=1`), nothing listening on the gateway port, and J11's stub Azure endpoint is stopped (its process gone, nothing on its port). |
 | X3 | (harness) host details | Paths (home, scratch, the checkout, `$TMPDIR`), the user name and the host name are redacted from every text file in the evidence (`lib/redact-host.mjs`) as **plain substrings**, so a name inside a mangled path like `-Users-<name>-` is caught too. A plain-substring rescan must find none left. `node lib/redact-host.mjs --check <dir> <pairs>` audits an evidence dir without changing it. |
+
+### Stack mode (`UAT_INSTALL=stack`)
+
+```bash
+UAT_INSTALL=stack e2e/mindstone-journey/run-journey.sh <msa-ref> <console-ref>
+```
+
+The install is MindStone-Agent's README, install guide path A, run as a person runs it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/<msa-ref>/install-stack.sh | \
+  CONSOLE_PORT=<port> MINDSTONE_GATEWAY_PORT=<port> MINDSTONE_PROJECT=uat-journey-<id> \
+  bash -s -- --dir <scratch>/stack --ref <msa-ref> --console-ref <console-ref> --admin-email uat-admin@example.com --admin-name "UAT Admin"
+```
+
+Both ports come from the harness's range (never 3080 or 19789: a range that includes either is refused in stack mode), and the Compose project is the run's own. raw.githubusercontent.com caches a branch's files for a few minutes, so right after a push, set `UAT_STACK_INSTALLER_FILE=<path to install-stack.sh>` to pipe a local copy to bash instead (the installer still downloads `deploy/docker/compose.yml` and the Console's files from raw at the refs, and the images build from the git URLs). `UAT_MSA_REPO` and `UAT_CONSOLE_REPO` are refused in stack mode, since the stack builds from the MindStone-Agent GitHub repos by URL.
+
+The install rows keep their ids, so the gate and the DEMO SUBSET are unchanged:
+
+| ID | README step (path A) | Check |
+|---|---|---|
+| S0 | A0: requirements | `docker info`, Compose v2, and nothing answers on the Console's or the gateway's port (`000`) |
+| S1 | A1: `install-stack.sh` | First, `lib/compose-guard.mjs` checks `deploy/docker/compose.yml` at `<msa-ref>` the way the installer will run it (the project name from `.env`, no `-p`): every name must be the run's project's, and every bind inside the stack dir. Then the installer exits 0, prints `Open http://localhost:<port>`, and `docker compose ps` shows `gateway` Up (healthy), `console` and `mongodb` Up. The refs' commits are read with `git ls-remote`. |
+| S2 | A4, before setup | The README has path A, finishing setup in the Console; the gateway's fresh config says `routing.mode: placeholder`; `docker compose exec gateway ./scripts/mindstone doctor` ends with `Result: ok`. |
+| S3 | the gateway | `/health` answers `ok:true` on `127.0.0.1:<gateway port>`. Then J11's host settings (below) go into `gateway.env`, `docker compose up -d gateway` recreates the gateway, and it must be healthy again with them. |
+| S5 | A2, and A5's restart | `console.env` has the 6 secrets (the README's grep), `gateway.env` and `console.env` are `-rw-------`; `docker compose restart gateway`; `/v1/models` is 200 with the token and 401 without. |
+| C0 | the stack's network, A4's Ollama check | the `console` container reaches the gateway at `MINDSTONE_GATEWAY_URL`; with the `ollama` provider, the `gateway` container gets 200 from Ollama's `/api/tags` at the stack's Ollama address |
+| C1 | the Console's files | `librechat.yaml` and `console.env.example` were downloaded at `<console-ref>` |
+| C2 | `console.env` | `MINDSTONE_GATEWAY_URL` is `http://gateway:19789/v1`, registration is off, the gateway token is the same in both files, and `gateway.env` has only the sha256 of the admin credential (compared in the shell, never printed) |
+| C3 | the running stack | the installed project passes `compose-guard.mjs` too; `gateway`, `console` and `mongodb` are running; `/` answers 200 |
+| X2 | the image | as natively, on the stack's `uat-journey-<id>-console` image |
+| C4 | A3: sign in | the installer said `Admin account created: <email>`; `admin-password` is `-rw-------`; the README's login check (the request on stdin) prints 200 |
+
+What changes after the install:
+- **The CLI and restarts.** `mindstone`, `msa_env` and `gateway_cmd` in `run-journey.sh` run in the gateway container (`docker compose -p <project> exec -T gateway ./scripts/mindstone …`), and gateway start, stop and restart are `docker compose start|stop|restart gateway`. Every `docker compose` the harness runs names the project and the stack's compose file.
+- **The gateway's files.** Its data dir, transcripts, Pi sessions and log are in its container's volumes. Just before a step reads them, `lib/stack-files.js` copies them into a mirror in the scratch dir (`docker compose cp`, `docker compose logs`), and the step reads the mirror as it would the native files. J12's USER.md restore removes the file in the container (`docker compose exec … rm`). Natively all of this is a no-op.
+- **Ollama.** The gateway container reaches the host's Ollama as `http://host.docker.internal:11434/v1` (the stack's default; `UAT_STACK_OLLAMA_BASE_URL` changes it and is then passed to the installer as `OLLAMA_BASE_URL`). J2 checks that the Ollama choice comes **filled in** with that address, and never types it. The harness's own Ollama probes stay on `UAT_OLLAMA_URL`.
+- **J11.** MindStone-Agent #126 allows an enterprise endpoint on a private host only with `MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1` in the gateway's environment, and plain http only to loopback. The gateway's container reaches the stub on this host as `host.docker.internal`, which isn't loopback. So in stack mode the stub speaks **https**, with a server certificate from a per-run test CA made with `openssl` into the 0600 secrets dir; the CA is copied into the gateway's runtime volume, `MINDSTONE_ENTERPRISE_PRIVATE_HOSTS=1` and `NODE_EXTRA_CA_CERTS=<that CA>` are added to the stack's `gateway.env` (the gateway's `env_file`, which a re-run of the installer keeps), and `docker compose up -d gateway` recreates it (S3). J11 types `https://host.docker.internal:<stub port>/openai/v1`; the Playwright process trusts the same CA for its own health check of the stub. The stack has no documented way to do this, so the run records finding **F-STACK-1**.
+- **Secrets.** `install-stack.sh` generates them all. The harness reads the gateway token, the admin credential and the admin password from the stack's 600 files into its own 600 files, never printed. X1 and the scrub use `console.env`, `gateway.env`, `admin-password` and the harness's copies.
+- **Teardown.** The stack's logs are saved (`logs/gateway.log`, `console.log`, `mongodb.log`), then `install-stack.sh --dir <scratch>/stack --uninstall` (the README's A5), which keeps the data on purpose. So the harness then runs `docker compose -p <project> down -v` and the label sweep for that project only, and removes the two images it built (`uat-journey-<id>-gateway`, `uat-journey-<id>-console`) unless `UAT_KEEP_IMAGE=1`. X4 also checks the Console's port. Nothing is pruned, and no other container, volume or image is touched. `restore-failures.tsv` counts as it does natively.
+
+Known limits of stack mode:
+- **Docker Desktop.** J11's stub listens on 127.0.0.1; Docker Desktop forwards `host.docker.internal` to the host's loopback, Docker Engine on Linux doesn't, so J11 can't reach the stub there (Ollama on Linux must listen on an address the containers reach anyway, README A0).
+- **The build cache.** The first build takes 10 to 20 minutes. The BuildKit cache of both images, and the pulled base images (`node:24-bookworm-slim`, `mongo:8.0.20`, the Console's), are left, as natively.
+- **Provenance.** The images build from the git URLs at the refs; the commits recorded are what `git ls-remote` said just before the install.
 
 ### The journey: UI only (steps `J*`, `journey.spec.ts`)
 
@@ -225,7 +276,10 @@ There is no html report, trace or video, because those record step titles and ar
 | `UAT_API_TIMEOUT_MS` | `30000` | each harness request's timeout: no answer by then is a STALL (above) |
 | `UAT_PORT_MIN`, `UAT_PORT_MAX` | 26900 to 26999 | the gateway, Console and J11 stub ports. Each is checked free first. Any range that touches 18000 to 18999 is refused. |
 | `UAT_GATEWAY_BRIDGE_HOST` | `172.17.0.1` | **Linux only.** The address the gateway binds, so the Console's container can reach it (MindStone-Agent README 5.5). |
-| `UAT_MSA_REPO`, `UAT_MSA_RAW`, `UAT_CONSOLE_REPO` | the MindStone-Agent GitHub repos | for testing forks |
+| `UAT_MSA_REPO`, `UAT_MSA_RAW`, `UAT_CONSOLE_REPO` | the MindStone-Agent GitHub repos | for testing forks (native mode; stack mode takes only `UAT_MSA_RAW`, for the installer's URL) |
+| `UAT_INSTALL` | `native` | `stack`: install the whole stack in Docker with `install-stack.sh` ([Stack mode](#stack-mode-uat_installstack)) |
+| `UAT_STACK_INSTALLER_FILE` | unset | stack mode: pipe this local `install-stack.sh` to bash instead of the one at the raw URL (raw caches a branch for a few minutes) |
+| `UAT_STACK_OLLAMA_BASE_URL` | the stack's `http://host.docker.internal:11434/v1` | stack mode: Ollama as the gateway container reaches it, passed to the installer as `OLLAMA_BASE_URL` when set |
 | `UAT_KEEP_SCRATCH=1`, `UAT_KEEP_IMAGE=1` | off | keep the scratch dir, or the built Console image, for debugging |
 | `DOCKER_HOST`, `DOCKER_CONFIG` | Docker's own | passed through to `docker`. On a Mac where pulls hang in Docker Desktop's credential helper, point `DOCKER_CONFIG` at a config with no `credsStore`, and set `DOCKER_HOST=unix://$HOME/.docker/run/docker.sock`. |
 
@@ -237,6 +291,7 @@ Refs are passed to `git clone --branch`, so use branch or tag names, not SHAs.
 
 - **MindStone-Agent** installs into `<scratch>/MindStone-Agent`. Every MindStone command runs with `HOME=<scratch>/home` and no inherited `MINDSTONE_*` or `PI_*` variables, so nothing reaches `~/.mindstone*`, `~/.pi`, `~/.openclaw` or a live gateway. The README's `$HOME/.mindstone-admin-credential` lands in the scratch home.
 - **The Console** runs as compose project `uat-journey-<id>`. It uses an override file outside the checkout, with its own container names, image tag (`uat-journey-<id>-console:local`) and loopback port. No tracked file is edited, and no other container, volume or project on the Docker host is touched.
+- **Stack mode** installs into `<scratch>/stack`, as compose project `uat-journey-<id>`, with the images `uat-journey-<id>-gateway` and `uat-journey-<id>-console`; its teardown is described under [Stack mode](#stack-mode-uat_installstack).
 - **On exit** (including a failure or Ctrl-C), a trap runs these steps:
   1. It prints "cleaning up, please wait" and ignores further Ctrl-C, TERM and HUP until it's done.
   2. It saves the logs.
