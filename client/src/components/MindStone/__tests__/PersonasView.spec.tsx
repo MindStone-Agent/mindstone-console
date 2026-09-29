@@ -13,6 +13,19 @@ jest.mock('~/hooks', () => ({
   useLocalize: () => mockLocalize,
 }));
 
+// The editor has its own spec: here only which persona it opens on matters.
+jest.mock('../PersonaEditor', () => ({
+  __esModule: true,
+  default: ({ personaId, onClose }: { personaId?: string; onClose: () => void }) => (
+    <div data-testid="ms-persona-editor-stub">
+      {`editor:${personaId ?? 'new'}`}
+      <button type="button" onClick={onClose}>
+        {'close-editor'}
+      </button>
+    </div>
+  ),
+}));
+
 const mockGet = jest.fn();
 const mockPatch = jest.fn();
 jest.mock('librechat-data-provider', () => ({
@@ -197,6 +210,21 @@ describe('MindStone personas page (MindStone-Agent #105)', () => {
       'com_mindstone_per_activated:Wr\\u{202E}en',
     );
     expect(document.body.textContent).not.toMatch(/[\u202E\u200B]/);
+  });
+
+  it('opens the editor to build a persona, or on the persona whose Edit is clicked (#125)', async () => {
+    await renderPage('atlas');
+    fireEvent.click(screen.getByTestId('ms-persona-create'));
+    expect(screen.getByTestId('ms-persona-editor-stub')).toHaveTextContent('editor:new');
+    // While the editor is open, there is no second Build button.
+    expect(screen.queryByTestId('ms-persona-create')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'close-editor' }));
+    fireEvent.click(
+      within(row('wren')).getByRole('button', { name: 'com_mindstone_pe_edit_named:wren' }),
+    );
+    expect(screen.getByTestId('ms-persona-editor-stub')).toHaveTextContent('editor:wren');
+    // A persona that can't be loaded can't be edited here.
+    expect(within(row('broken')).queryByTestId('ms-persona-edit-broken')).not.toBeInTheDocument();
   });
 
   it("says the gateway is unreachable when the list can't be read", async () => {

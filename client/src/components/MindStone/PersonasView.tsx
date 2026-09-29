@@ -1,9 +1,10 @@
 /**
- * MindStone personas (MindStone-Agent #105): the personas the gateway can
- * load and which one is active, and switching between them. The agent
- * proposes a persona in chat and the admin approves it on the Approvals page,
- * which only saves it; this page is the only place one is made active.
- * Nothing here creates, edits or deletes one. Switching is a PATCH of
+ * MindStone personas (MindStone-Agent #105, #125): the personas the gateway
+ * can load and which one is active, and switching between them. A persona is
+ * built here (Create, Edit: PersonaEditor) or proposed by the agent in chat
+ * and approved on the Approvals page. Saving or approving only saves it; this
+ * page's Make active is the only place one is made active. Nothing here
+ * deletes one. Switching is a PATCH of
  * personas.active, which needs no advanced-settings permission, against the
  * config as it was when the list was loaded (If-Match). Persona text shows
  * any non-printing character as \u{XXXX}.
@@ -11,8 +12,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
-import { useLocalize } from '~/hooks';
+import PersonaEditor from './PersonaEditor';
 import { visibleText } from './visibleText';
+import { useLocalize } from '~/hooks';
 
 type Persona = {
   id: string;
@@ -39,6 +41,8 @@ export default function MindStonePersonasView() {
   const [etag, setEtag] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  /** The persona being built ('new') or edited (its id); null when the editor is closed. */
+  const [editing, setEditing] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -109,8 +113,30 @@ export default function MindStonePersonasView() {
         </p>
         {message && (
           <p role="status" className={message.ok ? 'text-green-600' : 'text-red-600'}>
-            {message.text}
+            {visibleText(message.text)}
           </p>
+        )}
+        {editing ? (
+          <PersonaEditor
+            key={editing}
+            personaId={editing === 'new' ? undefined : editing}
+            personas={(personas ?? []).filter((persona) => !persona.error)}
+            onSaved={() => void load()}
+            onClose={() => setEditing(null)}
+          />
+        ) : (
+          personas && (
+            <div>
+              <button
+                type="button"
+                className={secondary}
+                data-testid="ms-persona-create"
+                onClick={() => setEditing('new')}
+              >
+                {localize('com_mindstone_per_create')}
+              </button>
+            </div>
+          )
         )}
         <section className={card} aria-labelledby="ms-per-list">
           <div className="mb-2 flex items-center justify-between gap-2">
@@ -171,16 +197,30 @@ export default function MindStonePersonasView() {
                       </span>
                     )}
                   </div>
-                  {!isActive && !persona.error && (
-                    <button
-                      type="button"
-                      className={secondary}
-                      disabled={busy}
-                      onClick={() => void switchTo(persona)}
-                    >
-                      {localize('com_mindstone_per_make_active')}
-                    </button>
-                  )}
+                  <div className="flex shrink-0 gap-2">
+                    {!persona.error && (
+                      <button
+                        type="button"
+                        className={secondary}
+                        disabled={busy}
+                        data-testid={`ms-persona-edit-${persona.id}`}
+                        aria-label={localize('com_mindstone_pe_edit_named', { 0: persona.id })}
+                        onClick={() => setEditing(persona.id)}
+                      >
+                        {localize('com_mindstone_pe_edit')}
+                      </button>
+                    )}
+                    {!isActive && !persona.error && (
+                      <button
+                        type="button"
+                        className={secondary}
+                        disabled={busy}
+                        onClick={() => void switchTo(persona)}
+                      >
+                        {localize('com_mindstone_per_make_active')}
+                      </button>
+                    )}
+                  </div>
                 </li>
               );
             })}

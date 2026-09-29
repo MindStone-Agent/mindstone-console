@@ -88,6 +88,21 @@ const ENDPOINTS = [
   { method: 'post', path: 'memory/check', write: true },
   { method: 'post', path: 'memory/pull', write: true },
   { method: 'get', path: 'personas', write: false },
+  // The persona builder (MindStone-Agent #125).
+  { method: 'post', path: 'personas', write: true },
+  { method: 'get', path: 'personas/analyst', write: false },
+  { method: 'get', path: 'personas/Pack.Analyst_2', write: false },
+  { method: 'patch', path: 'personas/analyst', write: true },
+  { method: 'get', path: 'workflows', write: false },
+  { method: 'post', path: 'workflows', write: true },
+  { method: 'get', path: 'workflows/triage', write: false },
+  { method: 'patch', path: 'workflows/triage', write: true },
+  { method: 'get', path: 'knowledgebases', write: false },
+  { method: 'get', path: 'personas/analyst/knowledgebases', write: false },
+  { method: 'post', path: 'personas/analyst/knowledgebases', write: true },
+  { method: 'get', path: 'personas/analyst/knowledgebases/notes/sources', write: false },
+  { method: 'post', path: 'personas/analyst/knowledgebases/notes/sources', write: true },
+  { method: 'post', path: 'personas/analyst/knowledgebases/notes/ingest', write: true },
 ];
 
 /** What each caller should get from an allowlisted endpoint. */
@@ -357,15 +372,33 @@ describe('MindStone admin proxy', () => {
       ['post', 'memory/pull/x'],
       ['post', 'x/memory/pull'],
       ['post', 'memory/models/pull'],
-      // Personas (MindStone-Agent #105): GET the list only; switching is PATCH config/personas.
-      ['post', 'personas'],
-      ['get', 'personas/x'],
+      // Personas (#105, #125): no delete, no path tricks, no other methods.
       ['get', 'personas/'],
       ['get', 'personasx'],
       ['get', 'x/personas'],
       ['delete', 'personas'],
       ['patch', 'personas'],
+      ['delete', 'personas/x'],
+      ['post', 'personas/x'],
+      ['get', 'personas/..'],
+      ['get', 'personas/.hidden'],
+      ['patch', 'personas/..'],
       ['get', 'personas%2F..%2Fconfig'],
+      ['get', 'personas/a%2F..%2F..%2Fconfig'],
+      ['get', `personas/${'a'.repeat(129)}`],
+      ['delete', 'workflows/triage'],
+      ['post', 'workflows/triage'],
+      ['get', 'workflows/Triage'],
+      ['get', 'workflows/..'],
+      ['post', 'knowledgebases'],
+      ['get', 'knowledgebases/g1'],
+      ['patch', 'personas/analyst/knowledgebases'],
+      ['post', 'personas/analyst/knowledgebases/Notes/sources'],
+      ['post', 'personas/analyst/knowledgebases/../sources'],
+      ['post', 'personas/analyst/knowledgebases/notes/sources/x'],
+      ['get', 'personas/analyst/knowledgebases/notes/ingest'],
+      ['delete', 'personas/analyst/knowledgebases/notes'],
+      ['post', 'personas/analyst/knowledgebases/notes/sources%2F..%2F..'],
     ];
     for (const [method, path] of outside) {
       const response = await call('manage', { method, path });
@@ -489,6 +522,9 @@ describe('MindStone admin proxy', () => {
         ['post', 'memory/check', 25_000],
         ['post', 'onboarding/complete', 15_000],
         ['get', 'status', 15_000],
+        // A private KB's ingest fetches its URL sources (#125).
+        ['post', 'personas/analyst/knowledgebases/notes/ingest', 4 * 60_000],
+        ['post', 'personas/analyst/knowledgebases/notes/sources', 15_000],
       ]) {
         timeout.mockClear();
         await call('manage', { method, path });
