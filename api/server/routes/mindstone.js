@@ -226,6 +226,15 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
     // Logged here, never sent: a fetch error can quote a header value (the
     // tokens) or a URL with credentials.
     logger.error('[mindstone] gateway request failed', error);
+    // The Console stopped waiting: the gateway may still be working on it (a
+    // long ingest), which isn't the same as a gateway that is down (#125).
+    if (error?.name === 'TimeoutError') {
+      return res.status(504).json({
+        ok: false,
+        error: "the MindStone gateway didn't answer in time; it may still finish",
+        code: 'gateway_timeout',
+      });
+    }
     return res.status(502).json({ ok: false, error: "the MindStone gateway didn't answer" });
   }
 });

@@ -609,4 +609,18 @@ describe('MindStone admin proxy', () => {
     expect(response.status).toBe(502);
     expect(response.text).not.toMatch(/token|ECONNREFUSED/);
   });
+
+  it('a gateway that takes too long is a 504 gateway_timeout, not a 502', async () => {
+    fetchMock.mockImplementation(async () => {
+      const error = new Error('The operation was aborted due to timeout');
+      error.name = 'TimeoutError';
+      throw error;
+    });
+    const response = await call('manage', {
+      method: 'post',
+      path: 'personas/analyst/knowledgebases/notes/ingest',
+    });
+    expect(response.status).toBe(504);
+    expect(response.body.code).toBe('gateway_timeout');
+  });
 });

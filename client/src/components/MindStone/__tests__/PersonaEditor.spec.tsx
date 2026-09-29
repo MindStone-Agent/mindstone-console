@@ -422,4 +422,91 @@ describe('persona editor (MindStone-Agent #125)', () => {
     expect(within(kbs$).getByText('b-source.md')).toBeInTheDocument();
     expect(within(kbs$).queryByText('a-source.md')).not.toBeInTheDocument();
   });
+
+  const TWO_KBS = [
+    { id: 'aaa', name: 'aaa', indexed: true, entryCount: 1, sourceCount: 1 },
+    { id: 'bbb', name: 'bbb', indexed: true, entryCount: 1, sourceCount: 1 },
+  ];
+
+  it('an ingest the Console stopped waiting for says it may still finish; a gateway that is down says so', async () => {
+    serve({ persona: ATLAS, privateKbs: TWO_KBS });
+    mockPost.mockRejectedValueOnce({
+      response: {
+        status: 504,
+        data: { ok: false, error: 'proxy text', code: 'gateway_timeout' },
+      },
+    });
+    await renderEditor('atlas');
+    const kbs$ = await screen.findByTestId('ms-private-kbs');
+    fireEvent.click(await within(kbs$).findByTestId('ms-pkb-aaa-ingest'));
+    expect(await within(kbs$).findByText('com_mindstone_pkb_ingest_slow')).toBeInTheDocument();
+    mockPost.mockRejectedValueOnce({
+      response: { status: 502, data: { ok: false, error: "the MindStone gateway didn't answer" } },
+    });
+    fireEvent.click(within(kbs$).getByTestId('ms-pkb-aaa-ingest'));
+    expect(
+      await within(kbs$).findByText("the MindStone gateway didn't answer"),
+    ).toBeInTheDocument();
+    expect(within(kbs$).queryByText('com_mindstone_pkb_ingest_slow')).not.toBeInTheDocument();
+  });
+
+  it("a draft typed for one KB is cleared when another KB's sources are opened", async () => {
+    serve({ persona: ATLAS, privateKbs: TWO_KBS });
+    await renderEditor('atlas');
+    const kbs$ = await screen.findByTestId('ms-private-kbs');
+    fireEvent.click(
+      await within(kbs$).findByRole('button', { name: 'com_mindstone_pkb_sources_named:aaa' }),
+    );
+    fireEvent.change(await within(kbs$).findByTestId('ms-pkb-aaa-text-name'), {
+      target: { value: 'draft-for-a' },
+    });
+    fireEvent.change(within(kbs$).getByTestId('ms-pkb-aaa-text'), {
+      target: { value: 'Text meant for aaa.' },
+    });
+    fireEvent.click(
+      within(kbs$).getByRole('button', { name: 'com_mindstone_pkb_sources_named:bbb' }),
+    );
+    expect(await within(kbs$).findByTestId('ms-pkb-bbb-text-name')).toHaveValue('');
+    expect(within(kbs$).getByTestId('ms-pkb-bbb-text')).toHaveValue('');
+  });
+
+  it('without advanced settings, a KB whose open sources include a URL cannot be ingested', async () => {
+    serve({ persona: ATLAS, privateKbs: TWO_KBS });
+    const read = mockGet.getMockImplementation()!;
+    mockGet.mockImplementation((url: string) => {
+      if (url.endsWith('/aaa/sources'))
+        return Promise.resolve({
+          sources: { text: [], urls: [{ id: 'web', url: 'https://example.com/doc' }] },
+        });
+      return read(url);
+    });
+    await renderEditor('atlas');
+    const kbs$ = await screen.findByTestId('ms-private-kbs');
+    expect(await within(kbs$).findByTestId('ms-pkb-aaa-ingest')).toBeEnabled();
+    fireEvent.click(
+      within(kbs$).getByRole('button', { name: 'com_mindstone_pkb_sources_named:aaa' }),
+    );
+    await waitFor(() => expect(within(kbs$).getByTestId('ms-pkb-aaa-ingest')).toBeDisabled());
+    // A KB with only text sources is unaffected.
+    expect(within(kbs$).getByTestId('ms-pkb-bbb-ingest')).toBeEnabled();
+  });
+
+  it('with advanced settings, a KB with a URL source can be ingested', async () => {
+    serve({ persona: ATLAS, privateKbs: TWO_KBS, advanced: true });
+    const read = mockGet.getMockImplementation()!;
+    mockGet.mockImplementation((url: string) => {
+      if (url.endsWith('/aaa/sources'))
+        return Promise.resolve({
+          sources: { text: [], urls: [{ id: 'web', url: 'https://example.com/doc' }] },
+        });
+      return read(url);
+    });
+    await renderEditor('atlas');
+    const kbs$ = await screen.findByTestId('ms-private-kbs');
+    fireEvent.click(
+      await within(kbs$).findByRole('button', { name: 'com_mindstone_pkb_sources_named:aaa' }),
+    );
+    expect(await within(kbs$).findByText(/example\.com/)).toBeInTheDocument();
+    expect(within(kbs$).getByTestId('ms-pkb-aaa-ingest')).toBeEnabled();
+  });
 });
