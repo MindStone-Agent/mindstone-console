@@ -213,7 +213,10 @@ stack_install_steps() {
     docker info >/dev/null 2>&1 && echo "docker info: ok" || { echo "docker info: failed"; problems+=("Docker isn't running (docker info failed)"); }
     out=$(docker compose version 2>&1) || true
     echo "${out}"
-    [[ "$(docker compose version --short 2>/dev/null)" =~ ^v?2\. ]] || problems+=("no Docker Compose v2 (${out:-none})")
+    # Compose 2 or newer, as install-stack.sh checks it (MindStone-Agent #182): Docker Desktop ships 5.x.
+    if ! [[ "$(docker compose version --short 2>/dev/null)" =~ ^v?([0-9]+)\. ]] || (( BASH_REMATCH[1] < 2 )); then
+      problems+=("no Docker Compose v2 or newer (${out:-none})")
+    fi
     for p in "${CONSOLE_PORT}" "${GW_PORT}"; do
       code=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://127.0.0.1:${p}" 2>/dev/null || true)
       echo "\$ curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${p}  ->  ${code}"
@@ -221,7 +224,7 @@ stack_install_steps() {
     done
   } >"${LOG_DIR}/stack-requirements.log" 2>&1
   if [[ ${#problems[@]} -eq 0 ]]; then
-    record S0 PASS "Stack A0: requirements (Docker running, Compose v2; nothing answers on the Console or gateway port)" "${LOG_DIR}/stack-requirements.log" \
+    record S0 PASS "Stack A0: requirements (Docker running, Compose v2 or newer; nothing answers on the Console or gateway port)" "${LOG_DIR}/stack-requirements.log" \
       "$(docker compose version --short 2>/dev/null); ports ${CONSOLE_PORT} and ${GW_PORT} print 000"
   else
     record S0 FAIL "Stack A0: requirements" "${LOG_DIR}/stack-requirements.log" "$(IFS=';'; echo "${problems[*]}")"
