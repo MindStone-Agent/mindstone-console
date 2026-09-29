@@ -3093,7 +3093,7 @@
   "com_mindstone_appr_kb_name": "Its name: {{0}}",
   "com_mindstone_appr_kb_ingested": "Approved: the knowledge base is written and ingested ({{0}} entries).",
   "com_mindstone_appr_kb_ingest_failed": "Approved: the knowledge base is written, but the ingest failed ({{0}}). Ingest it again from the persona editor.",
-  "com_mindstone_appr_component_not_joined": "Approved, but it isn't in its persona's list: {{0}}",
+  "com_mindstone_appr_component_not_joined": "Approved, but it isn't in use yet: {{0}}",
   "com_mindstone_appr_persona_workflow_unreadable": "{{0}}: not found, or it doesn't load",
   "com_mindstone_appr_confirm_kb": "Approving writes this knowledge base for its persona and indexes it. It is searched only while that persona answers.",
   "com_mindstone_appr_workflow_for": "Workflow {{0}}, listed by persona {{1}}: it runs on that persona's turns, unless the config's own workflow (the active workflow or a route rule) applies first.",

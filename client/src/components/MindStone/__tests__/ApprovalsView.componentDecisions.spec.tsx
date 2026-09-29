@@ -145,6 +145,8 @@ describe("MindStone approvals: deciding a persona's component cards (MindStone-A
     );
     await screen.findByRole('status');
     expect(screen.getByRole('status')).toHaveTextContent('embedding provider unreachable');
+    // Written but not indexed isn't a success: it reads as a problem.
+    expect(screen.getByRole('status')).toHaveClass('text-red-600');
   });
 
   it('an approved workflow that could not join its persona says so (listed: false)', async () => {
@@ -357,5 +359,21 @@ describe("MindStone approvals: deciding a persona's component cards (MindStone-A
       },
     });
     expect(within(wf).getByTestId('ms-appr-workflow')).toHaveTextContent('b\\u{200B}');
+  });
+
+  it('a decided persona card never says approving is refused for a missing workflow', async () => {
+    const persona = {
+      id: A,
+      status: 'approved',
+      kind: 'persona_create',
+      connectorId: 'console',
+      summary: 'Persona: Wren',
+      persona: { id: 'wren', name: 'Wren', voice: 'Plain.' },
+      components: { skills: [], workflows: ['gone'], knowledgebases: [] },
+      listedWorkflows: [{ id: 'gone', steps: null }],
+    };
+    const section = await open(persona);
+    expect(section).toHaveTextContent('com_mindstone_appr_persona_workflow_unreadable:gone');
+    expect(section).not.toHaveTextContent('com_mindstone_appr_persona_workflow_missing');
   });
 });

@@ -435,8 +435,11 @@ export default function MindStoneApprovalsView() {
 
   // The card clicked last: an answer for an earlier click is dropped (#125 review).
   const opening = useRef<string | null>(null);
+  // The gateway said this card's persona card no longer exists (persona_missing).
+  const [parentGone, setParentGone] = useState(false);
   const open = async (id: string) => {
     opening.current = id;
+    setParentGone(false);
     setMessage(null);
     setPersonasLink(false);
     setConfirming(null);
@@ -462,16 +465,25 @@ export default function MindStoneApprovalsView() {
 
   const decide = async (decision: 'approve' | 'reject', force = false) => {
     if (!detail) return;
+    // The card this decision is for. If the owner opens another card while it
+    // is in flight (an approve can take minutes), its answer never touches
+    // that card: no message, no force offer, no close (#125 review).
+    const decided = detail;
+    const stillOpen = () => opening.current === decided.id;
     setBusy(true);
     try {
       const body: { force?: boolean; note?: string } = {};
       if (decision === 'approve' && force) body.force = true;
       if (decision === 'reject' && note.trim()) body.note = note;
       const answer = (await request.post(
-        `${BASE}/approvals/${encodeURIComponent(detail.id)}/${decision}`,
+        `${BASE}/approvals/${encodeURIComponent(decided.id)}/${decision}`,
         body,
       )) as { result?: ApproveResult } | undefined;
-      const persona = decision === 'approve' ? detail.persona : undefined;
+      if (!stillOpen()) {
+        await load();
+        return;
+      }
+      const persona = decision === 'approve' ? decided.persona : undefined;
       const outcome = decision === 'approve' ? componentOutcome(answer?.result) : undefined;
       let text: string;
       if (persona) {
@@ -491,21 +503,28 @@ export default function MindStoneApprovalsView() {
       setNote('');
       await load();
     } catch (error) {
+      if (!stillOpen()) {
+        void load();
+        return;
+      }
       const { error: text, code } = errorBody(error);
       // An existing memory file or installed skill is only replaced on a second,
       // explicit click; a persona's new skill never replaces one (#125).
       setNeedsForce(
         decision === 'approve' &&
-          (code === 'memory_exists' || (code === 'skill_exists' && !detail.parentApprovalId)),
+          (code === 'memory_exists' || (code === 'skill_exists' && !decided.parentApprovalId)),
       );
+      setParentGone(code === 'persona_missing');
       // Refusals that changed the card anyway (its persona was rejected, so it
       // was too; or the Console stopped waiting on an approve that went on):
       // the list and the card are read again (#125 review).
       if (code === 'persona_rejected' || code === 'gateway_timeout' || code === 'already_decided') {
         void load();
-        void open(detail.id).then(() =>
-          setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') }),
-        );
+        void open(decided.id).then(() => {
+          if (stillOpen()) {
+            setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') });
+          }
+        });
       }
       // A persona id that exists (persona_exists) is never overwritten, and
       // one the config already uses (persona_referenced) is never saved: the
@@ -604,7 +623,7 @@ export default function MindStoneApprovalsView() {
                 {localize('com_mindstone_appr_memory_path', { 0: detail.memory.path })}
               </p>
             )}
-            {detail.parentApprovalId && detail.status === 'pending' && (
+            {detail.parentApprovalId && detail.status === 'pending' && !parentGone && (
               <p className="mb-1 text-sm text-text-secondary" data-testid="ms-appr-part-of-persona">
                 {localize('com_mindstone_appr_part_of_persona')}
               </p>
@@ -635,7 +654,7 @@ export default function MindStoneApprovalsView() {
               </>
             ) : null}
             {detail.skill && <SkillFields skill={detail.skill} />}
-            {detail.skill && detail.parentApprovalId && (
+            {detail.skill && detail.parentApprovalId && detail.status === 'pending' && (
               <p className="mt-1 text-sm" data-testid="ms-appr-skill-everyone">
                 {localize('com_mindstone_appr_skill_everyone')}
               </p>
