@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { request } from 'librechat-data-provider';
 import type { KnowledgebaseSummary } from './personaForms';
+import KbReembedNote from './KbReembedNote';
 import { visibleText } from './visibleText';
 import { useLocalize } from '~/hooks';
 
@@ -185,6 +186,9 @@ export default function PrivateKnowledgebases({
                     ? localize('com_mindstone_pkb_indexed', { 0: String(kb.entryCount) })
                     : localize('com_mindstone_pkb_not_indexed')}
                 </span>
+                {kb.reembed && (
+                  <KbReembedNote reembed={kb.reembed} testId={`ms-pkb-reembed-${kb.id}`} />
+                )}
               </span>
               <span className="flex gap-2">
                 <button

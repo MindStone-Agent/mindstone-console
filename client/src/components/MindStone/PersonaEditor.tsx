@@ -14,6 +14,7 @@ import { request } from 'librechat-data-provider';
 import type { KnowledgebaseSummary, LoadedPersona, PersonaForm } from './personaForms';
 import type { PickerSkill } from './SkillPicker';
 import { EMPTY_PERSONA, formFromPersona, moveItem, personaBody, toggleId } from './personaForms';
+import KbReembedNote from './KbReembedNote';
 import PrivateKnowledgebases from './PrivateKnowledgebases';
 import WorkflowEditor from './WorkflowEditor';
 import { visibleText } from './visibleText';
@@ -400,6 +401,9 @@ export default function PersonaEditor({
                   <span className="font-mono text-xs text-text-secondary">
                     {visibleText(kb.id)}
                   </span>
+                  {kb.reembed && (
+                    <KbReembedNote reembed={kb.reembed} testId={`ms-pe-global-kb-reembed-${kb.id}`} />
+                  )}
                 </label>
               </li>
             ))}

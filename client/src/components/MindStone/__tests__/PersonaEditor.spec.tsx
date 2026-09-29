@@ -37,20 +37,17 @@ function serve({
   persona,
   privateKbs = [],
   advanced = false,
+  globalKbs = [{ id: 'g1', name: 'Plant handbook', indexed: true, entryCount: 3, sourceCount: 1 }],
 }: {
   persona?: Record<string, unknown>;
   privateKbs?: Array<Record<string, unknown>> | (() => Array<Record<string, unknown>>);
   advanced?: boolean;
+  globalKbs?: Array<Record<string, unknown>>;
 } = {}) {
   mockGet.mockImplementation((url: string) => {
     if (url === `${BASE}/permissions`)
       return Promise.resolve({ permissions: { advancedSettings: advanced } });
-    if (url === `${BASE}/knowledgebases`)
-      return Promise.resolve({
-        knowledgebases: [
-          { id: 'g1', name: 'Plant handbook', indexed: true, entryCount: 3, sourceCount: 1 },
-        ],
-      });
+    if (url === `${BASE}/knowledgebases`) return Promise.resolve({ knowledgebases: globalKbs });
     if (url === `${BASE}/skills`)
       return Promise.resolve({ skills: [{ id: 'alpha', label: 'Alpha', source: 'installed' }] });
     if (url === `${BASE}/workflows`)
@@ -190,6 +187,33 @@ describe('persona editor (MindStone-Agent #125)', () => {
     );
     expect(await screen.findByTestId('ms-pe-workflow-handoff')).toBeInTheDocument();
     expect(screen.queryByTestId('ms-workflow-editor')).not.toBeInTheDocument();
+  });
+
+  it('says when a knowledge base waits to be embedded again, or was given up on (MindStone-Agent #158)', async () => {
+    serve({
+      persona: ATLAS,
+      globalKbs: [
+        {
+          id: 'g1',
+          name: 'Plant handbook',
+          indexed: true,
+          entryCount: 3,
+          sourceCount: 1,
+          reembed: { failures: 0, nextAttemptAt: '2026-09-29T12:00:00.000Z', reason: 'the embedder failed' },
+        },
+      ],
+      privateKbs: [
+        { id: 'notes', name: 'Notes', indexed: true, entryCount: 2, sourceCount: 1, reembed: { failures: 5, gaveUp: true, reason: 'bad\u202Etext' } },
+        { id: 'plain', name: 'Plain', indexed: true, entryCount: 1, sourceCount: 1 },
+      ],
+    });
+    await renderEditor('atlas');
+    const waiting = await screen.findByTestId('ms-pe-global-kb-reembed-g1');
+    expect(waiting.textContent).toMatch(/^com_mindstone_kb_reembed_waiting:\S.* com_mindstone_kb_reembed_reason:the embedder failed$/);
+    const gaveUp = await screen.findByTestId('ms-pkb-reembed-notes');
+    expect(gaveUp.textContent).toMatch(/^com_mindstone_kb_reembed_gave_up:5 /);
+    expect(gaveUp.textContent).not.toContain('\u202E');
+    expect(screen.queryByTestId('ms-pkb-reembed-plain')).not.toBeInTheDocument();
   });
 
   it('adds a private knowledge base with a text source, then ingests it', async () => {
