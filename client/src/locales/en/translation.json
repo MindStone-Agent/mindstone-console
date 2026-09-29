@@ -3293,7 +3293,7 @@
   "com_mindstone_onb_token_kept": "A token is saved. Leave this empty to keep it.",
   "com_mindstone_onb_token_env": "The token comes from the gateway host's environment. Leave this empty to keep using it; a token typed here replaces it.",
   "com_mindstone_onb_memory_reembed": "{{0}} memory chunks were embedded by another model, or before this version. Once you save, they are embedded again with this one over your next chats (up to 128 a chat), or all at once with mindstone memory backfill --embed on the gateway host; until then, recall finds them by their words.",
-  "com_mindstone_onb_memory_skipped": "{{0}} memory chunks can't be embedded with this model: it refused each of them three times (often text too long for it). Recall finds them by their words.",
+  "com_mindstone_onb_memory_skipped": "{{0}} memory chunks can't be embedded with this model: it refused each of them three times, at least 10 minutes apart (often text too long for it). Recall finds them by their words.",
   "com_mindstone_onb_memory_reembed_off": "{{0}} memory chunks were embedded by another model, or before this version. With automatic recall off they aren't embedded again after a chat. After you save, run mindstone memory backfill --embed on the gateway host to embed them; it also adds any chats not yet in the index and sends them to the embedding provider.",
   "com_mindstone_ys_title": "Your setup",
   "com_mindstone_ys_hint": "What guided setup chose, as it is saved now. Change one without running setup again.",

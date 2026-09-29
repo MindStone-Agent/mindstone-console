@@ -216,6 +216,22 @@ describe('changing one setup choice', () => {
     expect(screen.queryByTestId('ms-onb-memory-reembed')).toBeNull();
   });
 
+  it('shows both notes when memories wait to be re-embedded and others were refused (MindStone-Agent #170 review)', async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/memory/check`) {
+        return { ok: true, dimensions: 1024, index: { embedded: 7, otherModel: 5, skipped: 2 } };
+      }
+      throw new Error(`unexpected POST ${url}`);
+    });
+    renderAt('change=memory&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    expect(await screen.findByTestId('ms-onb-memory-skipped')).toHaveTextContent(
+      'com_mindstone_onb_memory_skipped 2',
+    );
+    expect(screen.getByTestId('ms-onb-memory-reembed')).toHaveTextContent('5');
+  });
+
   it("says nothing about re-embedding when no memory is another model's", async () => {
     mockPost.mockImplementation(async (url: string) => {
       if (url === `${BASE}/memory/check`) {
