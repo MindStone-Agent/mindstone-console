@@ -187,6 +187,7 @@ const stall = require('./stall.js') as {
   pollBefore: <T>(timeoutMs: number, poll: (deadline: number, started: number) => Promise<T | undefined>) => Promise<{ value?: T; timedOut?: true; cut?: string }>;
   nodeFetch: (url: string, init: { method?: string; headers?: Record<string, string>; timeoutMs?: number }) => Promise<{ status: number; text: string }>;
   gotoOrStall: (page: Page, url: string, options?: Parameters<Page['goto']>[1], defaultTimeoutMs?: number) => ReturnType<Page['goto']>;
+  responseOrStall: (page: Page, request: { method: string; path: string; timeoutMs?: number }, action: () => Promise<unknown>) => Promise<{ status: number }>;
 };
 export const isStall = stall.isStall;
 /** Each harness request's timeout (UAT_API_TIMEOUT_MS, default 30 s): a request with no answer by then is a STALL. */
@@ -230,6 +231,21 @@ export async function navigate(page: Page, url: string, options?: Parameters<Pag
     // not inside a test: the config's 60 s
   }
   return stall.gotoOrStall(page, url, options, navigationTimeout).catch(stallRecorded);
+}
+
+/**
+ * A UI action whose request the Console's page sends itself (a Save, an
+ * Ingest): the click, then the page's response to `method` `path`, within
+ * `timeoutMs` (default API_TIMEOUT_MS). Returns its status (an error status is
+ * an answer, for the step to judge). No response is "STALL: <method> <path> no
+ * response in Ns (sent by the page)", recorded as a stall.
+ */
+export async function uiResponse(
+  page: Page,
+  request: { method: string; path: string; timeoutMs?: number },
+  action: () => Promise<unknown>,
+): Promise<{ status: number }> {
+  return stall.responseOrStall(page, { timeoutMs: API_TIMEOUT_MS, ...request }, action).catch(stallRecorded);
 }
 
 /**
@@ -934,6 +950,51 @@ export function promptFilesWith(text: string): { checked: string[]; found: strin
     checked: existing.map((file) => path.relative(root, file)).sort(),
     found: existing.filter((file) => fileHolds(file, text)).map((file) => path.relative(root, file)).sort(),
   };
+}
+
+// J10 (the persona builder in the Console, MindStone-Agent #125). Shared with lib/persona-builder.selftest.mjs, so the
+// self-test runs the same PENDING decision and the same judging of the gateway transcript.
+export type PersonaComponents = {
+  personaId?: string;
+  skills?: string[] | 'all';
+  skillsInPrompt?: string[];
+  globalKnowledgebases?: string[] | 'all';
+  privateKnowledgebases?: 'own' | 'none';
+};
+export type PersonaTurnEvidence = {
+  entries: number;
+  sessionKey?: string;
+  assistantAt: number;
+  runId?: string;
+  personaId?: string;
+  personaReason?: string;
+  components?: PersonaComponents;
+  recallAt: number;
+  turnHits: { id?: string; chunkId?: string; source?: string }[];
+  allHits: { id?: string; chunkId?: string; source?: string }[];
+  withToken: number[];
+  outline: string[];
+};
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const personaBuilder = require('./persona-builder-evidence.js') as {
+  j10Decision: (arg: { listShown: boolean; createOffered: boolean; expectPersonaBuilder: boolean; gatewayRoutes?: boolean }) => {
+    verdict: 'run' | 'pending' | 'fail';
+    why: string;
+  };
+  personaTurnEvidence: (entries: SessionEntry[], token: string) => PersonaTurnEvidence;
+  builtPersonaReasons: (ev: PersonaTurnEvidence, opts: { personaId: string; kbId: string }) => string[];
+  isolationReasons: (ev: PersonaTurnEvidence, opts: { builtPersonaId: string; controlPersonaId: string; tokenMayLeak?: boolean }) => string[];
+  skillsVerdict: (arg: { picked: string; installed: string[]; built?: PersonaComponents; control?: PersonaComponents }) => {
+    provable: boolean;
+    why: string;
+    reasons: string[];
+  };
+};
+export const { j10Decision, builtPersonaReasons, isolationReasons, skillsVerdict } = personaBuilder;
+
+/** A Console conversation's gateway transcript, read for its latest reply's persona, components and recall hits (J10). */
+export function personaTurnForConversation(conversationId: string, token: string): PersonaTurnEvidence {
+  return personaBuilder.personaTurnEvidence(conversationEntries(conversationId), token);
 }
 
 // J11 (enterprise endpoint, MindStone-Agent #126). Shared with lib/enterprise.selftest.mjs, so the self-test runs the

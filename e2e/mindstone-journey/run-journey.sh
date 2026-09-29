@@ -51,20 +51,23 @@ INSTALL_STATUS_TMP="/tmp/mindstone-agent-install-status.txt" # older install.sh'
 
 STEPS_TSV="${EVIDENCE}/harness-steps.tsv"
 LOG_DIR="${EVIDENCE}/logs"
-# The gate's step lists and J11's wiring live in lib/gate.sh (self-tested by lib/enterprise.selftest.mjs).
+# The gate's step lists and the J10/J11 wiring live in lib/gate.sh (self-tested by lib/enterprise.selftest.mjs
+# and lib/persona-builder.selftest.mjs).
 # shellcheck source=lib/gate.sh
 source "${HERE}/lib/gate.sh"
-# J11 (an enterprise Azure OpenAI endpoint, MindStone-Agent #126) is in the gate only with
-# UAT_EXPECT_ENTERPRISE=1 (like UAT_EXPECT_FLOW for J2), and never in the DEMO SUBSET.
+# J10 (the persona builder in the Console, MindStone-Agent #125) is in the gate only with
+# UAT_EXPECT_PERSONA_BUILDER=1, and J11 (an enterprise Azure OpenAI endpoint, MindStone-Agent #126) only with
+# UAT_EXPECT_ENTERPRISE=1 (like UAT_EXPECT_FLOW for J2). Neither is ever in the DEMO SUBSET.
 EXPECT_ENTERPRISE="${UAT_EXPECT_ENTERPRISE:-0}"
+EXPECT_PERSONA_BUILDER="${UAT_EXPECT_PERSONA_BUILDER:-0}"
 # Every row the gate needs, each exactly once and each PASS.
-REQUIRED_STEPS="$(gate_required_steps "${EXPECT_ENTERPRISE}")"
+REQUIRED_STEPS="$(gate_required_steps "${EXPECT_ENTERPRISE}" "${EXPECT_PERSONA_BUILDER}")"
 # The demo subset: everything but the features still being built (J7 Skill Builder, J8 persona drafting).
 # J9 (memory recall across chats) is on the demo path, so it stays in: while it is PENDING, the subset is NOT PASSED.
 DEMO_STEPS="$(gate_demo_steps)"
 OPTIONAL_STEPS="${GATE_OPTIONAL_STEPS}"
 # The steps each verdict leaves out, Playwright's exit and stalls included.
-GATE_UNCOUNTED="$(gate_uncounted "${EXPECT_ENTERPRISE}")"
+GATE_UNCOUNTED="$(gate_uncounted "${EXPECT_ENTERPRISE}" "${EXPECT_PERSONA_BUILDER}")"
 DEMO_UNCOUNTED="${GATE_DEMO_UNCOUNTED}"
 T0=$(date +%s)
 GW_PORT=""
@@ -137,6 +140,7 @@ case "${SCRATCH}" in
 esac
 [[ -e "${SCRATCH}" ]] && die "scratch dir already exists: ${SCRATCH} (set UAT_RUN_ID to something new)"
 [[ "${EXPECT_ENTERPRISE}" == 0 || "${EXPECT_ENTERPRISE}" == 1 ]] || die "UAT_EXPECT_ENTERPRISE must be 0 or 1, not ${EXPECT_ENTERPRISE}"
+[[ "${EXPECT_PERSONA_BUILDER}" == 0 || "${EXPECT_PERSONA_BUILDER}" == 1 ]] || die "UAT_EXPECT_PERSONA_BUILDER must be 0 or 1, not ${EXPECT_PERSONA_BUILDER}"
 # NODE_OPTIONS can preload code into every node process the harness starts (the spec, the
 # checks, the gateway): a run with it set proves nothing. Recorded in provenance as empty.
 if [[ -n "${NODE_OPTIONS:-}" ]]; then
@@ -442,7 +446,8 @@ summary() {
     [[ " ${REQUIRED_STEPS} ${OPTIONAL_STEPS} " == *" ${id} "* ]] || common+=("unknown row ${id}")
   done <"${STEPS_TSV}"
   # Playwright's exit: a non-zero exit counts against a verdict unless every failed test is a step that verdict
-  # leaves out, failed on its own errors (J11 for the DEMO SUBSET, and for the gate without UAT_EXPECT_ENTERPRISE=1).
+  # leaves out, failed on its own errors (J10 and J11 for the DEMO SUBSET; for the gate, J10 without
+  # UAT_EXPECT_PERSONA_BUILDER=1 and J11 without UAT_EXPECT_ENTERPRISE=1).
   if [[ "${PW_RC}" != 0 ]]; then
     pw_explained_by "${PW_RC}" "${EVIDENCE}/playwright/results.json" "${LOG_DIR}/gate-rows.log" ${GATE_UNCOUNTED} || gate_only+=("playwright exit ${PW_RC}")
     pw_explained_by "${PW_RC}" "${EVIDENCE}/playwright/results.json" "${LOG_DIR}/gate-rows.log" ${DEMO_UNCOUNTED} || demo_only+=("playwright exit ${PW_RC}")
@@ -451,7 +456,7 @@ summary() {
   [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" != 0 ]] && common+=("self-test sabotage on (UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES})")
   # Stalls (lib/journey.ts recordStall): a request or page load that never answered. Their steps are
   # FAIL already; this says, at a glance, that the run hit the environment, and never lets it pass.
-  # A stall in a step a verdict leaves out (J11, see above) is listed, but doesn't count against that verdict.
+  # A stall in a step a verdict leaves out (J10 or J11, see above) is listed, but doesn't count against that verdict.
   local stalls_n=0 stalls_line="none" n
   if [[ -s "${EVIDENCE}/stalls.tsv" ]]; then
     stalls_n=$(grep -c . "${EVIDENCE}/stalls.tsv")
@@ -477,7 +482,10 @@ summary() {
   if [[ ${#common[@]} -gt 0 ]]; then reasons+=("${common[@]}"); demo_reasons+=("${common[@]}"); fi
   if [[ ${#gate_only[@]} -gt 0 ]]; then reasons+=("${gate_only[@]}"); fi
   if [[ ${#demo_only[@]} -gt 0 ]]; then demo_reasons+=("${demo_only[@]}"); fi
-  # J11, on its own line: its row, and whether this run's gate counts it.
+  # J10 and J11, each on its own line: its row, and whether this run's gate counts it.
+  local j10_status j10_line
+  j10_status=$(awk -F'\t' '$1=="J10"{print $2; exit}' "${STEPS_TSV}" 2>/dev/null)
+  j10_line="J10 persona builder (Console): ${j10_status:-MISSING}; $([[ "${EXPECT_PERSONA_BUILDER}" == 1 ]] && echo "in the gate (UAT_EXPECT_PERSONA_BUILDER=1)" || echo "not in the gate (set UAT_EXPECT_PERSONA_BUILDER=1 to require it)"); never in the DEMO SUBSET"
   local j11_status j11_line
   j11_status=$(awk -F'\t' '$1=="J11"{print $2; exit}' "${STEPS_TSV}" 2>/dev/null)
   j11_line="J11 enterprise endpoint (Azure OpenAI / Foundry): ${j11_status:-MISSING}; $([[ "${EXPECT_ENTERPRISE}" == 1 ]] && echo "in the gate (UAT_EXPECT_ENTERPRISE=1)" || echo "not in the gate (set UAT_EXPECT_ENTERPRISE=1 to require it)"); never in the DEMO SUBSET"
@@ -515,6 +523,7 @@ summary() {
     demo="NOT PASSED${override}: ${demo_reasons[*]}"
     log "${c_red}DEMO SUBSET (J1–J6, J9 + S/C/X): NOT PASSED${override}${c_reset} (${demo_reasons[*]})"
   fi
+  log "$(colour_for "${j10_status:-MISSING}")${j10_line}${c_reset}"
   log "$(colour_for "${j11_status:-MISSING}")${j11_line}${c_reset}"
   local ran_by="${UAT_RAN_BY:-unnamed (set UAT_RAN_BY)}"
   local fingerprint
@@ -527,6 +536,8 @@ summary() {
     echo "**GATE: ${gate}**"
     echo
     echo "**DEMO SUBSET (J1–J6, J9 + S/C/X): ${demo}**"
+    echo
+    echo "**${j10_line}.**"
     echo
     echo "**${j11_line}.**"
     echo
@@ -551,7 +562,8 @@ summary() {
     echo "- harness commit: \`$(git -C "${CONSOLE_HARNESS_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)\`"
     echo "- NODE_OPTIONS: empty (the harness refuses to run with it set)"
     [[ -n "${UAT_EXPECT_FLOW:-}" ]] && echo "- expected setup flow: \`${UAT_EXPECT_FLOW}\` (UAT_EXPECT_FLOW; J2 fails on a mismatch)"
-    echo "- enterprise endpoint expected: $([[ "${EXPECT_ENTERPRISE}" == 1 ]] && echo '**yes** (`UAT_EXPECT_ENTERPRISE=1`: J11 is in the gate and FAILs without the enterprise form)' || echo 'no (`UAT_EXPECT_ENTERPRISE` unset: J11 is PENDING without the enterprise form, and not in the gate)')"
+    echo "- persona builder expected: $([[ "${EXPECT_PERSONA_BUILDER}" == 1 ]] && echo '**yes** (`UAT_EXPECT_PERSONA_BUILDER=1`: J10 is in the gate and FAILs without "Build a persona")' || echo 'no (`UAT_EXPECT_PERSONA_BUILDER` unset: J10 is PENDING without "Build a persona", and not in the gate)')"
+    echo "- enterprise endpoint expected:  $([[ "${EXPECT_ENTERPRISE}" == 1 ]] && echo '**yes** (`UAT_EXPECT_ENTERPRISE=1`: J11 is in the gate and FAILs without the enterprise form)' || echo 'no (`UAT_EXPECT_ENTERPRISE` unset: J11 is PENDING without the enterprise form, and not in the gate)')"
     [[ "${MSA_REPO}" != "${MSA_REPO_DEFAULT}" ]] && echo "- **MindStone-Agent repo overridden:** \`${MSA_REPO}\` (install.sh from \`${MSA_RAW}\`)"
     [[ "${MSA_RAW}" != "https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent" && "${MSA_REPO}" == "${MSA_REPO_DEFAULT}" ]] && echo "- **install.sh source overridden:** \`${MSA_RAW}\`"
     [[ "${CONSOLE_REPO}" != "https://github.com/MindStone-Agent/mindstone-console.git" ]] && echo "- **mindstone-console repo overridden:** \`${CONSOLE_REPO}\`"
@@ -620,6 +632,7 @@ CONSOLE_URL="http://localhost:${CONSOLE_PORT}"
   echo "node_options=${NODE_OPTIONS:-}"
   echo "expect_flow=${UAT_EXPECT_FLOW:-}"
   echo "expect_enterprise=${EXPECT_ENTERPRISE}"
+  echo "expect_persona_builder=${EXPECT_PERSONA_BUILDER}"
   echo "node=$(node --version)"; echo "docker=$(docker --version 2>/dev/null)"; echo "os=$(uname -sm)"
   echo "started=$(date -u +%FT%TZ)"
 } >"${EVIDENCE}/run.env"
@@ -1048,22 +1061,26 @@ interruptible env NODE_PATH="${PW_NODE_PATH}" "${PW_BIN}" "${PW_INSTALL_ARGS[@]}
 CURRENT_STEP=X5
 # J11's own pieces too (offline): the stub Azure endpoint's key check and redaction, the stub-log proof, the
 # PENDING decision, and the gate's rule that an ungated step's failure doesn't count (lib/enterprise.selftest.mjs).
-x5_screen=0; x5_stall=0; x5_ent=0
+# And J10's: its PENDING decision, the transcript judging (a private-KB hit under its persona, none under another,
+# only its skill in the prompt) and its flag's gate wiring (lib/persona-builder.selftest.mjs).
+x5_screen=0; x5_stall=0; x5_ent=0; x5_pb=0
 NODE_PATH="${PW_NODE_PATH}" node "${HERE}/lib/screen-check.selftest.mjs" >"${LOG_DIR}/screen-check-selftest.log" 2>&1 || x5_screen=$?
 NODE_PATH="${PW_NODE_PATH}" UAT_PORT_MIN="${PORT_MIN}" UAT_PORT_MAX="${PORT_MAX}" \
   node "${HERE}/lib/stall.selftest.mjs" >"${LOG_DIR}/stall-selftest.log" 2>&1 || x5_stall=$?
 UAT_PORT_MIN="${PORT_MIN}" UAT_PORT_MAX="${PORT_MAX}" \
   node "${HERE}/lib/enterprise.selftest.mjs" >"${LOG_DIR}/enterprise-selftest.log" 2>&1 || x5_ent=$?
-x5_notes="$(tail -n 1 "${LOG_DIR}/screen-check-selftest.log"); $(tail -n 1 "${LOG_DIR}/stall-selftest.log"); $(tail -n 1 "${LOG_DIR}/enterprise-selftest.log")"
-x5_evidence="$(rel "${LOG_DIR}/screen-check-selftest.log"), $(rel "${LOG_DIR}/stall-selftest.log"), $(rel "${LOG_DIR}/enterprise-selftest.log")"
-if [[ "${x5_screen}" == 0 && "${x5_stall}" == 0 && "${x5_ent}" == 0 ]]; then
-  record X5 PASS "the on-screen check's self-test (a reply only in the user's bubble, or hidden, is not found), the stall self-test (no answer is a named STALL, within its timeout) and J11's (the stub endpoint takes only its key, and logs none)" \
+node "${HERE}/lib/persona-builder.selftest.mjs" >"${LOG_DIR}/persona-builder-selftest.log" 2>&1 || x5_pb=$?
+x5_notes="$(tail -n 1 "${LOG_DIR}/screen-check-selftest.log"); $(tail -n 1 "${LOG_DIR}/stall-selftest.log"); $(tail -n 1 "${LOG_DIR}/enterprise-selftest.log"); $(tail -n 1 "${LOG_DIR}/persona-builder-selftest.log")"
+x5_evidence="$(rel "${LOG_DIR}/screen-check-selftest.log"), $(rel "${LOG_DIR}/stall-selftest.log"), $(rel "${LOG_DIR}/enterprise-selftest.log"), $(rel "${LOG_DIR}/persona-builder-selftest.log")"
+if [[ "${x5_screen}" == 0 && "${x5_stall}" == 0 && "${x5_ent}" == 0 && "${x5_pb}" == 0 ]]; then
+  record X5 PASS "the on-screen check's self-test (a reply only in the user's bubble, or hidden, is not found), the stall self-test (no answer is a named STALL, within its timeout), J11's (the stub endpoint takes only its key, and logs none) and J10's (a private KB recalled under another persona fails the isolation check)" \
     "${x5_evidence}" "${x5_notes}"
 else
   x5_failed=()
   [[ "${x5_screen}" == 0 ]] || x5_failed+=("the on-screen check failed its self-test")
   [[ "${x5_stall}" == 0 ]] || x5_failed+=("the stall detection failed its self-test")
   [[ "${x5_ent}" == 0 ]] || x5_failed+=("J11's pieces failed their self-test")
+  [[ "${x5_pb}" == 0 ]] || x5_failed+=("J10's pieces failed their self-test")
   record X5 FAIL "$(IFS=';'; echo "${x5_failed[*]}" | sed 's/;/; /g')" "${x5_evidence}" "${x5_notes}"
 fi
 CURRENT_STEP=J
@@ -1119,6 +1136,7 @@ set +e
   UAT_TRANSCRIPT_DIR="${MSA_DIR}/.runtime/mindstone/transcripts" \
   UAT_DATA_DIR="${MSA_DIR}/.runtime/mindstone" \
   UAT_EXPECT_ENTERPRISE="${EXPECT_ENTERPRISE}" \
+  UAT_EXPECT_PERSONA_BUILDER="${EXPECT_PERSONA_BUILDER}" \
   UAT_ENT_STUB_URL="${ENT_STUB_URL}" \
   UAT_ENT_TOKEN="${ENT_TOKEN}" \
   UAT_ENT_DEPLOYMENT="${ENT_DEPLOYMENT}" \

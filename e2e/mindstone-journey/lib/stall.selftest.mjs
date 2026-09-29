@@ -11,7 +11,10 @@
 //   the deadline cut short ends the loop as its own limit (DeadlineError),
 //   never as a stall, and one with its full timeout is still a stall;
 // - a request from node (the gateway probes) stalls the same way;
-// - a page load that never finishes is labelled "STALL: navigation to <path>".
+// - a page load that never finishes is labelled "STALL: navigation to <path>";
+// - a request the page sends itself on a UI action (J10's saves and ingest)
+//   comes back as its status when answered, and stalls, named "(sent by the
+//   page)", when it isn't, or when only another request was answered.
 // The server listens on 127.0.0.1, on the first free port in UAT_PORT_MIN to
 // UAT_PORT_MAX (default 26900 to 26949). Run by run-journey.sh with X5; needs
 // @playwright/test (NODE_PATH). A watchdog ends it (exit 1) if it hangs itself.
@@ -22,7 +25,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require('@playwright/test');
-const { DEFAULT_API_TIMEOUT_MS, apiTimeoutMs, callTimeoutMs, isStall, DeadlineError, fetchInPage, fetchBefore, pollBefore, nodeFetch, gotoOrStall } =
+const { DEFAULT_API_TIMEOUT_MS, apiTimeoutMs, callTimeoutMs, isStall, DeadlineError, fetchInPage, fetchBefore, pollBefore, nodeFetch, gotoOrStall, responseOrStall } =
   require('./stall.js');
 
 // The self-test must not hang the harness (X5) itself.
@@ -161,6 +164,15 @@ try {
   }).catch(() => undefined);
   const guard = await timed(() => fetchInPage(stuck, { method: 'GET', url: '/ok', timeoutMs: 1_000, graceMs: 500 }));
   expectStall('a page stuck in evaluate (node-side guard)', guard, 'STALL: GET /ok no response in 1s', 1_500);
+
+  // A request the page sends itself when the step clicks (J10's persona saves and ingest).
+  const pageSends = (method, url) => () => page.evaluate(([m, u]) => void fetch(u, { method: m }).catch(() => undefined), [method, url]);
+  const uiOk = await timed(() => responseOrStall(page, { method: 'POST', path: '/ok', timeoutMs: 2_000 }, pageSends('POST', '/ok')));
+  check(`a request the page sends on a UI action returns its status (${uiOk.ms} ms)`, !uiOk.error && uiOk.value?.status === 200, uiOk.error?.message ?? JSON.stringify(uiOk.value));
+  const uiHang = await timed(() => responseOrStall(page, { method: 'POST', path: '/hang', timeoutMs: 1_500 }, pageSends('POST', '/hang')));
+  expectStall('a request the page sends on a UI action, with no response', uiHang, 'STALL: POST /hang no response in 1.5s (sent by the page)', 1_500);
+  const uiOther = await timed(() => responseOrStall(page, { method: 'POST', path: '/ok', timeoutMs: 1_500 }, pageSends('GET', '/ok')));
+  expectStall('only another request (GET, not POST) answered: still a stall', uiOther, 'STALL: POST /ok no response in 1.5s (sent by the page)', 1_500);
 
   const nav = await browser.newPage();
   const load = await timed(() => gotoOrStall(nav, `${base}/hang-page`, { timeout: 1_500 }));
