@@ -462,6 +462,21 @@ describe('persona editor (MindStone-Agent #125)', () => {
     expect(within(kbs$).queryByText('com_mindstone_not_changed')).not.toBeInTheDocument();
   });
 
+  it("an ingest with no answer at all, or a 5xx JSON that isn't the Console's, may still be running", async () => {
+    serve({ persona: ATLAS, privateKbs: TWO_KBS });
+    await renderEditor('atlas');
+    const kbs$ = await screen.findByTestId('ms-private-kbs');
+    for (const failure of [
+      { message: 'Network Error' },
+      { response: { status: 504, data: { message: 'Endpoint request timed out' } } },
+    ]) {
+      mockPost.mockRejectedValueOnce(failure);
+      fireEvent.click(await within(kbs$).findByTestId('ms-pkb-aaa-ingest'));
+      expect(await within(kbs$).findByText('com_mindstone_pkb_ingest_slow')).toBeInTheDocument();
+      expect(within(kbs$).queryByText('com_mindstone_not_changed')).not.toBeInTheDocument();
+    }
+  });
+
   it("a draft typed for one KB is cleared when another KB's sources are opened", async () => {
     serve({ persona: ATLAS, privateKbs: TWO_KBS });
     await renderEditor('atlas');

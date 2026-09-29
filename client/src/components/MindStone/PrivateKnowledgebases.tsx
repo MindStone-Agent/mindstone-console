@@ -91,8 +91,11 @@ export default function PrivateKnowledgebases({
         error as { response?: { status?: number; data?: { code?: unknown } | string } }
       )?.response;
       const data = typeof response?.data === 'object' ? response.data : undefined;
-      const proxyPage = (response?.status ?? 0) >= 500 && !data;
-      const stillWorking = data?.code === 'gateway_timeout' || proxyPage;
+      // Only the Console's own JSON carries a string `error`: any other 5xx
+      // answer, or none at all (a dropped connection), leaves the outcome unknown.
+      const consoleAnswer = typeof (data as { error?: unknown } | undefined)?.error === 'string';
+      const unknown = !response || ((response.status ?? 0) >= 500 && !consoleAnswer);
+      const stillWorking = data?.code === 'gateway_timeout' || unknown;
       const text = slowNote && stillWorking ? slowNote : errorText(error);
       setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') });
       return false;
