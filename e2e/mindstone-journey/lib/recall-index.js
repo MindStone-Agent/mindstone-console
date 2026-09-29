@@ -1,5 +1,6 @@
 /**
- * Reads the gateway's recall index (<dataDir>/vectors/memory.sqlite) for J9,
+ * Reads the gateway's recall index (<dataDir>/vectors/memory.sqlite) for J9
+ * (and J12, which reads the stored vectors' sizes),
  * OUT OF PROCESS: Playwright's module loader hook can't load `node:sqlite` in
  * the test process ("Expected a string, an ArrayBuffer, or a TypedArray to be
  * returned for the "source" from the "load" hook but got null"). So
@@ -14,6 +15,9 @@
  *
  *   node recall-index.js <dbPath> embedded <token>
  *   node recall-index.js <dbPath> chunks <chunkId>...
+ *   node recall-index.js <dbPath> dims
+ *   node recall-index.js <dbPath> chunkdims <chunkId>...
+ *   node recall-index.js <dbPath> vectors
  */
 const { execFileSync } = require('node:child_process');
 
@@ -38,6 +42,17 @@ function queryRecallIndex(dbPath, mode, args = []) {
   return parsed.rows;
 }
 
+/**
+ * The embedding model a chunk records: MindStone-Agent #140 (452aa06) adds `memory_chunks.embedding_spec` (TEXT),
+ * exactly `<provider id>:<model>` (e.g. `ollama:nomic-embed-text`), NULL for a vector embedded before it was recorded
+ * (which never counts as the current model's). `recorded` says whether the index has the column at all: an index
+ * from before #140 records no model, and J12 then judges by vector size.
+ */
+function embeddingModelColumn(db) {
+  const recorded = db.prepare('PRAGMA table_info(memory_chunks)').all().some((c) => c.name === 'embedding_spec');
+  return { model: recorded ? 'embedding_spec' : 'NULL', recorded: recorded ? 1 : 0 };
+}
+
 /** The reader itself (run as a child). */
 function read(dbPath, mode, args) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -58,7 +73,31 @@ function read(dbPath, mode, args) {
         .prepare(`SELECT chunk_id, text${hasUpdatedAt ? ', updated_at' : ''} FROM memory_chunks WHERE chunk_id IN (${args.map(() => '?').join(', ')})`)
         .all(...args);
     }
-    throw new Error(`unknown mode "${mode}" (embedded or chunks)`);
+    if (mode === 'dims') {
+      // Chunks by their vector's size (J12): dims null for a chunk not embedded yet, -1 for an unreadable vector.
+      return db
+        .prepare(
+          `SELECT CASE WHEN embedding_json IS NULL THEN NULL WHEN json_valid(embedding_json) THEN json_array_length(embedding_json) ELSE -1 END AS dims,
+                  count(*) AS n
+           FROM memory_chunks GROUP BY 1 ORDER BY 1`,
+        )
+        .all();
+    }
+    if (mode === 'chunkdims' || mode === 'vectors') {
+      // J12: each chunk's vector size (as in `dims`), the embedding model it records (embedding_spec) and whether the
+      // index records models at all. `chunkdims`: the given chunks (what recall scored); `vectors`: every chunk.
+      if (mode === 'chunkdims' && !args.length) return [];
+      const { model, recorded } = embeddingModelColumn(db);
+      return db
+        .prepare(
+          `SELECT chunk_id,
+                  CASE WHEN embedding_json IS NULL THEN NULL WHEN json_valid(embedding_json) THEN json_array_length(embedding_json) ELSE -1 END AS dims,
+                  ${model} AS model, ${recorded} AS recorded
+           FROM memory_chunks${mode === 'chunkdims' ? ` WHERE chunk_id IN (${args.map(() => '?').join(', ')})` : ''}`,
+        )
+        .all(...(mode === 'chunkdims' ? args : []));
+    }
+    throw new Error(`unknown mode "${mode}" (embedded, chunks, dims, chunkdims or vectors)`);
   } finally {
     db.close();
   }

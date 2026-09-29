@@ -213,6 +213,30 @@ export function recordStall(message: string): void {
   fs.appendFileSync(STALLS_FILE, `${step}\t${message.replace(/\s+/g, ' ').trim()}\n`);
 }
 
+/** Every setting a step changed and could not put back, one `<step>\t<what>` line each (run-journey.sh fails both verdicts on any). */
+const RESTORE_FAILURES_FILE = path.join(EVIDENCE, 'restore-failures.tsv');
+
+/**
+ * Records that a step could not put back what it changed (J10's active persona, J12's settings). The step
+ * fails too; this line also fails the gate and the DEMO SUBSET when the step itself isn't counted.
+ */
+export function recordRestoreFailure(step: string, what: string): void {
+  fs.mkdirSync(EVIDENCE, { recursive: true });
+  fs.appendFileSync(RESTORE_FAILURES_FILE, `${step}\t${what.replace(/\s+/g, ' ').trim()}\n`);
+}
+
+/**
+ * Records a product finding in findings.md, the file run-journey.sh prints under "findings" in the summary and
+ * SUMMARY.md, like its own README findings (`- **<id>** <text>`). Once per id.
+ */
+export function recordFinding(id: string, text: string): void {
+  const file = path.join(EVIDENCE, 'findings.md');
+  const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  if (existing.includes(`**${id}**`)) return;
+  fs.mkdirSync(EVIDENCE, { recursive: true });
+  fs.appendFileSync(file, `- **${id}** ${text.replace(/\s+/g, ' ').trim()}\n`);
+}
+
 /** Records a StallError (anything else passes through) and rethrows it. */
 function stallRecorded(error: unknown): never {
   if (stall.isStall(error)) recordStall((error as Error).message);
@@ -251,6 +275,9 @@ export async function uiResponse(
 /**
  * Signs in on /login unless the session is still good. With stayIfSignedIn, a
  * page already inside the app (not /login, not blank) is left where it is.
+ * The session decides, not only the URL: after a failed step Playwright starts
+ * a new worker, whose fresh page has no session but may not have been sent to
+ * /login yet, so a page that stays on /c/new is asked for its access token.
  */
 export async function ensureSignedIn(page: Page, options: { stayIfSignedIn?: boolean } = {}): Promise<void> {
   const url = page.url();
@@ -261,8 +288,18 @@ export async function ensureSignedIn(page: Page, options: { stayIfSignedIn?: boo
     .waitForURL(/\/login/, { timeout: 5_000 })
     .then(() => true)
     .catch(() => page.url().includes('/login'));
-  if (!onLogin) return;
+  if (!onLogin && (await hasSession(page))) return;
   await signIn(page);
+}
+
+/** Whether the page's refresh cookie still gets an access token (a signed-in session). */
+async function hasSession(page: Page): Promise<boolean> {
+  return accessToken(page)
+    .then(() => true)
+    .catch((error: unknown) => {
+      if (isStall(error)) throw error;
+      return false;
+    });
 }
 
 export async function signIn(page: Page): Promise<void> {
@@ -760,6 +797,26 @@ export function personaForConversation(conversationId: string): { found: boolean
   return { found: true, personaId: persona?.injected ? persona.personaId : undefined };
 }
 
+/**
+ * Which model answered a Console conversation's latest turn (J12): like answeredBy, but found by
+ * conversation (the last assistant entry of its gateway transcript), not by the reply's opening words,
+ * so an earlier reply that starts the same way can't stand in for it.
+ */
+export function answeredInConversation(conversationId: string): AnsweredBy | undefined {
+  const assistants = conversationEntries(conversationId).filter((e) => e.role === 'assistant') as Array<SessionEntry & TranscriptLine>;
+  const latest = assistants[assistants.length - 1];
+  if (!latest) return undefined;
+  const pi = latest.metadata?.providerDiagnostics?.piSession;
+  const result: AnsweredBy = {
+    gatewayProvider: latest.metadata?.provider,
+    gatewayModel: latest.metadata?.model,
+    modelFallbackMessage: pi?.modelFallbackMessage,
+    sessionFile: pi?.sessionFile ? path.basename(pi.sessionFile) : undefined,
+  };
+  if (pi?.sessionFile && fs.existsSync(pi.sessionFile)) Object.assign(result, lastModelPair(pi.sessionFile));
+  return result;
+}
+
 export type RecallEvidence = {
   entries: number;
   sessionKey?: string;
@@ -790,6 +847,49 @@ function dataDir(): string {
   return dir;
 }
 
+/**
+ * Deletes an agent's USER.md from the gateway's data dir (J12's restore, when there was none before: no admin route
+ * removes USER.md). `userPath` is the agent's config value, relative to the config; only a file named USER.md under
+ * <dataDir>/agents/ is ever removed. Returns the removed file's path relative to the data dir, or undefined when
+ * there was none.
+ */
+export function removeAgentUserFile(userPath: string): string | undefined {
+  const root = dataDir();
+  const file = path.resolve(root, userPath);
+  const rel = path.relative(path.join(root, 'agents'), file);
+  if (path.basename(file) !== 'USER.md' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`refusing to remove ${userPath}: not a USER.md under the data dir's agents/ folder`);
+  }
+  if (!fs.existsSync(file)) return undefined;
+  fs.rmSync(file);
+  return path.relative(root, file);
+}
+
+/**
+ * Loads an already-pulled embedding model into the harness's Ollama (J12): one embed of a short text through
+ * Ollama's own `/api/embed`, kept loaded for 10 minutes. A cold model's first load can outlast the gateway's 10 s
+ * embed timeout, and the gateway's abort cancels the load, so the memory step's Test alone never gets it loaded.
+ * Read-only use of a model already there; nothing is pulled. Returns how it went, never throws.
+ */
+export async function warmOllamaEmbedModel(model: string, timeoutMs = 120_000): Promise<{ ok: boolean; ms: number; error?: string }> {
+  const base = (process.env.UAT_OLLAMA_BASE_URL ?? '').replace(/\/v1\/?$/, '');
+  const started = Date.now();
+  if (!base) return { ok: false, ms: 0, error: 'UAT_OLLAMA_BASE_URL is not set' };
+  try {
+    const response = await fetch(`${base}/api/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, input: 'warm up', keep_alive: '10m' }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const body = (await response.json().catch(() => ({}))) as { embeddings?: unknown[]; error?: string };
+    const ok = response.ok && Array.isArray(body.embeddings) && body.embeddings.length > 0;
+    return { ok, ms: Date.now() - started, ...(ok ? {} : { error: `HTTP ${response.status} ${body.error ?? ''}`.trim() }) };
+  } catch (error) {
+    return { ok: false, ms: Date.now() - started, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 /** The recall index the gateway's sqlite-vec recall reads (MindStone-Agent: <dataDir>/vectors/memory.sqlite). */
 function recallIndexPath(): string {
   return path.join(dataDir(), 'vectors', 'memory.sqlite');
@@ -802,7 +902,7 @@ export function recallIndexExists(): boolean {
 // Out of process: Playwright's loader hook can't load node:sqlite in the test process (lib/recall-index.js).
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { queryRecallIndex } = require('./recall-index.js') as {
-  queryRecallIndex: (dbPath: string, mode: 'embedded' | 'chunks', args: string[]) => Record<string, unknown>[];
+  queryRecallIndex: (dbPath: string, mode: 'embedded' | 'chunks' | 'dims' | 'chunkdims' | 'vectors', args: string[]) => Record<string, unknown>[];
 };
 
 /** Recall-index chunks whose text holds `token` and that are embedded (embedding_json set): the fact is ready to recall. */
@@ -814,6 +914,92 @@ export function embeddedChunksWith(token: string): { chunkId: string; kind: stri
     kind: String(r.kind),
     path: r.path === null || r.path === undefined ? null : String(r.path),
   }));
+}
+
+export type IndexDims = { present: boolean; byDims: Record<string, number>; pending: number; unreadable: number };
+
+/**
+ * The recall index's chunks counted by their vector's size (J12): `byDims`
+ * maps a size to its embedded chunks, `pending` counts chunks not embedded
+ * yet, `unreadable` vectors that aren't valid JSON. An absent index is
+ * `present: false`; one that can't be read throws (the caller keeps it a FAIL).
+ */
+export function recallIndexDims(): IndexDims {
+  const file = recallIndexPath();
+  if (!fs.existsSync(file)) return { present: false, byDims: {}, pending: 0, unreadable: 0 };
+  const out: IndexDims = { present: true, byDims: {}, pending: 0, unreadable: 0 };
+  for (const row of queryRecallIndex(file, 'dims', [])) {
+    const n = Number(row.n ?? 0);
+    if (row.dims === null || row.dims === undefined) out.pending += n;
+    else if (Number(row.dims) < 0) out.unreadable += n;
+    else out.byDims[String(row.dims)] = n;
+  }
+  return out;
+}
+
+/** A recall-index chunk as J12 judges it: its vector's size (null: no vector or gone; -1: unreadable) and the model it records, if any. */
+export type IndexVector = { chunkId: string; dims: number | null; model: string | null; recorded?: boolean; recallMode?: string };
+
+const toVector = (r: Record<string, unknown>): IndexVector => ({
+  chunkId: String(r.chunk_id),
+  dims: r.dims === null || r.dims === undefined ? null : Number(r.dims),
+  model: typeof r.model === 'string' && r.model ? r.model : null,
+  recorded: Number(r.recorded) === 1,
+});
+
+/**
+ * Recall-index chunks with their vector size and model record (J12): the given ids (in that order; one that isn't
+ * in the index reads as { dims: null, model: null }), or, with no ids, every chunk. `present: false` when there is no index.
+ */
+export function recallIndexVectors(ids?: string[]): { present: boolean; chunks: IndexVector[] } {
+  const file = recallIndexPath();
+  if (!fs.existsSync(file)) return { present: false, chunks: (ids ?? []).map((chunkId) => ({ chunkId, dims: null, model: null })) };
+  if (!ids) return { present: true, chunks: queryRecallIndex(file, 'vectors', []).map(toVector) };
+  const found = new Map(ids.length ? queryRecallIndex(file, 'chunkdims', ids).map((r) => [String(r.chunk_id), toVector(r)]) : []);
+  return { present: true, chunks: ids.map((chunkId) => found.get(chunkId) ?? { chunkId, dims: null, model: null }) };
+}
+
+/**
+ * The chunks recall supplied to a Console conversation (every memory_recall_injected event's hits), each with its
+ * vector's size and model record in the recall index now, and how recall found it (the event's `recallMode`:
+ * "embedding" by vector, "lexical" by words; "embedding" when any of its hits was by vector) (J12).
+ */
+export function recallHitsForConversation(conversationId: string, snapshot?: IndexVector[]): IndexVector[] {
+  const modes = new Map<string, string | undefined>();
+  for (const entry of conversationEntries(conversationId)) {
+    if (entry.role !== 'event' || entry.metadata?.event !== 'memory_recall_injected') continue;
+    for (const hit of (entry.metadata as { hits?: { chunkId?: unknown; recallMode?: unknown }[] }).hits ?? []) {
+      if (typeof hit?.chunkId !== 'string') continue;
+      const mode = typeof hit.recallMode === 'string' ? hit.recallMode : undefined;
+      const seen = modes.get(hit.chunkId);
+      // A vector hit (or one with no mode recorded) outweighs a word hit on the same chunk.
+      modes.set(hit.chunkId, modes.has(hit.chunkId) && seen !== 'lexical' ? seen : mode);
+    }
+  }
+  const ids = [...modes.keys()];
+  if (!ids.length) return [];
+  // As the index was when recall scored them (the snapshot taken just before the chat; lib/settings-parity-evidence.js
+  // hitsAsScored); a chunk the snapshot doesn't have is read as it is now.
+  const known = new Set((snapshot ?? []).map((chunk) => chunk.chunkId));
+  const missing = ids.filter((id) => !known.has(id));
+  return settingsParity.hitsAsScored({ modes: [...modes], snapshot, now: missing.length ? recallIndexVectors(missing).chunks : [] });
+}
+
+/**
+ * The recall index once it has settled (J12): read until two readings 3 s apart agree (the background indexing of
+ * the last turn is done), at most `timeoutMs`. Taken just before a chat whose recall J12 judges.
+ */
+export async function settledIndexVectors(page: Page, timeoutMs = 60_000): Promise<{ present: boolean; chunks: IndexVector[]; settled: boolean; waitedMs: number }> {
+  const started = Date.now();
+  const sig = (r: { chunks: IndexVector[] }) => JSON.stringify(r.chunks.map((c) => [c.chunkId, c.dims, c.model]).sort());
+  let last = recallIndexVectors();
+  for (;;) {
+    await page.waitForTimeout(3_000);
+    const next = recallIndexVectors();
+    if (sig(next) === sig(last)) return { ...next, settled: true, waitedMs: Date.now() - started };
+    last = next;
+    if (Date.now() - started >= timeoutMs) return { ...last, settled: false, waitedMs: Date.now() - started };
+  }
 }
 
 /**
@@ -989,8 +1175,13 @@ const personaBuilder = require('./persona-builder-evidence.js') as {
     why: string;
     reasons: string[];
   };
+  personaRestore: (arg: { before: string | null; now: string | null; known: string[] }) => {
+    action: 'none' | 'activate' | 'clear';
+    active: string | null;
+    why: string;
+  };
 };
-export const { j10Decision, builtPersonaReasons, isolationReasons, skillsVerdict } = personaBuilder;
+export const { j10Decision, builtPersonaReasons, isolationReasons, skillsVerdict, personaRestore } = personaBuilder;
 
 /** A Console conversation's gateway transcript, read for its latest reply's persona, components and recall hits (J10). */
 export function personaTurnForConversation(conversationId: string, token: string): PersonaTurnEvidence {
@@ -1088,6 +1279,70 @@ export async function waitForStubProof(
     await page.waitForTimeout(1_000);
   }
 }
+
+// J12 (settings parity, MindStone-Agent #140). Shared with lib/settings-parity.selftest.mjs, so the self-test runs the
+// same PENDING decision, parity table rule, model pick and match, and embedding-change judgement.
+export type ParityRow = {
+  step: string;
+  kind: 'change' | 'in-place' | 'none';
+  /** What Settings shows for it (the saved value, or the control's state). */
+  shows?: string;
+  href?: string;
+  control?: boolean;
+  /** Whether following the Change link opened just that step (and why not). */
+  opened?: boolean;
+  openedWhy?: string;
+};
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const settingsParity = require('./settings-parity-evidence.js') as {
+  SETUP_STEPS: string[];
+  CHANGE_STEPS: Record<string, string>;
+  IN_PLACE_STEPS: Record<string, string>;
+  changeHref: (change: string) => string;
+  j12Decision: (arg: { settingsShown: boolean; sectionPresent: boolean; expectParity: boolean; gatewayRoute?: boolean }) => {
+    verdict: 'run' | 'pending' | 'fail';
+    why: string;
+  };
+  parityReasons: (rows: ParityRow[]) => string[];
+  isCloudModel: (id: string) => boolean;
+  pickAlternateModel: (values: string[], current: string | undefined, preferred?: string) => string | undefined;
+  modelMatchReasons: (arg: { chosen: string; saved?: string; shown?: string; answered?: AnsweredBy }) => string[];
+  memoryChangeVerdict: (arg: {
+    before: { spec?: string; dims?: number; chunks?: number };
+    after: { spec?: string; dims?: number };
+    warned?: string;
+    reported?: number;
+    index?: IndexDims;
+    probe?: { error: boolean; errorText?: string; text: string; fact: IndexVector[]; hits: IndexVector[]; snapshotOther?: number };
+    reembedded?: { otherLeft: number; waitedMs: number };
+  }) => { verdict: 'pass' | 'fail' | 'pending'; why: string; reasons: string[]; unproven: string[]; notExercised: string[]; stale: number };
+  restoredIndexReasons: (arg: { spec?: string; dims?: number; present: boolean; chunks: IndexVector[]; recalled?: IndexVector[] }) => string[];
+  otherModelCount: (chunks: IndexVector[], model: { spec?: string; dims?: number }) => number;
+  hitsAsScored: (arg: { modes: [string, string | undefined][]; snapshot?: IndexVector[]; now?: IndexVector[] }) => IndexVector[];
+  restoreOutcome: (arg: {
+    settings: { ok: boolean; lines: string[] };
+    index?: { required: boolean; ran: boolean; reasons?: string[]; why?: string };
+  }) => { ok: boolean; lines: string[]; failures: string[] };
+  EMBEDDING_WARNING: RegExp;
+  CROSS_MODEL_NOT_EXERCISED: string;
+  COLD_MODEL_FINDING: { id: string; issue: string; text: (spec: string, first: string) => string };
+};
+export const {
+  SETUP_STEPS,
+  CHANGE_STEPS,
+  IN_PLACE_STEPS,
+  changeHref,
+  j12Decision,
+  parityReasons,
+  pickAlternateModel,
+  modelMatchReasons,
+  memoryChangeVerdict,
+  restoredIndexReasons,
+  restoreOutcome,
+  otherModelCount,
+  EMBEDDING_WARNING,
+  COLD_MODEL_FINDING,
+} = settingsParity;
 
 /** Text that means the Console showed an error, not an answer. */
 export const ERROR_REPLY =
