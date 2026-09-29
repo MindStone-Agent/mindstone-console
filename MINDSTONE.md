@@ -15,6 +15,7 @@ This repository is **MindStone Console**, the web interface for [MindStone-Agent
 |---|---|
 | Branding | MindStone diamond as the logo and every icon; page title, PWA name and default `APP_TITLE` are "MindStone Console" |
 | Deployment | `mindstone/`: compose file (Console built from this repo plus MongoDB), `librechat.yaml` with the MindStone gateway as the only endpoint, `.env.example` |
+| Deployment (MindStone-Agent #171) | The all-in-one Docker stack lives in MindStone-Agent (`deploy/docker/compose.yml`, `install-stack.sh`): it builds the Console from this repo's root `Dockerfile` and uses `mindstone/librechat.yaml` and `mindstone/.env.example` as they are. The README's install guide now starts with that path; `mindstone/` stays the path for a gateway that is already installed. |
 | Chat | The MindStone gateway is the only endpoint. Each Console conversation is its own MindStone session, and the user's id, role and conversation id are sent to the gateway as headers. LibreChat agents, presets, memories and model parameters are turned off in `librechat.yaml`. |
 | Settings (P2) | A `/mindstone` page for admins: an onboarding checklist, per-section config editing with secrets masked, and the advanced-settings permission. The browser talks only to `api/server/routes/mindstone.js`, which checks the LibreChat session and the admin role, then calls the gateway's admin API with the service token and the admin credential. Neither credential reaches the browser. The proxy allows only listed routes and methods (`mindstone.spec.js`). |
 | Setup (#18) | Admins see a dismissible "MindStone isn't set up yet" banner on the chat view while the gateway reports setup incomplete, with a button into `/mindstone/onboarding` (`client/src/components/MindStone/SetupBanner.tsx`, one line in `Chat/ChatView.tsx`). The advanced-settings phrase ignores case and extra whitespace, and a wrong phrase says why the button is disabled. |
@@ -32,7 +33,9 @@ Still to come is everything else on the CLI-parity checklist: [#6](https://githu
 
 ## Run it locally
 
-The full, step-by-step install (with checks) is in the README: [Install guide for AI agents](README.md#install-guide-for-ai-agents). The short version:
+For a new install, run the whole stack (gateway, Console and MongoDB) in Docker with MindStone-Agent's installer: `curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.sh | bash`.
+
+With a gateway already installed, the full, step-by-step install (with checks) is in the README: [Install guide for AI agents](README.md#install-guide-for-ai-agents), path B. The short version:
 
 Use the files in `mindstone/` only. The repo root's `docker-compose.yml`, `deploy-compose.yml` and `.env.example` are upstream LibreChat's: they publish on every interface and allow open registration.
 

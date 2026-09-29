@@ -10,6 +10,14 @@
 
 > 🤖 **AI agents:** to install this, follow [Install guide for AI agents](#install-guide-for-ai-agents). It goes step by step, with a check after each step.
 
+**Install everything with one command.** MindStone-Agent's Docker stack runs the gateway, this Console and MongoDB together, generates every secret, creates the admin account and ends at the Console's setup screen:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MindStone-Agent/MindStone-Agent/main/install-stack.sh | bash
+```
+
+See [Install everything (Docker)](https://github.com/MindStone-Agent/MindStone-Agent#install-everything-docker).
+
 ## What it does
 
 - **Chat** with MindStone agents over the gateway's OpenAI-compatible API. Each agent appears as a model (`mindstone/<agentId>`), and each Console conversation gets its own MindStone session.
@@ -29,9 +37,13 @@ The goal is full admin control from the UI, matching everything the `mindstone` 
 
 This section is written so an AI coding agent (Claude Code, Codex and similar) can install the Console from start to finish; humans can follow it too. Every step ends with a check, and you should not move on until the check passes. **Never print a secret into your output.** Write secrets straight into files, as the commands below do.
 
-### 0. Requirements
+**Choose one path:**
+- **A. A new install: the whole stack in Docker (recommended).** Follow [MindStone-Agent's install guide for AI agents](https://github.com/MindStone-Agent/MindStone-Agent#install-guide-for-ai-agents), path A. One installer runs the gateway, this Console and MongoDB in Docker, generates the secrets and creates the admin account. You don't need the steps below.
+- **B. The gateway is already installed** (MindStone-Agent's native path, on this machine or another). Add the Console beside it with the steps below, which use this repo's `mindstone/` folder.
 
-- **A working MindStone-Agent gateway, set up for the Console.** Follow [MindStone-Agent's install guide](https://github.com/MindStone-Agent/MindStone-Agent#install-guide-for-ai-agents) through step 5. Its step 5 also gives you the two values the Console needs: the **gateway token** and the **admin credential**.
+### 0. Requirements (path B)
+
+- **A working MindStone-Agent gateway, set up for the Console.** Follow [MindStone-Agent's install guide](https://github.com/MindStone-Agent/MindStone-Agent#install-guide-for-ai-agents), path B (native), through step B5. Its step B5 also gives you the two values the Console needs: the **gateway token** and the **admin credential**.
 - Docker with Compose v2 (`docker compose version`).
 - `git` and `openssl`.
 
@@ -66,7 +78,7 @@ sed -i.bak "s|^CREDS_IV=.*|CREDS_IV=$(openssl rand -hex 16)|" .env
 rm -f .env.bak
 ```
 
-Then fill in the two gateway values from their files on the gateway host, again without printing them. `GW` is the gateway's secrets folder, and `ADMIN` is the admin credential file from MindStone-Agent's step 5.2:
+Then fill in the two gateway values from their files on the gateway host, again without printing them. `GW` is the gateway's secrets folder, and `ADMIN` is the admin credential file from MindStone-Agent's step B5.2:
 
 ```bash
 GW=<gateway checkout>/.runtime/mindstone/secrets
@@ -81,7 +93,7 @@ Once the Console is running (step 3), delete `$HOME/.mindstone-admin-credential`
 Then check these in `.env`:
 1. **`MINDSTONE_GATEWAY_URL`:** the gateway as the container sees it, ending in `/v1`.
    - On the same machine, that's `http://host.docker.internal:19789/v1`, which is the default.
-   - On Linux, use the address the gateway was bound to (MindStone-Agent step 5.5), for example `http://172.17.0.1:19789/v1`.
+   - On Linux, use the address the gateway was bound to (MindStone-Agent step B5.5), for example `http://172.17.0.1:19789/v1`.
 2. **Linux only:** add `UID=` and `GID=` lines with your own ids (`id -u` and `id -g`), so the containers can write their data folders.
 3. **Leave `ALLOW_REGISTRATION=false`.**
 
@@ -133,6 +145,8 @@ If chat fails:
 The Console listens on `127.0.0.1:3080` only. For remote access, put it behind a reverse proxy with HTTPS, or use Tailscale. Set `DOMAIN_CLIENT` and `DOMAIN_SERVER` in `.env` to the public URL, so links and logins point there. Don't change the port binding to `0.0.0.0` on an untrusted network.
 
 ### Updating
+
+On path A, re-run MindStone-Agent's `install-stack.sh`: it rebuilds both images and keeps your secrets and data. On path B:
 
 ```bash
 cd mindstone-console && git pull --ff-only
