@@ -41,6 +41,14 @@ const AZURE: EnterpriseKind = {
     { name: 'models', label: 'Deployment names', type: 'list', required: true },
     { name: 'apiVersion', label: 'API version', type: 'text', required: false },
     { name: 'secret', label: 'API key', type: 'secret', required: true },
+    {
+      name: 'entraIdentity',
+      label: 'Microsoft Entra ID / managed identity',
+      type: 'text',
+      required: false,
+      planned: true,
+      hint: 'Not available yet: an API key for now',
+    },
   ],
 };
 const BEDROCK: EnterpriseKind = {
@@ -455,6 +463,45 @@ describe('guided setup', () => {
   });
 });
 
+describe('changing the provider from Settings (MindStone-Agent #140)', () => {
+  it('registers an enterprise endpoint and stays on the step, with no way on to the model', async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/providers/enterprise/azure-openai`) {
+        return {
+          ok: true,
+          providerId: 'enterprise-azure',
+          host: 'res.openai.azure.com',
+          models: ['enterprise-azure/gpt-4o'],
+        };
+      }
+      return { ok: true };
+    });
+    render(
+      <MemoryRouter initialEntries={['/mindstone/onboarding?change=provider&from=providers']}>
+        <Routes>
+          <Route path="/mindstone/onboarding" element={<MindStoneOnboardingView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('radio', { name: 'Azure OpenAI / AI Foundry' }));
+    const form = screen.getByTestId('ms-ent-form-azure-openai');
+    fireEvent.change(within(form).getByLabelText('Endpoint'), {
+      target: { value: 'https://res.openai.azure.com' },
+    });
+    fireEvent.change(within(form).getByLabelText('Deployment names'), {
+      target: { value: 'gpt-4o' },
+    });
+    fireEvent.change(within(form).getByLabelText('API key'), { target: { value: 'AZ' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'com_mindstone_ent_register' }));
+    const done = await screen.findByTestId('ms-onb-enterprise-done');
+    expect(
+      within(done).getByRole('button', { name: 'com_mindstone_ent_test' }),
+    ).toBeInTheDocument();
+    expect(within(done).queryByRole('button', { name: 'com_mindstone_onb_save_next' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'com_mindstone_onb_model_title' })).toBeNull();
+  });
+});
+
 describe('memory through an enterprise endpoint', () => {
   function renderMemory() {
     steps = { provider: { done: true, detail: '' }, persona: { done: true, detail: '' } };
@@ -502,5 +549,39 @@ describe('memory through an enterprise endpoint', () => {
     expect(
       screen.getByRole('radio', { name: 'com_mindstone_onb_embed_ollama' }),
     ).toBeInTheDocument();
+  });
+});
+
+describe('auth options that are not available yet (MindStone-Agent #140)', () => {
+  it('are shown disabled and marked, never required, and never sent', async () => {
+    mockPost.mockResolvedValue({
+      ok: true,
+      providerId: 'enterprise-azure',
+      host: 'res.openai.azure.com',
+      models: ['enterprise-azure/gpt-4o'],
+    });
+    renderProviders();
+    fireEvent.click(await screen.findByRole('radio', { name: 'Azure OpenAI / AI Foundry' }));
+    const planned = screen.getByTestId('ms-ent-planned-azure-openai');
+    expect(within(planned).getByText('com_mindstone_ent_planned')).toBeInTheDocument();
+    expect(within(planned).getByRole('textbox')).toBeDisabled();
+    expect(missingFields(AZURE, { endpoint: 'e', models: 'm', secret: 'k' }, undefined)).toEqual(
+      [],
+    );
+    // planned wins even if a field also claims to be required
+    const claimsRequired = {
+      ...AZURE,
+      fields: AZURE.fields.map((f) => (f.planned ? { ...f, required: true } : f)),
+    };
+    expect(
+      missingFields(claimsRequired, { endpoint: 'e', models: 'm', secret: 'k' }, undefined),
+    ).toEqual([]);
+    const plan = registrationPlan(
+      AZURE,
+      { endpoint: 'e', models: 'm', secret: 'k', entraIdentity: 'x' },
+      undefined,
+      [],
+    );
+    expect(plan.body).not.toHaveProperty('entraIdentity');
   });
 });

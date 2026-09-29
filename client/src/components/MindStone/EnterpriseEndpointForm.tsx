@@ -19,6 +19,8 @@ export type EnterpriseField = {
   group?: string;
   hint?: string;
   multiline?: boolean;
+  /** Not available yet (MindStone-Agent #140): shown disabled so the option is visible, never sent. */
+  planned?: boolean;
 };
 export type EnterpriseKind = {
   kind: string;
@@ -75,6 +77,7 @@ export function registrationPlan(
   const body: Record<string, unknown> = {};
   const secrets: Array<{ name: string; value: string }> = [];
   for (const field of kind.fields) {
+    if (field.planned) continue;
     if (field.group && field.group !== group) continue;
     if (field.type === 'headers') {
       const rows = headers.filter((row) => row.name.trim());
@@ -114,7 +117,7 @@ export function missingFields(
   group: string | undefined,
 ): string[] {
   return kind.fields
-    .filter((field) => field.type !== 'headers')
+    .filter((field) => field.type !== 'headers' && !field.planned)
     .filter((field) => (field.group ? field.group === group : field.required === true))
     .filter((field) => !(values[field.name] ?? '').trim())
     .map((field) => field.label);
@@ -316,7 +319,7 @@ export default function EnterpriseEndpointForm({
 
   return (
     <div className="flex flex-col gap-2" data-testid={`ms-ent-form-${kind.kind}`}>
-      {kind.fields.filter((spec) => !spec.group).map(field)}
+      {kind.fields.filter((spec) => !spec.group && !spec.planned).map(field)}
       {groups.length > 1 && (
         <fieldset className="flex flex-col gap-1 text-sm">
           <legend className="mb-1">{localize('com_mindstone_ent_credentials')}</legend>
@@ -339,6 +342,36 @@ export default function EnterpriseEndpointForm({
         </fieldset>
       )}
       {kind.fields.filter((spec) => spec.group && spec.group === group).map(field)}
+      {kind.fields.some((spec) => spec.planned) && (
+        <fieldset
+          className="flex flex-col gap-2 text-sm"
+          data-testid={`ms-ent-planned-${kind.kind}`}
+        >
+          <legend className="mb-1 text-text-secondary">
+            {localize('com_mindstone_ent_planned_title')}
+          </legend>
+          {kind.fields
+            .filter((spec) => spec.planned)
+            .map((spec) => (
+              <label key={spec.name} className="flex flex-col gap-1">
+                <span>
+                  {spec.label}{' '}
+                  <span className="rounded bg-surface-secondary px-1 text-xs text-text-secondary">
+                    {localize('com_mindstone_ent_planned')}
+                  </span>
+                </span>
+                <input
+                  className="w-full rounded border border-border-medium bg-surface-secondary p-2 opacity-60"
+                  disabled
+                  aria-disabled="true"
+                  value=""
+                  readOnly
+                />
+                {spec.hint && <span className="text-text-secondary">{spec.hint}</span>}
+              </label>
+            ))}
+        </fieldset>
+      )}
       {missing.length > 0 && (
         <p className="text-sm text-text-secondary">
           {localize('com_mindstone_ent_missing', { 0: missing.join(', ') })}

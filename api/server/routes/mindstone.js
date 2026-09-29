@@ -55,6 +55,9 @@ const ALLOWED = [
   { method: 'POST', path: /^memory\/check$/ },
   { method: 'POST', path: /^memory\/pull$/ },
   { method: 'GET', path: /^personas$/ },
+  // What the agent knows about the owner, its USER.md (MindStone-Agent #140).
+  { method: 'GET', path: /^user$/ },
+  { method: 'PATCH', path: /^user$/ },
   // The persona builder (MindStone-Agent #125): personas, workflows, the
   // global KB list, and a persona's private knowledge bases.
   { method: 'POST', path: /^personas$/ },
@@ -87,7 +90,9 @@ const ALLOWED = [
  * reaches the page instead of a generic 502.
  */
 const TIMEOUT_MS = 15_000;
-const ROUTE_TIMEOUT_MS = { 'memory/check': 25_000, 'memory/pull': 16 * 60_000 };
+// The memory check may load its model first (MindStone-Agent #140: the gateway's check takes up to 50 s);
+// 55 s stays under a front proxy's usual 60 s.
+const ROUTE_TIMEOUT_MS = { 'memory/check': 55_000, 'memory/pull': 16 * 60_000 };
 /**
  * A private KB's ingest fetches its URL sources one after another (at most
  * 10, 20 s each on the gateway), so it gets four minutes (#125).

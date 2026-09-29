@@ -6,16 +6,22 @@
  * agent should know about you (MindStone-Agent #102). Each step is one or
  * two admin API writes, so leaving midway keeps a valid partial config.
  * The settings page links straight to a step with ?step=.
+ *
+ * ?change=<step> (MindStone-Agent #140) opens one step to change a setup
+ * choice from Settings: the same controls and requests, filled in with what
+ * is saved. Saving stays on the step, and the page links back to where the
+ * change started (?from=).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { request } from 'librechat-data-provider';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import type { EnterpriseKind, EnterpriseRegistered, ProviderTest } from './EnterpriseEndpointForm';
 import type { TranslationKeys } from '~/hooks';
+import type { ChangeableStep } from './steps';
 import type { StatusSteps } from './steps';
 import EnterpriseEndpointForm, { TestResult, testProvider } from './EnterpriseEndpointForm';
 import { CONFIRMATION, confirmationMatches, normalizeConfirmation } from './confirmation';
-import { linkableStep } from './steps';
+import { changeableStep, linkableStep, returnPage } from './steps';
 import { useLocalize } from '~/hooks';
 
 type Preset = {
@@ -46,15 +52,35 @@ type Config = {
   routing?: { mode?: string; defaultAgentId?: string; defaultModel?: string };
   onboarding?: { profile?: { id?: string } };
   memory?: { embeddingProvider?: string; autoRecall?: boolean };
+  /** A connector as saved: its lists are shown again, its tokens never (MindStone-Agent #140). */
+  channels?: Record<string, SavedConnector | undefined>;
+};
+type SavedConnector = {
+  enabled?: boolean;
+  tokenFile?: string;
+  tokenEnv?: string;
+  appTokenEnv?: string;
+  appTokenFile?: string;
+  ownerSenders?: unknown;
+  allowedSenders?: unknown;
+  allowedGuilds?: unknown;
 };
 type EmbedKind = 'ollama' | 'openai' | 'openai-compatible' | EnterpriseEmbedKind;
 /** Embeddings through an enterprise endpoint registered in the provider step (MindStone-Agent #126). */
 type EnterpriseEmbedKind = 'enterprise-azure' | 'enterprise-openai';
 type Connector = 'telegram' | 'slack' | 'discord';
-type MemoryCheck = { spec: string; ok: boolean; text: string; missingModel?: boolean };
+type MemoryCheck = {
+  spec: string;
+  ok: boolean;
+  text: string;
+  missingModel?: boolean;
+  /** Memories another model embedded (MindStone-Agent #140): embedded again after a switch. */
+  reembed?: number;
+};
 type MemoryCheckResult = {
   ok: boolean;
   dimensions?: number;
+  index?: { embedded?: number; otherModel?: number };
   error?: string;
   missingModel?: boolean;
 };
@@ -179,6 +205,9 @@ export default function MindStoneOnboardingView() {
   // Where the access step continues to: a step the settings page linked to, or the provider.
   const [resumeAt, setResumeAt] = useState<Step>('provider');
   const linkChecked = useRef(false);
+  /** The one step being changed from Settings (?change=), or null in guided setup. */
+  const [changing, setChanging] = useState<ChangeableStep | null>(null);
+  const back = returnPage(searchParams.get('from'));
   const [status, setStatus] = useState<Status | null>(null);
   const [permissions, setPermissions] = useState<Permissions | null>(null);
   const [info, setInfo] = useState<ModelsInfo | null>(null);
@@ -260,7 +289,9 @@ export default function MindStoneOnboardingView() {
   useEffect(() => {
     if (linkChecked.current || !status || !permissions) return;
     linkChecked.current = true;
-    const wanted = linkableStep(searchParams.get('step'), status.steps);
+    const change = changeableStep(searchParams.get('change'), status.steps);
+    if (change) setChanging(change);
+    const wanted = change ?? linkableStep(searchParams.get('step'), status.steps);
     if (!wanted) return;
     setResumeAt(wanted);
     if (permissions.advancedSettings) setStep(wanted);
@@ -279,6 +310,16 @@ export default function MindStoneOnboardingView() {
     setMessage(null);
     setRegrantStep(null);
     setStep(next);
+  };
+
+  /** After a step's save: the next step in guided setup; a change stays on its step and says so. */
+  const advance = (next: Step) => {
+    if (!changing) {
+      goTo(next);
+      return;
+    }
+    setRegrantStep(null);
+    setMessage({ ok: true, text: localize('com_mindstone_onb_change_saved') });
   };
 
   /**
@@ -365,15 +406,42 @@ export default function MindStoneOnboardingView() {
     setEmbedCustom(first ? '' : suggested);
   };
 
-  /** A token typed for one connector never carries over to another. */
+  /** The connector's saved section, if any. */
+  const savedConnector = (id: Connector | ''): SavedConnector | undefined => {
+    const saved = id ? config?.channels?.[id] : undefined;
+    return saved && typeof saved === 'object' ? saved : undefined;
+  };
+  const idsText = (value: unknown) =>
+    Array.isArray(value) ? value.filter((id) => typeof id === 'string').join(', ') : '';
+
+  /**
+   * A token typed for one connector never carries over to another. A saved
+   * connector's owner and allowed ids are filled in, so saving it again keeps
+   * them (MindStone-Agent #140 review); its tokens stay on the gateway.
+   */
   const chooseConnector = (id: Connector) => {
+    const saved = savedConnector(id);
     setConnector(id);
     setBotToken('');
     setAppToken('');
-    setOwners('');
-    setAllowed('');
-    setAllowedEdited(false);
+    setOwners(idsText(saved?.ownerSenders));
+    setAllowed(idsText(saved?.allowedSenders));
+    setAllowedEdited(saved !== undefined);
   };
+
+  // A change of connectors opens on the first one already saved.
+  const connectorPrefilled = useRef(false);
+  useEffect(() => {
+    if (changing !== 'connectors' || !config || connectorPrefilled.current) return;
+    connectorPrefilled.current = true;
+    const first = CONNECTORS.find((candidate) => {
+      const saved = config.channels?.[candidate.id];
+      return saved && typeof saved === 'object' && saved.enabled !== false;
+    });
+    if (first) chooseConnector(first.id);
+    // chooseConnector reads only config, which this effect waits for.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [changing, config]);
 
   /** PATCH one config section against the config as it is now (If-Match). */
   const patchSection = async (section: string, body: unknown) => {
@@ -427,7 +495,7 @@ export default function MindStoneOnboardingView() {
       setKeyValue('');
       await load();
       if (result.models?.length) setModel(result.models[0]);
-      goTo('model');
+      advance('model');
       setMessage({
         ok: true,
         text: localize('com_mindstone_onb_connected', { 0: String(result.models?.length ?? 0) }),
@@ -474,7 +542,7 @@ export default function MindStoneOnboardingView() {
         defaultModel: model,
       });
       await load();
-      goTo('persona');
+      advance('persona');
     } catch (error) {
       showWriteError(error);
     } finally {
@@ -498,7 +566,7 @@ export default function MindStoneOnboardingView() {
       });
       await patchSection('agents', { [agentId]: { id: agentId, profileId: profile.id } });
       await load();
-      goTo('memory');
+      advance('memory');
     } catch (error) {
       showWriteError(error);
     } finally {
@@ -519,6 +587,10 @@ export default function MindStoneOnboardingView() {
               spec,
               ok: true,
               text: localize('com_mindstone_onb_memory_ok', { 0: String(result.dimensions) }),
+              reembed:
+                typeof result.index?.otherModel === 'number' && result.index.otherModel > 0
+                  ? result.index.otherModel
+                  : undefined,
             }
           : {
               spec,
@@ -584,7 +656,7 @@ export default function MindStoneOnboardingView() {
         autoRecall,
       });
       await load();
-      goTo('connectors');
+      advance('connectors');
     } catch (error) {
       showWriteError(error);
     } finally {
@@ -595,8 +667,11 @@ export default function MindStoneOnboardingView() {
   const saveConnector = async () => {
     const chosen = CONNECTORS.find((candidate) => candidate.id === connector);
     if (!chosen) return;
-    const tokens: Array<[string, string]> = [[chosen.bot, botToken]];
-    if (chosen.app) tokens.push([chosen.app, appToken]);
+    const saved = savedConnector(chosen.id);
+    // Only the tokens typed here are stored; an empty field keeps the saved one.
+    const tokens: Array<[string, string]> = [];
+    if (botToken) tokens.push([chosen.bot, botToken]);
+    if (chosen.app && appToken) tokens.push([chosen.app, appToken]);
     // The tokens leave the page's state as they are sent, whether or not the save works.
     setBotToken('');
     setAppToken('');
@@ -608,21 +683,25 @@ export default function MindStoneOnboardingView() {
       const result = await patchSection('channels', {
         [chosen.id]: {
           enabled: true,
-          tokenFile: `secrets/${chosen.bot}`,
           // A host env var would win over the token typed here, so its name is cleared.
-          tokenEnv: null,
-          ...(chosen.app ? { appTokenFile: `secrets/${chosen.app}`, appTokenEnv: null } : {}),
+          ...(botToken ? { tokenFile: `secrets/${chosen.bot}`, tokenEnv: null } : {}),
+          ...(chosen.app && appToken
+            ? { appTokenFile: `secrets/${chosen.app}`, appTokenEnv: null }
+            : {}),
           ownerSenders: senderIds(owners),
           allowedSenders: allowedWithOwners(allowed, owners),
-          // Sent even when empty: a missing list lets every Discord server in.
-          ...(chosen.id === 'discord' ? { allowedGuilds: [] } : {}),
+          // Sent even when empty (a missing list lets every Discord server in),
+          // unless a list is saved already: that one is kept.
+          ...(chosen.id === 'discord' && saved?.allowedGuilds === undefined
+            ? { allowedGuilds: [] }
+            : {}),
         },
       });
       if (result?.restartRequired) {
         setRestartFor((saved) => (saved.includes(chosen.id) ? saved : [...saved, chosen.id]));
       }
       await load();
-      goTo('about');
+      advance('about');
       setMessage({
         ok: true,
         text: localize(
@@ -697,35 +776,54 @@ export default function MindStoneOnboardingView() {
   const secondary = 'rounded border border-border-medium px-3 py-1';
   const input = 'rounded border border-border-medium bg-surface-secondary p-2';
   const stepIndex = STEPS.indexOf(step);
+  // A change saves in place; guided setup saves and moves on.
+  const saveLabel: TranslationKeys = changing
+    ? 'com_mindstone_onb_change_save'
+    : 'com_mindstone_onb_save_next';
   const confirmOk = confirmationMatches(confirmText);
   const confirmHint = confirmText !== '' && !confirmOk;
   const chosenConnector = CONNECTORS.find((candidate) => candidate.id === connector);
   const wildcard = hasWildcard(owners) || hasWildcard(allowed);
+  const savedChosen = savedConnector(connector);
+  // A saved token counts: an empty field keeps it.
+  // In a file or in the gateway host's environment: either way an empty field leaves it as it is.
+  const keepsBot = Boolean(savedChosen?.tokenFile || savedChosen?.tokenEnv);
+  const keepsApp = Boolean(savedChosen?.appTokenFile || savedChosen?.appTokenEnv);
   const connectorReady =
     chosenConnector !== undefined &&
-    botToken !== '' &&
-    (!chosenConnector.app || appToken !== '') &&
+    (botToken !== '' || keepsBot) &&
+    (!chosenConnector.app || appToken !== '' || keepsApp) &&
     senderIds(owners).length > 0 &&
     !wildcard;
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-3xl flex-col gap-4 p-6 text-text-primary">
-        <h1 className="text-2xl font-semibold">{localize('com_mindstone_onb_title')}</h1>
-        <ol
-          className="flex flex-wrap gap-2 text-sm"
-          aria-label={localize('com_mindstone_onb_steps')}
-        >
-          {STEPS.map((name, index) => (
-            <li
-              key={name}
-              aria-current={name === step ? 'step' : undefined}
-              className={stepClass(index, stepIndex)}
-            >
-              {index + 1}. {localize(STEP_LABELS[name])}
-            </li>
-          ))}
-        </ol>
+        <h1 className="text-2xl font-semibold">
+          {localize(changing ? 'com_mindstone_onb_change_title' : 'com_mindstone_onb_title')}
+        </h1>
+        {changing ? (
+          <p className="text-sm">
+            <Link to={back.path} className="underline" data-testid="ms-onb-change-back">
+              {localize(back.label)}
+            </Link>
+          </p>
+        ) : (
+          <ol
+            className="flex flex-wrap gap-2 text-sm"
+            aria-label={localize('com_mindstone_onb_steps')}
+          >
+            {STEPS.map((name, index) => (
+              <li
+                key={name}
+                aria-current={name === step ? 'step' : undefined}
+                className={stepClass(index, stepIndex)}
+              >
+                {index + 1}. {localize(STEP_LABELS[name])}
+              </li>
+            ))}
+          </ol>
+        )}
         {loadError && (
           <div role="alert" className="flex flex-wrap items-center gap-2 text-red-500">
             <span>{loadError}</span>
@@ -867,9 +965,11 @@ export default function MindStoneOnboardingView() {
                   >
                     {localize(testing ? 'com_mindstone_ent_testing' : 'com_mindstone_ent_test')}
                   </button>
-                  <button type="button" className={primary} onClick={() => goTo('model')}>
-                    {localize('com_mindstone_onb_save_next')}
-                  </button>
+                  {!changing && (
+                    <button type="button" className={primary} onClick={() => goTo('model')}>
+                      {localize('com_mindstone_onb_save_next')}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={secondary}
@@ -966,7 +1066,7 @@ export default function MindStoneOnboardingView() {
             <p className="mt-3 text-sm text-text-secondary">
               {localize('com_mindstone_onb_oauth_hint')}
             </p>
-            {usableModels.length > 0 && (
+            {!changing && usableModels.length > 0 && (
               <button type="button" className={`${secondary} mt-2`} onClick={() => goTo('model')}>
                 {localize('com_mindstone_onb_use_existing')}
               </button>
@@ -1002,16 +1102,18 @@ export default function MindStoneOnboardingView() {
               </select>
             )}
             <div className="flex gap-2">
-              <button type="button" className={secondary} onClick={() => goTo('provider')}>
-                {localize('com_mindstone_onb_back')}
-              </button>
+              {!changing && (
+                <button type="button" className={secondary} onClick={() => goTo('provider')}>
+                  {localize('com_mindstone_onb_back')}
+                </button>
+              )}
               <button
                 type="button"
                 className={primary}
                 disabled={busy || !model}
                 onClick={() => void saveModel()}
               >
-                {localize('com_mindstone_onb_save_next')}
+                {localize(saveLabel)}
               </button>
             </div>
           </section>
@@ -1044,16 +1146,18 @@ export default function MindStoneOnboardingView() {
               ))}
             </fieldset>
             <div className="flex gap-2">
-              <button type="button" className={secondary} onClick={() => goTo('model')}>
-                {localize('com_mindstone_onb_back')}
-              </button>
+              {!changing && (
+                <button type="button" className={secondary} onClick={() => goTo('model')}>
+                  {localize('com_mindstone_onb_back')}
+                </button>
+              )}
               <button
                 type="button"
                 className={primary}
                 disabled={busy || !profileId}
                 onClick={() => void savePersona()}
               >
-                {localize('com_mindstone_onb_save_next')}
+                {localize(saveLabel)}
               </button>
             </div>
           </section>
@@ -1191,22 +1295,35 @@ export default function MindStoneOnboardingView() {
                 </span>
               )}
             </div>
+            {/* Re-embedding happens after a chat only while automatic recall is on (#140 review). */}
+            {!pulling && currentCheck?.ok && currentCheck.reembed !== undefined && (
+              <p className="mb-3 text-sm text-text-secondary" data-testid="ms-onb-memory-reembed">
+                {localize(
+                  autoRecall
+                    ? 'com_mindstone_onb_memory_reembed'
+                    : 'com_mindstone_onb_memory_reembed_off',
+                  { 0: String(currentCheck.reembed) },
+                )}
+              </p>
+            )}
             <div className="flex gap-2">
-              <button
-                type="button"
-                className={secondary}
-                disabled={busy}
-                onClick={() => goTo('persona')}
-              >
-                {localize('com_mindstone_onb_back')}
-              </button>
+              {!changing && (
+                <button
+                  type="button"
+                  className={secondary}
+                  disabled={busy}
+                  onClick={() => goTo('persona')}
+                >
+                  {localize('com_mindstone_onb_back')}
+                </button>
+              )}
               <button
                 type="button"
                 className={primary}
                 disabled={busy || !currentCheck?.ok}
                 onClick={() => void saveMemory()}
               >
-                {localize('com_mindstone_onb_save_next')}
+                {localize(saveLabel)}
               </button>
             </div>
           </section>
@@ -1245,6 +1362,15 @@ export default function MindStoneOnboardingView() {
                     value={botToken}
                     onChange={(e) => setBotToken(e.target.value)}
                   />
+                  {keepsBot && (
+                    <span className="text-text-secondary" data-testid="ms-onb-token-kept">
+                      {localize(
+                        savedChosen?.tokenFile
+                          ? 'com_mindstone_onb_token_kept'
+                          : 'com_mindstone_onb_token_env',
+                      )}
+                    </span>
+                  )}
                 </label>
                 {chosenConnector.app && (
                   <label className="flex flex-col gap-1 text-sm">
@@ -1256,6 +1382,15 @@ export default function MindStoneOnboardingView() {
                       value={appToken}
                       onChange={(e) => setAppToken(e.target.value)}
                     />
+                    {keepsApp && (
+                      <span className="text-text-secondary">
+                        {localize(
+                          savedChosen?.appTokenFile
+                            ? 'com_mindstone_onb_token_kept'
+                            : 'com_mindstone_onb_token_env',
+                        )}
+                      </span>
+                    )}
                   </label>
                 )}
                 <div className="flex flex-col gap-1 text-sm">
@@ -1310,29 +1445,33 @@ export default function MindStoneOnboardingView() {
               {localize('com_mindstone_onb_email_calendar')}
             </p>
             <div className="flex gap-2">
-              <button
-                type="button"
-                className={secondary}
-                disabled={busy}
-                onClick={() => goTo('memory')}
-              >
-                {localize('com_mindstone_onb_back')}
-              </button>
-              <button
-                type="button"
-                className={secondary}
-                disabled={busy}
-                onClick={() => goTo('about')}
-              >
-                {localize('com_mindstone_onb_skip')}
-              </button>
+              {!changing && (
+                <>
+                  <button
+                    type="button"
+                    className={secondary}
+                    disabled={busy}
+                    onClick={() => goTo('memory')}
+                  >
+                    {localize('com_mindstone_onb_back')}
+                  </button>
+                  <button
+                    type="button"
+                    className={secondary}
+                    disabled={busy}
+                    onClick={() => goTo('about')}
+                  >
+                    {localize('com_mindstone_onb_skip')}
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 className={primary}
                 disabled={busy || !connectorReady}
                 onClick={() => void saveConnector()}
               >
-                {localize('com_mindstone_onb_save_next')}
+                {localize(saveLabel)}
               </button>
             </div>
           </section>
