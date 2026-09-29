@@ -881,7 +881,9 @@ CURRENT_STEP=""
 # exists, and the fresh config says placeholder.
 CURRENT_STEP=S2
 CONFIG="${MSA_DIR}/.runtime/mindstone/config.json"
-step2=$(awk '/^### 2\./{on=1; print; next} on && /^### /{exit} on' "${MSA_README}")
+# README step 2 is "### 2." (single path) or "#### B2." (path B, native, since MindStone-Agent #171): take that
+# section down to the next heading at the same level or higher.
+step2=$(awk '!on && /^#+ B?2\. /{lvl=index($0," ")-1; on=1; print; next} on && /^#+ /{if (index($0," ")-1 <= lvl) exit} on' "${MSA_README}")
 printf '%s\n' "${step2}" >"${LOG_DIR}/msa-readme-step2.txt"
 s2_problems=()
 if printf '%s' "${step2}" | grep -q '(b)' && printf '%s' "${step2}" | grep -qi 'console'; then has_2b=1; else has_2b=0; s2_problems+=("README step 2 has no (b) Console-first path"); fi
