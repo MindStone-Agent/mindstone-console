@@ -4,7 +4,7 @@
  * or a URL (a URL needs advanced settings: the gateway host fetches it), then
  * ingest it. Nothing added is used until it is ingested.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { request } from 'librechat-data-provider';
 import type { KnowledgebaseSummary } from './personaForms';
 import { visibleText } from './visibleText';
@@ -33,6 +33,8 @@ export default function PrivateKnowledgebases({
   const [open, setOpen] = useState<string | null>(null);
   /** The open KB's sources, with the KB they belong to (a slow answer for another KB is ignored). */
   const [sources, setSources] = useState<{ kbId: string; list: Sources } | null>(null);
+  /** Only the latest sources request may set the list: an older, slower answer is dropped. */
+  const sourcesRequest = useRef(0);
   const [newKb, setNewKb] = useState({ id: '', name: '' });
   const [text, setText] = useState({ name: '', text: '' });
   const [url, setUrl] = useState({ name: '', url: '' });
@@ -54,10 +56,11 @@ export default function PrivateKnowledgebases({
   const loadSources = useCallback(
     async (kbId: string) => {
       try {
+        const ticket = ++sourcesRequest.current;
         const result = await request.get<{ sources: Sources }>(
           `${personaPath}/${encodeURIComponent(kbId)}/sources`,
         );
-        setSources({ kbId, list: result.sources });
+        if (ticket === sourcesRequest.current) setSources({ kbId, list: result.sources });
       } catch (error) {
         setMessage({
           ok: false,

@@ -113,7 +113,7 @@ export default function MindStonePersonasView() {
         </p>
         {message && (
           <p role="status" className={message.ok ? 'text-green-600' : 'text-red-600'}>
-            {message.text}
+            {visibleText(message.text)}
           </p>
         )}
         {editing ? (

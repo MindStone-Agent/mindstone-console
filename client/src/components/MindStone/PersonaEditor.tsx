@@ -379,6 +379,11 @@ export default function PersonaEditor({
                     }
                   />
                   {visibleText(kb.name)}{' '}
+                  {kb.error && (
+                    <span className="text-xs text-red-600">
+                      {localize('com_mindstone_pe_kb_broken')}
+                    </span>
+                  )}{' '}
                   <span className="font-mono text-xs text-text-secondary">
                     {visibleText(kb.id)}
                   </span>
