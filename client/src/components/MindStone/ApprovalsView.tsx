@@ -98,7 +98,9 @@ const CONFIRM_APPROVE: Partial<Record<Summary['kind'], TranslationKeys>> = {
 
 function errorBody(error: unknown): { error?: string; code?: string; heard: boolean } {
   const response = (
-    error as { response?: { data?: { error?: unknown; code?: unknown; message?: unknown } } }
+    error as {
+      response?: { status?: number; data?: { error?: unknown; code?: unknown; message?: unknown } };
+    }
   )?.response;
   const data = response?.data;
   // The gateway's text, or a Console refusal's own (a 403 says "Forbidden").
@@ -108,8 +110,15 @@ function errorBody(error: unknown): { error?: string; code?: string; heard: bool
   return {
     error: text,
     code: typeof data?.code === 'string' ? data.code : undefined,
-    // Any HTTP answer is an answer: only no response at all leaves the outcome unknown.
-    heard: Boolean(response),
+    // An answer from the Console or the gateway (JSON, or a status below 500).
+    // No response, or a front proxy's own 502/504 page, leaves the outcome
+    // unknown: the gateway may still be working on it (#125 review).
+    heard:
+      Boolean(response) &&
+      ((response?.status ?? 0) < 500 ||
+        (typeof data === 'object' &&
+          data !== null &&
+          (data.error !== undefined || data.code !== undefined || data.message !== undefined))),
   };
 }
 
@@ -474,10 +483,11 @@ export default function MindStoneApprovalsView() {
   const cardRead = useRef(0);
   /**
    * `keepForm`: a re-read of the same card after a decision keeps the reject
-   * note typed for a retry. Resolves to whether this read's answer was shown
-   * (a newer read, or another card, wins; a failed read shows its own error).
+   * note typed for a retry. Resolves to what became of this read: shown, or
+   * superseded (a newer read, or another card, won), or failed (its own error
+   * is shown).
    */
-  const open = async (id: string, keepForm = false): Promise<boolean> => {
+  const open = async (id: string, keepForm = false): Promise<'shown' | 'superseded' | 'failed'> => {
     const read = ++cardRead.current;
     // A re-read of the same card keeps what the gateway said about its persona.
     if (opening.current !== id) setParentGone(false);
@@ -495,17 +505,18 @@ export default function MindStoneApprovalsView() {
       const result = await request.get<{ action: Detail }>(
         `${BASE}/approvals/${encodeURIComponent(id)}`,
       );
-      if (opening.current !== id || read !== cardRead.current) return false;
+      if (opening.current !== id || read !== cardRead.current) return 'superseded';
       setDetail(result.action);
       if (keepForm && result.action.status !== 'pending') setConfirming(null);
-      return true;
+      return 'shown';
     } catch (error) {
-      if (opening.current !== id || read !== cardRead.current) return false;
+      if (opening.current !== id || read !== cardRead.current) return 'superseded';
       setDetail(null);
       setMessage({
         ok: false,
         text: errorBody(error).error ?? localize('com_mindstone_gateway_unreachable'),
       });
+      return 'failed';
     }
   };
 
@@ -581,12 +592,12 @@ export default function MindStoneApprovalsView() {
         code === undefined
       ) {
         void load();
-        void open(decided.id, decision === 'reject').then((applied) => {
-          // Only over this read's own answer: a newer read or a failed one says its own.
-          if (applied && stillOpen()) setMessage({ ok: false, text: shown });
-          if (!applied && stillOpen() && !heard) {
-            setMessage({ ok: false, text: localize('com_mindstone_appr_no_answer_no_card') });
-          }
+        void open(decided.id, decision === 'reject').then((read) => {
+          // A newer read of the card says its own; otherwise the decision's
+          // outcome is what the owner needs, over the card or in its place.
+          if (read === 'superseded' || !stillOpen()) return;
+          if (read === 'shown' || heard) setMessage({ ok: false, text: shown });
+          else setMessage({ ok: false, text: localize('com_mindstone_appr_no_answer_no_card') });
         });
       }
       // The card is gone: it leaves the page, and the list is read again.

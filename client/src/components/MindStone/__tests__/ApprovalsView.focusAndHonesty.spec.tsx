@@ -173,9 +173,8 @@ describe('MindStone approvals: focus, late re-reads and honest outcomes (MindSto
     const status = screen.getByRole('status');
     const cardShown = screen.queryByRole('region', { name: memCard.summary }) !== null;
     // "The card below shows what it is now" is only true if a card is below.
-    expect(cardShown || !status.textContent?.includes('com_mindstone_appr_outcome_unknown')).toBe(
-      true,
-    );
+    expect(cardShown).toBe(false);
+    expect(status).toHaveTextContent('com_mindstone_appr_no_answer_no_card');
   });
 
   it('a 403 Forbidden (read-only admin) is a definite refusal, not "didn\'t hear back"', async () => {
@@ -191,6 +190,8 @@ describe('MindStone approvals: focus, late re-reads and honest outcomes (MindSto
     await act(async () => undefined);
     await act(async () => undefined);
     expect(screen.getByRole('status')).not.toHaveTextContent('com_mindstone_appr_outcome_unknown');
+    // The Console's own refusal text, not a generic "Not changed".
+    expect(await screen.findByText('Forbidden')).toBeInTheDocument();
   });
 
   // Gap specs: pass on HEAD, meant to kill surviving mutants.
