@@ -15,7 +15,13 @@ jest.mock('~/hooks', () => ({
 
 const DONE = { done: true, detail: 'done' };
 const NOT_DONE = { done: false, detail: 'not done' };
-const WORDS = { on: 'on', off: 'off', recall: 'automatic recall', none: 'none' };
+const WORDS = {
+  on: 'on',
+  off: 'off',
+  recall: 'automatic recall',
+  none: 'none',
+  host: 'set on the gateway host',
+};
 const CONFIG = {
   routing: { defaultModel: 'ollama/llama3' },
   onboarding: { profile: { id: 'assistant', label: 'Assistant' } },
@@ -24,7 +30,7 @@ const CONFIG = {
     embeddingProvider: 'ollama:nomic-embed-text',
     autoRecall: false,
   },
-  channels: { telegram: { enabled: true }, slack: { enabled: false }, discord: { enabled: true } },
+  channels: { telegram: { enabled: true }, slack: { enabled: false }, discord: {} },
 };
 const ALL_DONE = { provider: DONE, persona: DONE, memory: DONE, connectors: DONE };
 
@@ -44,11 +50,25 @@ describe('setupChoices', () => {
     ]);
   });
 
+  it('reads memory as the gateway does: set on the host, and recall on when unset', () => {
+    const byKey = Object.fromEntries(
+      setupChoices({ memory: { vectorStore: 'sqlite-vec' } }, ALL_DONE, WORDS).map((c) => [
+        c.key,
+        c,
+      ]),
+    );
+    expect(byKey.memory.value).toBe('set on the gateway host; automatic recall on');
+    const notDone = Object.fromEntries(
+      setupChoices({}, { ...ALL_DONE, memory: NOT_DONE }, WORDS).map((c) => [c.key, c]),
+    );
+    expect(notDone.memory.value).toBeUndefined();
+  });
+
   it('says what is not set, and none for no connector', () => {
     const byKey = Object.fromEntries(setupChoices({}, ALL_DONE, WORDS).map((c) => [c.key, c]));
     expect(byKey.model.value).toBeUndefined();
     expect(byKey.persona.value).toBeUndefined();
-    expect(byKey.memory.value).toBeUndefined();
+    expect(byKey.memory.value).toBe('set on the gateway host; automatic recall on');
     expect(byKey.connectors.value).toBe('none');
   });
 

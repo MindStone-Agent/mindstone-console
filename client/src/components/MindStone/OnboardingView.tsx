@@ -52,6 +52,16 @@ type Config = {
   routing?: { mode?: string; defaultAgentId?: string; defaultModel?: string };
   onboarding?: { profile?: { id?: string } };
   memory?: { embeddingProvider?: string; autoRecall?: boolean };
+  /** A connector as saved: its lists are shown again, its tokens never (MindStone-Agent #140). */
+  channels?: Record<string, SavedConnector | undefined>;
+};
+type SavedConnector = {
+  enabled?: boolean;
+  tokenFile?: string;
+  appTokenFile?: string;
+  ownerSenders?: unknown;
+  allowedSenders?: unknown;
+  allowedGuilds?: unknown;
 };
 type EmbedKind = 'ollama' | 'openai' | 'openai-compatible' | EnterpriseEmbedKind;
 /** Embeddings through an enterprise endpoint registered in the provider step (MindStone-Agent #126). */
@@ -394,15 +404,42 @@ export default function MindStoneOnboardingView() {
     setEmbedCustom(first ? '' : suggested);
   };
 
-  /** A token typed for one connector never carries over to another. */
+  /** The connector's saved section, if any. */
+  const savedConnector = (id: Connector | ''): SavedConnector | undefined => {
+    const saved = id ? config?.channels?.[id] : undefined;
+    return saved && typeof saved === 'object' ? saved : undefined;
+  };
+  const idsText = (value: unknown) =>
+    Array.isArray(value) ? value.filter((id) => typeof id === 'string').join(', ') : '';
+
+  /**
+   * A token typed for one connector never carries over to another. A saved
+   * connector's owner and allowed ids are filled in, so saving it again keeps
+   * them (MindStone-Agent #140 review); its tokens stay on the gateway.
+   */
   const chooseConnector = (id: Connector) => {
+    const saved = savedConnector(id);
     setConnector(id);
     setBotToken('');
     setAppToken('');
-    setOwners('');
-    setAllowed('');
-    setAllowedEdited(false);
+    setOwners(idsText(saved?.ownerSenders));
+    setAllowed(idsText(saved?.allowedSenders));
+    setAllowedEdited(saved !== undefined);
   };
+
+  // A change of connectors opens on the first one already saved.
+  const connectorPrefilled = useRef(false);
+  useEffect(() => {
+    if (changing !== 'connectors' || !config || connectorPrefilled.current) return;
+    connectorPrefilled.current = true;
+    const first = CONNECTORS.find((candidate) => {
+      const saved = config.channels?.[candidate.id];
+      return saved && typeof saved === 'object' && saved.enabled !== false;
+    });
+    if (first) chooseConnector(first.id);
+    // chooseConnector reads only config, which this effect waits for.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [changing, config]);
 
   /** PATCH one config section against the config as it is now (If-Match). */
   const patchSection = async (section: string, body: unknown) => {
@@ -628,8 +665,11 @@ export default function MindStoneOnboardingView() {
   const saveConnector = async () => {
     const chosen = CONNECTORS.find((candidate) => candidate.id === connector);
     if (!chosen) return;
-    const tokens: Array<[string, string]> = [[chosen.bot, botToken]];
-    if (chosen.app) tokens.push([chosen.app, appToken]);
+    const saved = savedConnector(chosen.id);
+    // Only the tokens typed here are stored; an empty field keeps the saved one.
+    const tokens: Array<[string, string]> = [];
+    if (botToken) tokens.push([chosen.bot, botToken]);
+    if (chosen.app && appToken) tokens.push([chosen.app, appToken]);
     // The tokens leave the page's state as they are sent, whether or not the save works.
     setBotToken('');
     setAppToken('');
@@ -641,14 +681,18 @@ export default function MindStoneOnboardingView() {
       const result = await patchSection('channels', {
         [chosen.id]: {
           enabled: true,
-          tokenFile: `secrets/${chosen.bot}`,
           // A host env var would win over the token typed here, so its name is cleared.
-          tokenEnv: null,
-          ...(chosen.app ? { appTokenFile: `secrets/${chosen.app}`, appTokenEnv: null } : {}),
+          ...(botToken ? { tokenFile: `secrets/${chosen.bot}`, tokenEnv: null } : {}),
+          ...(chosen.app && appToken
+            ? { appTokenFile: `secrets/${chosen.app}`, appTokenEnv: null }
+            : {}),
           ownerSenders: senderIds(owners),
           allowedSenders: allowedWithOwners(allowed, owners),
-          // Sent even when empty: a missing list lets every Discord server in.
-          ...(chosen.id === 'discord' ? { allowedGuilds: [] } : {}),
+          // Sent even when empty (a missing list lets every Discord server in),
+          // unless a list is saved already: that one is kept.
+          ...(chosen.id === 'discord' && saved?.allowedGuilds === undefined
+            ? { allowedGuilds: [] }
+            : {}),
         },
       });
       if (result?.restartRequired) {
@@ -738,10 +782,14 @@ export default function MindStoneOnboardingView() {
   const confirmHint = confirmText !== '' && !confirmOk;
   const chosenConnector = CONNECTORS.find((candidate) => candidate.id === connector);
   const wildcard = hasWildcard(owners) || hasWildcard(allowed);
+  const savedChosen = savedConnector(connector);
+  // A saved token counts: an empty field keeps it.
+  const keepsBot = Boolean(savedChosen?.tokenFile);
+  const keepsApp = Boolean(savedChosen?.appTokenFile);
   const connectorReady =
     chosenConnector !== undefined &&
-    botToken !== '' &&
-    (!chosenConnector.app || appToken !== '') &&
+    (botToken !== '' || keepsBot) &&
+    (!chosenConnector.app || appToken !== '' || keepsApp) &&
     senderIds(owners).length > 0 &&
     !wildcard;
 
@@ -1305,6 +1353,11 @@ export default function MindStoneOnboardingView() {
                     value={botToken}
                     onChange={(e) => setBotToken(e.target.value)}
                   />
+                  {keepsBot && (
+                    <span className="text-text-secondary" data-testid="ms-onb-token-kept">
+                      {localize('com_mindstone_onb_token_kept')}
+                    </span>
+                  )}
                 </label>
                 {chosenConnector.app && (
                   <label className="flex flex-col gap-1 text-sm">
@@ -1316,6 +1369,11 @@ export default function MindStoneOnboardingView() {
                       value={appToken}
                       onChange={(e) => setAppToken(e.target.value)}
                     />
+                    {keepsApp && (
+                      <span className="text-text-secondary">
+                        {localize('com_mindstone_onb_token_kept')}
+                      </span>
+                    )}
                   </label>
                 )}
                 <div className="flex flex-col gap-1 text-sm">

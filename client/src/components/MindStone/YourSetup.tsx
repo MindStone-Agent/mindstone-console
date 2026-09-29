@@ -39,22 +39,23 @@ const text = (value: unknown) =>
 export function setupChoices(
   config: Config | null,
   steps: StatusSteps | undefined,
-  words: { on: string; off: string; recall: string; none: string },
+  words: { on: string; off: string; recall: string; none: string; host: string },
 ): SetupChoice[] {
   const routing = section(config, 'routing');
   const onboarding = section(config, 'onboarding');
   const memory = section(config, 'memory');
   const channels = section(config, 'channels');
   const profile = (onboarding.profile ?? {}) as Record<string, unknown>;
-  const embedding = text(memory.embeddingProvider);
-  const recall =
-    typeof memory.autoRecall === 'boolean'
-      ? `${words.recall} ${memory.autoRecall ? words.on : words.off}`
-      : undefined;
+  // Set in the config, or on the gateway host (MINDSTONE_EMBEDDING_PROVIDER) when the memory step is done.
+  const embedding =
+    text(memory.embeddingProvider) ?? (steps?.memory?.done ? words.host : undefined);
+  // The gateway treats an unset autoRecall as on.
+  const recall = `${words.recall} ${memory.autoRecall === false ? words.off : words.on}`;
+  // As the gateway runs them: a connector section is on unless it says enabled: false.
   const connectors = Object.entries(channels)
     .filter(
       ([, value]) =>
-        value && typeof value === 'object' && (value as { enabled?: unknown }).enabled === true,
+        value && typeof value === 'object' && (value as { enabled?: unknown }).enabled !== false,
     )
     .map(([name]) => name)
     .sort();
@@ -80,7 +81,7 @@ export function setupChoices(
     {
       key: 'memory',
       label: 'com_mindstone_ys_memory',
-      value: embedding ? [embedding, recall].filter(Boolean).join('; ') : undefined,
+      value: embedding ? `${embedding}; ${recall}` : undefined,
       change: changeableStep('memory', steps),
     },
     {
@@ -105,6 +106,7 @@ export default function YourSetup({
     off: localize('com_mindstone_ys_off'),
     recall: localize('com_mindstone_ys_recall'),
     none: localize('com_mindstone_ys_none'),
+    host: localize('com_mindstone_ys_host'),
   });
   return (
     <section
@@ -139,9 +141,11 @@ export default function YourSetup({
                   to={`/mindstone/onboarding?change=${choice.change}&from=settings`}
                   className="underline"
                   data-testid={`ms-setup-${choice.key}-change`}
-                  aria-label={localize('com_mindstone_ys_change_named', {
-                    0: localize(choice.label),
-                  })}
+                  aria-label={
+                    choice.key === 'provider'
+                      ? localize('com_mindstone_ys_add_local')
+                      : localize('com_mindstone_ys_change_named', { 0: localize(choice.label) })
+                  }
                 >
                   {localize(
                     choice.key === 'provider'

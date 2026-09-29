@@ -37,6 +37,8 @@ const PROFILES = [
 
 let steps: Record<string, { done: boolean; detail: string }>;
 let advancedSettings: boolean;
+let config: Record<string, unknown>;
+let presets: Array<Record<string, unknown>>;
 
 function renderAt(query: string) {
   render(
@@ -58,12 +60,17 @@ beforeEach(() => {
   mockPatch.mockReset();
   steps = { provider: DONE, persona: DONE, memory: DONE, connectors: NOT_DONE };
   advancedSettings = true;
+  presets = [];
+  config = {
+    routing: { mode: 'pi-session', defaultAgentId: 'default', defaultModel: 'ollama/llama3' },
+    onboarding: { profile: { id: 'assistant' } },
+  };
   mockGet.mockImplementation(async (url: string) => {
     if (url === `${BASE}/status`) return { ok: true, onboarded: true, profiles: PROFILES, steps };
     if (url === `${BASE}/permissions`) return { permissions: { advancedSettings } };
     if (url === `${BASE}/models`) {
       return {
-        presets: [],
+        presets,
         providers: [{ id: 'ollama', name: 'Ollama', configured: true, availableModelCount: 2 }],
         models: [
           { id: 'ollama/llama3', provider: 'ollama' },
@@ -72,13 +79,7 @@ beforeEach(() => {
       };
     }
     if (url === `${BASE}/config`) {
-      return {
-        config: {
-          routing: { mode: 'pi-session', defaultAgentId: 'default', defaultModel: 'ollama/llama3' },
-          onboarding: { profile: { id: 'assistant' } },
-        },
-        etag: '"e1"',
-      };
+      return { config, etag: '"e1"' };
     }
     throw new Error(`unexpected GET ${url}`);
   });
@@ -165,6 +166,121 @@ describe('changing one setup choice', () => {
     fireEvent.click(button('com_mindstone_onb_memory_test'));
     await screen.findByText('com_mindstone_onb_memory_ok 768');
     expect(screen.queryByTestId('ms-onb-memory-reembed')).toBeNull();
+  });
+
+  it('the provider change offers no way on to the model step', async () => {
+    renderAt('change=provider&from=providers');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_provider_title' });
+    // Models are usable already: guided setup would offer to go on with them.
+    expect(screen.queryByRole('button', { name: 'com_mindstone_onb_use_existing' })).toBeNull();
+  });
+
+  it('connecting a local provider stays on the step, and so does a refusal', async () => {
+    presets = [
+      {
+        presetId: 'lmstudio',
+        providerId: 'lmstudio',
+        name: 'LM Studio',
+        baseUrl: 'http://127.0.0.1:1234/v1',
+        needsKey: false,
+      },
+    ];
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/providers/lmstudio`) return { models: ['lmstudio/qwen'] };
+      throw new Error(`unexpected POST ${url}`);
+    });
+    renderAt('change=provider&from=providers');
+    fireEvent.click(await screen.findByRole('radio', { name: 'LM Studio' }));
+    fireEvent.click(button('com_mindstone_onb_connect'));
+    expect(await screen.findByText('com_mindstone_onb_connected 1')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'com_mindstone_onb_provider_title' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'com_mindstone_onb_model_title' })).toBeNull();
+
+    mockPost.mockRejectedValue({ response: { status: 422, data: { error: 'no models listed' } } });
+    fireEvent.click(button('com_mindstone_onb_connect'));
+    expect(await screen.findByText('no models listed')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'com_mindstone_onb_provider_title' }),
+    ).toBeInTheDocument();
+  });
+
+  it('the persona and memory changes have no Back', async () => {
+    renderAt('change=persona&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_persona_title' });
+    expect(screen.queryByRole('button', { name: 'com_mindstone_onb_back' })).toBeNull();
+  });
+
+  it('the memory change has no Back', async () => {
+    renderAt('change=memory&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    expect(screen.queryByRole('button', { name: 'com_mindstone_onb_back' })).toBeNull();
+  });
+
+  it('when advanced settings run out mid-change, Access leads back to the same change', async () => {
+    mockPatch.mockRejectedValueOnce({
+      response: { status: 403, data: { error: 'advanced settings are off' } },
+    });
+    renderAt('change=model&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_model_title' });
+    fireEvent.change(screen.getByRole('combobox', { name: 'com_mindstone_onb_model_title' }), {
+      target: { value: 'ollama/qwen3' },
+    });
+    fireEvent.click(button('com_mindstone_onb_change_save'));
+    const regrant = await screen.findByRole('button', { name: 'com_mindstone_onb_regrant' });
+    advancedSettings = false;
+    fireEvent.click(regrant);
+    fireEvent.change(await screen.findByRole('textbox', { name: 'com_mindstone_confirmation' }), {
+      target: { value: CONFIRMATION },
+    });
+    fireEvent.click(button('com_mindstone_turn_on'));
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_model_title' });
+    expect(
+      screen.getByRole('heading', { name: 'com_mindstone_onb_change_title' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'com_mindstone_onb_steps' })).toBeNull();
+  });
+
+  it('a saved connector opens filled in, keeps its token, lists and Discord servers', async () => {
+    steps = { ...steps, connectors: DONE };
+    config = {
+      ...config,
+      channels: {
+        discord: {
+          enabled: true,
+          tokenFile: 'secrets/discord-bot.token',
+          ownerSenders: ['111'],
+          allowedSenders: ['111', '222'],
+          allowedGuilds: ['g1'],
+        },
+      },
+    };
+    renderAt('change=connectors&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_connectors_title' });
+    await waitFor(() =>
+      expect(
+        screen.getByRole('radio', { name: 'com_mindstone_onb_connector_discord' }),
+      ).toBeChecked(),
+    );
+    expect(screen.getByRole('textbox', { name: 'com_mindstone_onb_owner_ids' })).toHaveValue('111');
+    expect(screen.getByRole('textbox', { name: 'com_mindstone_onb_allowed_ids' })).toHaveValue(
+      '111, 222',
+    );
+    expect(screen.getByTestId('ms-onb-token-kept')).toBeInTheDocument();
+    // No new token: the saved one is kept, and so are the servers.
+    fireEvent.change(screen.getByRole('textbox', { name: 'com_mindstone_onb_owner_ids' }), {
+      target: { value: '111, 333' },
+    });
+    fireEvent.click(button('com_mindstone_onb_change_save'));
+    await screen.findByText(/com_mindstone_onb_connector_saved/);
+    expect(mockPost.mock.calls.filter(([url]) => String(url).includes('/secrets/'))).toEqual([]);
+    const body = patchesTo('channels')[0][1] as { discord: Record<string, unknown> };
+    expect(body.discord).toEqual({
+      enabled: true,
+      ownerSenders: ['111', '333'],
+      allowedSenders: ['111', '222', '333'],
+    });
   });
 
   it('asks for advanced settings first, then opens the step being changed', async () => {

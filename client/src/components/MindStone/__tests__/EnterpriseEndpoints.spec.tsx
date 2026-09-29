@@ -463,6 +463,45 @@ describe('guided setup', () => {
   });
 });
 
+describe('changing the provider from Settings (MindStone-Agent #140)', () => {
+  it('registers an enterprise endpoint and stays on the step, with no way on to the model', async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/providers/enterprise/azure-openai`) {
+        return {
+          ok: true,
+          providerId: 'enterprise-azure',
+          host: 'res.openai.azure.com',
+          models: ['enterprise-azure/gpt-4o'],
+        };
+      }
+      return { ok: true };
+    });
+    render(
+      <MemoryRouter initialEntries={['/mindstone/onboarding?change=provider&from=providers']}>
+        <Routes>
+          <Route path="/mindstone/onboarding" element={<MindStoneOnboardingView />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('radio', { name: 'Azure OpenAI / AI Foundry' }));
+    const form = screen.getByTestId('ms-ent-form-azure-openai');
+    fireEvent.change(within(form).getByLabelText('Endpoint'), {
+      target: { value: 'https://res.openai.azure.com' },
+    });
+    fireEvent.change(within(form).getByLabelText('Deployment names'), {
+      target: { value: 'gpt-4o' },
+    });
+    fireEvent.change(within(form).getByLabelText('API key'), { target: { value: 'AZ' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'com_mindstone_ent_register' }));
+    const done = await screen.findByTestId('ms-onb-enterprise-done');
+    expect(
+      within(done).getByRole('button', { name: 'com_mindstone_ent_test' }),
+    ).toBeInTheDocument();
+    expect(within(done).queryByRole('button', { name: 'com_mindstone_onb_save_next' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'com_mindstone_onb_model_title' })).toBeNull();
+  });
+});
+
 describe('memory through an enterprise endpoint', () => {
   function renderMemory() {
     steps = { provider: { done: true, detail: '' }, persona: { done: true, detail: '' } };

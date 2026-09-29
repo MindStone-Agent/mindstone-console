@@ -74,9 +74,31 @@ describe('AboutYou', () => {
 
     mockGet.mockResolvedValue({ ...FILE, etag: '"e3"', markdown: 'the agent wrote this' });
     fireEvent.click(screen.getByTestId('ms-about-reload'));
-    await waitFor(() => expect(text()).toHaveValue('the agent wrote this'));
-    fireEvent.change(text(), { target: { value: 'my edit' } });
+    // The current file is shown beside the typed text, which stays.
+    expect(await screen.findByTestId('ms-about-current')).toHaveTextContent('the agent wrote this');
+    expect(text()).toHaveValue('my edit');
     expect(save()).toBeEnabled();
+    mockPatch.mockResolvedValue({ ok: true, bytes: 7, etag: '"e4"' });
+    fireEvent.click(save());
+    await waitFor(() =>
+      expect(mockPatch).toHaveBeenLastCalledWith(`${BASE}/user?ifMatch=%22e3%22`, {
+        markdown: 'my edit',
+      }),
+    );
+  });
+
+  it('can take the current file instead of the typed text', async () => {
+    mockPatch.mockRejectedValue({ response: { status: 412, data: { error: 'changed' } } });
+    render(<AboutYou advanced />);
+    await waitFor(() => expect(text()).toHaveValue(FILE.markdown));
+    fireEvent.change(text(), { target: { value: 'my edit' } });
+    fireEvent.click(save());
+    await screen.findByText('com_mindstone_about_stale');
+    mockGet.mockResolvedValue({ ...FILE, etag: '"e3"', markdown: 'the agent wrote this' });
+    fireEvent.click(screen.getByTestId('ms-about-reload'));
+    fireEvent.click(await screen.findByTestId('ms-about-use-current'));
+    expect(text()).toHaveValue('the agent wrote this');
+    expect(screen.queryByTestId('ms-about-current')).toBeNull();
   });
 
   it('needs advanced settings to save, and says so', async () => {

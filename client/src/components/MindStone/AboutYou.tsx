@@ -43,27 +43,39 @@ export default function AboutYou({ advanced }: { advanced: boolean }) {
   /** The file changed since it was read: saving is off until the current one is loaded. */
   const [stale, setStale] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** After a refused save: the file as it is now, shown beside the text typed here. */
+  const [current, setCurrent] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    try {
-      const result = await request.get<UserFile>(`${BASE}/user`);
-      // Anything but the gateway's answer is an error here, never a broken Settings page.
-      if (!result || typeof result.etag !== 'string' || typeof result.exists !== 'boolean') {
-        throw new Error('unexpected answer');
+  /** Read USER.md. keepDraft: after a refused save, the typed text stays and the file is shown beside it. */
+  const load = useCallback(
+    async (keepDraft = false) => {
+      try {
+        const result = await request.get<UserFile>(`${BASE}/user`);
+        // Anything but the gateway's answer is an error here, never a broken Settings page.
+        if (!result || typeof result.etag !== 'string' || typeof result.exists !== 'boolean') {
+          throw new Error('unexpected answer');
+        }
+        const text = typeof result.markdown === 'string' ? result.markdown : '';
+        setFile(result);
+        if (keepDraft) {
+          setCurrent(text);
+        } else {
+          setDraft(text);
+          setCurrent(null);
+        }
+        setStale(false);
+        setLoadError(null);
+      } catch (error) {
+        const { status, text } = errorOf(error);
+        setLoadError(
+          status === 404
+            ? localize('com_mindstone_about_unsupported')
+            : (text ?? localize('com_mindstone_gateway_unreachable')),
+        );
       }
-      setFile(result);
-      setDraft(typeof result.markdown === 'string' ? result.markdown : '');
-      setStale(false);
-      setLoadError(null);
-    } catch (error) {
-      const { status, text } = errorOf(error);
-      setLoadError(
-        status === 404
-          ? localize('com_mindstone_about_unsupported')
-          : (text ?? localize('com_mindstone_gateway_unreachable')),
-      );
-    }
-  }, [localize]);
+    },
+    [localize],
+  );
 
   useEffect(() => {
     void load();
@@ -78,6 +90,7 @@ export default function AboutYou({ advanced }: { advanced: boolean }) {
         markdown: draft,
       })) as { bytes: number; etag: string };
       setFile({ exists: true, bytes: result.bytes, etag: result.etag, markdown: draft });
+      setCurrent(null);
       setMessage({ ok: true, text: localize('com_mindstone_about_saved') });
     } catch (error) {
       const { status, text } = errorOf(error);
@@ -152,7 +165,7 @@ export default function AboutYou({ advanced }: { advanced: boolean }) {
                 className="rounded border border-border-medium px-3 py-1"
                 disabled={busy}
                 data-testid="ms-about-reload"
-                onClick={() => void load()}
+                onClick={() => void load(true)}
               >
                 {localize('com_mindstone_about_reload')}
               </button>
@@ -164,6 +177,29 @@ export default function AboutYou({ advanced }: { advanced: boolean }) {
               })}
             </span>
           </div>
+          {current !== null && (
+            <div className="flex flex-col gap-1" data-testid="ms-about-current">
+              <p className="text-sm text-text-secondary">
+                {localize('com_mindstone_about_current')}
+              </p>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded border border-border-light bg-surface-secondary p-2 font-mono text-xs">
+                {visibleText(current)}
+              </pre>
+              <div>
+                <button
+                  type="button"
+                  className="rounded border border-border-medium px-3 py-1 text-sm"
+                  data-testid="ms-about-use-current"
+                  onClick={() => {
+                    setDraft(current);
+                    setCurrent(null);
+                  }}
+                >
+                  {localize('com_mindstone_about_use_current')}
+                </button>
+              </div>
+            </div>
+          )}
           {!advanced && (
             <p className="text-sm text-text-secondary">
               {localize('com_mindstone_about_need_advanced')}
