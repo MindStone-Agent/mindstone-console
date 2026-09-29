@@ -250,7 +250,8 @@ stack_install_steps() {
   local health
   health=$(curl -s -m 5 "${GW_URL}/health" 2>/dev/null || true)
   printf '%s\n' "${health}" >"${LOG_DIR}/gateway-health.json"
-  [[ "${health}" == *'"ok":true'* ]] || problems+=("/health on ${GW_PORT} didn't answer ok:true")
+  printf '%s' "${health}" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.exit(JSON.parse(s).ok===true?0:1)}catch{process.exit(1)}})' \
+    || problems+=("/health on ${GW_PORT} didn't answer ok: true")
   {
     stack_make_tls || echo "couldn't make J11's CA and certificate (logs/j11-tls.log)"
     if [[ -n "${STACK_CA_FILE}" ]]; then
