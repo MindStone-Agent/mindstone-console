@@ -200,6 +200,38 @@ describe('changing one setup choice', () => {
     expect(body.telegram).toEqual({ enabled: true, ownerSenders: ['9'], allowedSenders: ['9'] });
   });
 
+  it('says how many memories this model refused and are found by their words only (MindStone-Agent #170)', async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/memory/check`) {
+        return { ok: true, dimensions: 1024, index: { embedded: 7, otherModel: 0, skipped: 2 } };
+      }
+      throw new Error(`unexpected POST ${url}`);
+    });
+    renderAt('change=memory&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    expect(await screen.findByTestId('ms-onb-memory-skipped')).toHaveTextContent(
+      'com_mindstone_onb_memory_skipped 2',
+    );
+    expect(screen.queryByTestId('ms-onb-memory-reembed')).toBeNull();
+  });
+
+  it('shows both notes when memories wait to be re-embedded and others were refused (MindStone-Agent #170 review)', async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/memory/check`) {
+        return { ok: true, dimensions: 1024, index: { embedded: 7, otherModel: 5, skipped: 2 } };
+      }
+      throw new Error(`unexpected POST ${url}`);
+    });
+    renderAt('change=memory&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    expect(await screen.findByTestId('ms-onb-memory-skipped')).toHaveTextContent(
+      'com_mindstone_onb_memory_skipped 2',
+    );
+    expect(screen.getByTestId('ms-onb-memory-reembed')).toHaveTextContent('5');
+  });
+
   it("says nothing about re-embedding when no memory is another model's", async () => {
     mockPost.mockImplementation(async (url: string) => {
       if (url === `${BASE}/memory/check`) {
@@ -212,6 +244,22 @@ describe('changing one setup choice', () => {
     fireEvent.click(button('com_mindstone_onb_memory_test'));
     await screen.findByText('com_mindstone_onb_memory_ok 768');
     expect(screen.queryByTestId('ms-onb-memory-reembed')).toBeNull();
+    // A gateway from before MindStone-Agent #170 sends no skipped count: nothing is said.
+    expect(screen.queryByTestId('ms-onb-memory-skipped')).toBeNull();
+  });
+
+  it('says nothing about refused memories when the count is 0 (MindStone-Agent #170)', async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/memory/check`) {
+        return { ok: true, dimensions: 768, index: { embedded: 7, otherModel: 0, skipped: 0 } };
+      }
+      throw new Error(`unexpected POST ${url}`);
+    });
+    renderAt('change=memory&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    await screen.findByText('com_mindstone_onb_memory_ok 768');
+    expect(screen.queryByTestId('ms-onb-memory-skipped')).toBeNull();
   });
 
   it('the provider change offers no way on to the model step', async () => {
