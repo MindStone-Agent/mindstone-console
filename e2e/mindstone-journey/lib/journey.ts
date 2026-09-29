@@ -213,6 +213,18 @@ export function recordStall(message: string): void {
   fs.appendFileSync(STALLS_FILE, `${step}\t${message.replace(/\s+/g, ' ').trim()}\n`);
 }
 
+/** Every setting a step changed and could not put back, one `<step>\t<what>` line each (run-journey.sh fails both verdicts on any). */
+const RESTORE_FAILURES_FILE = path.join(EVIDENCE, 'restore-failures.tsv');
+
+/**
+ * Records that a step could not put back what it changed (J10's active persona, J12's settings). The step
+ * fails too; this line also fails the gate and the DEMO SUBSET when the step itself isn't counted.
+ */
+export function recordRestoreFailure(step: string, what: string): void {
+  fs.mkdirSync(EVIDENCE, { recursive: true });
+  fs.appendFileSync(RESTORE_FAILURES_FILE, `${step}\t${what.replace(/\s+/g, ' ').trim()}\n`);
+}
+
 /** Records a StallError (anything else passes through) and rethrows it. */
 function stallRecorded(error: unknown): never {
   if (stall.isStall(error)) recordStall((error as Error).message);
@@ -823,6 +835,24 @@ function dataDir(): string {
   return dir;
 }
 
+/**
+ * Deletes an agent's USER.md from the gateway's data dir (J12's restore, when there was none before: no admin route
+ * removes USER.md). `userPath` is the agent's config value, relative to the config; only a file named USER.md under
+ * <dataDir>/agents/ is ever removed. Returns the removed file's path relative to the data dir, or undefined when
+ * there was none.
+ */
+export function removeAgentUserFile(userPath: string): string | undefined {
+  const root = dataDir();
+  const file = path.resolve(root, userPath);
+  const rel = path.relative(path.join(root, 'agents'), file);
+  if (path.basename(file) !== 'USER.md' || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`refusing to remove ${userPath}: not a USER.md under the data dir's agents/ folder`);
+  }
+  if (!fs.existsSync(file)) return undefined;
+  fs.rmSync(file);
+  return path.relative(root, file);
+}
+
 /** The recall index the gateway's sqlite-vec recall reads (MindStone-Agent: <dataDir>/vectors/memory.sqlite). */
 function recallIndexPath(): string {
   return path.join(dataDir(), 'vectors', 'memory.sqlite');
@@ -1201,11 +1231,24 @@ const settingsParity = require('./settings-parity-evidence.js') as {
     after: { spec?: string; dims?: number };
     warned?: string;
     index?: IndexDims;
-    recallHits?: { chunkId: string; dims: number | null }[];
-  }) => { verdict: 'pass' | 'fail'; why: string; stale: number };
+    probe?: { error: boolean; errorText?: string; text: string; hits: { chunkId: string; dims: number | null }[] };
+  }) => { verdict: 'pass' | 'fail' | 'pending'; why: string; reasons: string[]; unproven: string[]; stale: number };
+  restoredIndexReasons: (arg: { spec?: string; dims?: number; index?: IndexDims }) => string[];
+  EMBEDDING_WARNING: RegExp;
 };
-export const { SETUP_STEPS, CHANGE_STEPS, IN_PLACE_STEPS, changeHref, j12Decision, parityReasons, pickAlternateModel, modelMatchReasons, memoryChangeVerdict } =
-  settingsParity;
+export const {
+  SETUP_STEPS,
+  CHANGE_STEPS,
+  IN_PLACE_STEPS,
+  changeHref,
+  j12Decision,
+  parityReasons,
+  pickAlternateModel,
+  modelMatchReasons,
+  memoryChangeVerdict,
+  restoredIndexReasons,
+  EMBEDDING_WARNING,
+} = settingsParity;
 
 /** Text that means the Console showed an error, not an answer. */
 export const ERROR_REPLY =

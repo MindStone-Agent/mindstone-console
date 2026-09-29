@@ -19,9 +19,15 @@
 //   Pi session's provider and model all agree, with no fallback;
 // - memoryChangeVerdict passes an embedding change only when the Console
 //   warned before Save (whenever the old model had embedded memories; the
-//   same vector size is no excuse) and recall after the change scored no
-//   chunk of another size; old vectors left behind with no warning FAIL as a
-//   product bug; no change, or no dimension count, FAIL too;
+//   same vector size is no excuse) and the chat after the change answered
+//   with no recalled chunk of another size; old vectors left behind with no
+//   warning FAIL as a product bug; a chat that errored or came back empty
+//   FAILs; a recalled chunk of unknown size, no recalled chunk, no memories
+//   before, or no chat are PENDING, never a pass; no change, or no dimension
+//   count, FAIL; the warning words match a warning, not a neutral count;
+// - restoredIndexReasons: after the restore, only the restored model's
+//   vectors (and pending chunks) may be left in the index;
+// - restore_failures (lib/gate.sh) lists every setting a step left changed;
 // - the recall-index reader's `dims` mode (lib/recall-index.js, the child
 //   process J12 reads the index with) counts chunks by vector size, pending
 //   and unreadable ones apart, and `chunkdims` gives given chunks' sizes;
@@ -43,7 +49,8 @@ import { fileURLToPath } from 'node:url';
 import { failuresOnlyIn, stackLines } from './gate-rows.mjs';
 
 const require = createRequire(import.meta.url);
-const { SETUP_STEPS, CHANGE_STEPS, changeHref, j12Decision, parityReasons, pickAlternateModel, modelMatchReasons, memoryChangeVerdict } = require('./settings-parity-evidence.js');
+const { SETUP_STEPS, CHANGE_STEPS, changeHref, j12Decision, parityReasons, isCloudModel, pickAlternateModel, modelMatchReasons, memoryChangeVerdict, restoredIndexReasons, EMBEDDING_WARNING } =
+  require('./settings-parity-evidence.js');
 const { queryRecallIndex } = require('./recall-index.js');
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -107,6 +114,9 @@ check(pickAlternateModel(offered, 'ollama/deepseek-v4.1-flash:cloud', 'gemma4:31
 check(pickAlternateModel(offered, 'ollama/deepseek-v4.1-flash:cloud', 'none') === undefined, 'model pick: UAT_ALT_MODEL=none (no other cloud model answered): none, never an unprobed one');
 check(pickAlternateModel(offered, 'ollama/deepseek-v4.1-flash:cloud', 'missing:cloud') === undefined && pickAlternateModel(offered, 'ollama/deepseek-v4.1-flash:cloud', 'deepseek-v4.1-flash:cloud') === undefined, 'model pick: a preferred model the step does not offer, or the current one: none');
 check(pickAlternateModel(offered, 'ollama/deepseek-v4.1-flash:cloud', 'gemma4:26b') === undefined, 'model pick: a preferred local model is still refused');
+check(pickAlternateModel(['ollama/gemma4:31b-cloud', 'other/gemma4:31b'], 'x', 'gemma4:31b') === undefined, 'model pick: the preferred name matches a whole model name, never a part of one');
+check(pickAlternateModel(['acme/gemma4:31b-cloud', 'ollama/gemma4:31b-cloud'], 'x', 'gemma4:31b-cloud') === 'ollama/gemma4:31b-cloud', "model pick: the probed Ollama model through Ollama, not the same name through another provider");
+check(!isCloudModel('ollama/foo:cloudy') && !isCloudModel('ollama/cloud-model') && isCloudModel('ollama/x:cloud'), 'model pick: only a ":cloud" or "-cloud" tag at the end is cloud');
 
 // --- The model-match check ---
 const CHOSEN = 'ollama/deepseek-v4-flash:cloud';
@@ -127,21 +137,51 @@ check(modelMatchReasons({ chosen: '', saved: '', answered: answered() }).length 
 const NOMIC = { spec: 'ollama:nomic-embed-text', dims: 768, chunks: 40 };
 const MXBAI = { spec: 'ollama:mxbai-embed-large', dims: 1024 };
 const WARNING = '40 memories were embedded by another model; they are re-embedded before recall uses them.';
-const idx = (byDims, pending = 0) => ({ present: true, byDims, pending, unreadable: 0 });
-const mv = (patch) => memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: undefined, index: idx({ 768: 40 }), recallHits: undefined, ...patch });
-const silent = mv({});
+const idx = (byDims, pending = 0, unreadable = 0) => ({ present: true, byDims, pending, unreadable });
+const answer = (hits, patch = {}) => ({ error: false, text: "Your dog's name is juniper-x.", hits, ...patch });
+const GOOD = answer([{ chunkId: 'c1', dims: 1024 }, { chunkId: 'transcript:j9#0', dims: 1024 }]);
+const mv = (patch) => memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: WARNING, index: idx({ 1024: 45 }), probe: GOOD, ...patch });
+check(mv({}).verdict === 'pass' && /warned before Save/.test(mv({}).why), 'embedding change: warned before Save, the chat after answered, its recalled chunks all at the new size: pass');
+const silent = mv({ warned: undefined, index: idx({ 768: 40 }) });
 check(silent.verdict === 'fail' && /^PRODUCT BUG: /.test(silent.why) && silent.stale === 40 && /no warning before Save, though 40 memories were embedded by ollama:nomic-embed-text/.test(silent.why), `embedding change: 768-dim vectors left behind for a 1024-dim model, no warning: FAIL as a product bug ("${silent.why.slice(0, 90)}…")`);
-check(mv({ index: idx({ 768: 40, 1024: 3 }, 2) }).verdict === 'fail' && mv({ index: idx({ 768: 40, 1024: 3 }, 2) }).stale === 40, 'embedding change: a mixed index (new vectors next to old ones), no warning: still the bug');
-check(mv({ index: idx({ 1024: 43 }) }).verdict === 'fail' && !/PRODUCT BUG/.test(mv({ index: idx({ 1024: 43 }) }).why), 'embedding change: re-indexed but no warning before Save: fails (the Console must say so), not as stale vectors');
-check(mv({ after: { spec: 'ollama:other-768', dims: 768 } }).verdict === 'fail', 'embedding change: the same vector size, memories from the old model, no warning: fails (size is no excuse)');
-check(mv({ warned: WARNING }).verdict === 'pass' && /warned before Save/.test(mv({ warned: WARNING }).why), 'embedding change: the Console warned before Save, no recall after: pass');
-check(mv({ warned: WARNING, recallHits: [{ chunkId: 'c1', dims: 1024 }, { chunkId: 'c2', dims: null }] }).verdict === 'pass', 'embedding change: warned, and recall after the change scored only new-size chunks (or ones since removed): pass');
-const scoredOld = mv({ warned: WARNING, recallHits: [{ chunkId: 'transcript:j9#0', dims: 768 }, { chunkId: 'c1', dims: 1024 }] });
-check(scoredOld.verdict === 'fail' && /recall after the change scored 1 chunk\(s\) embedded at another size.*transcript:j9#0 at 768/.test(scoredOld.why), 'embedding change: warned, but recall scored an old 768-dim chunk (the J9 fact) against the new model: fails');
-check(mv({ before: { ...NOMIC, chunks: 0 }, index: idx({}) }).verdict === 'pass', 'embedding change: no memories embedded before the change: nothing to warn about, pass');
+check(silent.reasons.length === 1, 'embedding change: the silent change is one reason');
+check(mv({ warned: undefined, index: idx({ 768: 40, 1024: 3 }, 2) }).verdict === 'fail' && mv({ warned: undefined, index: idx({ 768: 40, 1024: 3 }, 2) }).stale === 40, 'embedding change: a mixed index (new vectors next to old ones), no warning: still the bug');
+check(mv({ warned: undefined }).verdict === 'fail' && !/PRODUCT BUG/.test(mv({ warned: undefined }).why), 'embedding change: re-indexed but no warning before Save: fails (the Console must say so), not as stale vectors');
+check(mv({ warned: undefined, after: { spec: 'ollama:other-768', dims: 768 }, index: idx({ 768: 40 }), probe: answer([{ chunkId: 'c1', dims: 768 }]) }).verdict === 'fail', 'embedding change: the same vector size, memories from the old model, no warning: fails (size is no excuse)');
+// The chat after the change (Cairn sev1): a failed or empty chat is a FAIL, never clean evidence.
+const errored = mv({ probe: answer([], { error: true, errorText: 'routing_error: embedding size mismatch', text: '' }) });
+check(errored.verdict === 'fail' && /did not answer \(the Console stored an error: routing_error/.test(errored.why), 'embedding change: the chat after the change stored an error: FAIL, even with no hits');
+check(mv({ probe: answer([], { text: '   ' }) }).verdict === 'fail' && /an empty reply/.test(mv({ probe: answer([], { text: '   ' }) }).why), 'embedding change: the chat after the change came back empty: FAIL');
+check(mv({ probe: answer([]) }).verdict === 'pending' && /recall supplied no chunk/.test(mv({ probe: answer([]) }).why), 'embedding change: the chat answered but recall supplied nothing, with memories before: PENDING (not observable), never PASS');
+// Recalled chunks: another size fails; an unknown size (Cairn sev2) is not proven.
+const scoredOld = mv({ probe: answer([{ chunkId: 'transcript:j9#0', dims: 768 }, { chunkId: 'c1', dims: 1024 }]) });
+check(scoredOld.verdict === 'fail' && /recall after the change scored 1 chunk\(s\) embedded at another size.*transcript:j9#0 at 768/.test(scoredOld.why), 'embedding change: recall scored an old 768-dim chunk (the J9 fact) against the new model: fails');
+check(mv({ probe: answer([{ chunkId: 'x', dims: 1536 }]) }).verdict === 'fail', 'embedding change: a recalled chunk larger than the new size fails too (any other size)');
+const gone = mv({ probe: answer([{ chunkId: 'c1', dims: 1024 }, { chunkId: 'old-gone', dims: null }]) });
+check(gone.verdict === 'pending' && /old-gone: no vector/.test(gone.why), 'embedding change: a recalled chunk with no vector now (re-embedded pending, or removed): PENDING, not clean');
+check(mv({ probe: answer([{ chunkId: 'bad', dims: -1 }]) }).verdict === 'pending' && /bad: unreadable/.test(mv({ probe: answer([{ chunkId: 'bad', dims: -1 }]) }).why), 'embedding change: a recalled chunk with an unreadable vector: PENDING, not clean');
+check(mv({ probe: answer([{ chunkId: 'old-gone', dims: null }, { chunkId: 'transcript:j9#0', dims: 768 }]) }).verdict === 'fail', 'embedding change: an old-size chunk still fails next to an unknown one');
+// Parts that weren't exercised (Cairn sev3): PENDING, never a vacuous pass.
+check(mv({ before: { ...NOMIC, chunks: 0 }, index: idx({}), probe: answer([]) }).verdict === 'pending' && /nothing to warn about/.test(mv({ before: { ...NOMIC, chunks: 0 }, index: idx({}), probe: answer([]) }).why), 'embedding change: no memories embedded before the change: the warning is PENDING, not a pass');
+check(mv({ index: { present: false, byDims: {}, pending: 0 }, before: { ...NOMIC, chunks: 0 } }).verdict === 'pending', 'embedding change: no recall index at all: PENDING');
+check(mv({ probe: undefined }).verdict === 'pending' && /no chat ran/.test(mv({ probe: undefined }).why), 'embedding change: automatic recall off (no chat after the change): PENDING');
 check(mv({ after: NOMIC }).verdict === 'fail' && /did not change/.test(mv({ after: NOMIC }).why), 'embedding change: the model did not change: fails');
 check(mv({ after: { spec: MXBAI.spec } }).verdict === 'fail' && /no dimension count/.test(mv({ after: { spec: MXBAI.spec } }).why), "embedding change: the new model's Test gave no dimension count: fails");
 check(mv({ before: { dims: 768 } }).verdict === 'fail', 'embedding change: an unknown model before the change: fails');
+// The warning's words.
+for (const text of [WARNING, 'Changing the model re-indexes 40 memories.', 'Memories made with the previous model are incompatible.', '12 memories were embedded by a different embedding model.']) {
+  check(EMBEDDING_WARNING.test(text), `warning words: "${text}" is a warning`);
+}
+for (const text of ['43 memories indexed.', 'Embedding works: 1024 dimensions.', 'Memory lets the agent remember what matters across chats.', 'Vector store: sqlite-vec']) {
+  check(!EMBEDDING_WARNING.test(text), `warning words: "${text}" is not a warning`);
+}
+
+// --- The index after the restore (Cairn sev2): only the restored model's vectors ---
+check(restoredIndexReasons({ spec: NOMIC.spec, dims: 768, index: idx({ 768: 50 }, 3) }).length === 0, 'restored index: every vector at the restored size (pending ones allowed): usable');
+check(restoredIndexReasons({ spec: NOMIC.spec, dims: 768, index: idx({ 768: 50, 1024: 4 }) }).some((r) => /still holds 4 chunk\(s\) at 1024: later recall \(J10\)/.test(r)), "restored index: the chat after the change's 1024-dim chunks left behind: a reason");
+check(restoredIndexReasons({ spec: NOMIC.spec, dims: 768, index: idx({ 768: 50 }, 0, 2) }).some((r) => /unreadable/.test(r)), 'restored index: unreadable vectors: a reason');
+check(restoredIndexReasons({ spec: NOMIC.spec, dims: undefined, index: idx({ 768: 50 }) }).length === 1, "restored index: the restored model's size unknown: not judged as usable");
+check(restoredIndexReasons({ spec: NOMIC.spec, dims: 768, index: { present: false, byDims: {}, pending: 0 } }).length === 0, 'restored index: no index: nothing to use');
 
 // --- The recall-index reader's dims mode (a child process, like J12's) ---
 {
@@ -210,6 +250,15 @@ try {
   check(failuresOnlyIn(stacked('failed', 225, ['helper', 1250]), ['J12']).explained, "gate-rows: a spec-file helper's error (expectAnswer at line 225) called from J12's own lines is J12's own: explained");
   check(!failuresOnlyIn(stacked('failed', 141, ['helper', 142]), ['J12']).explained, "gate-rows: an afterEach error whose stack stays in the hook's lines is still not excused");
   check(!failuresOnlyIn(stacked('failed', 225, ['helper', 1600]), ['J12']).explained, "gate-rows: a helper's error called from J10's lines, charged to J12, is not excused");
+  // Two errors: J12's own through the helper (result.error, with the stack), then a hook's (no stack of its own).
+  const twoErrors = report([
+    ...passing,
+    { ...j12('failed', []), tests: [{ results: [{ status: 'failed', errors: [at(SPEC, 225), at(SPEC, 141, 'afterEach boom')], error: { ...at(SPEC, 225), stack: `Error: x\n    at helper (/abs/e2e/mindstone-journey/${SPEC}:225:7)\n    at /abs/e2e/mindstone-journey/${SPEC}:1250:7` } }] }] },
+    j10('passed'),
+    j11('passed'),
+  ]);
+  check(!failuresOnlyIn(twoErrors, ['J12']).explained, "gate-rows: the first error's stack never excuses a second error at a hook's line");
+  check(!failuresOnlyIn(all('failed', [at(SPEC, 1500)]), ['J12']).explained, "gate-rows: an error at the next test's own first line is not J12's");
 
   const results = path.join(dir, 'results.json');
   const glog = path.join(dir, 'gate-rows.log');
@@ -222,6 +271,15 @@ try {
   check(
     out(`stalls_counted "${stalls}" $(gate_uncounted 1 1 0)`) === '1' && out(`stalls_counted "${stalls}" $(gate_uncounted 1 1 1)`) === '2' && out(`stalls_counted "${stalls}" $GATE_DEMO_UNCOUNTED`) === '1',
     'gate.sh: a J12 stall counts against the gate only with its flag, never against the demo',
+  );
+  // A step that could not put back what it changed: listed for both verdicts, whatever its own row.
+  const restores = path.join(dir, 'restore-failures.tsv');
+  fs.writeFileSync(restores, 'J12\tUSER.md (none before J12) removed from the data dir: nothing removed\nJ10\tactive persona j10-b-x put back to none: NOT restored\n');
+  check(
+    out(`restore_failures "${restores}"`) === 'J12: USER.md (none before J12) removed from the data dir: nothing removed\nJ10: active persona j10-b-x put back to none: NOT restored' &&
+      out(`restore_failures "${path.join(dir, 'none.tsv')}"`) === '' &&
+      rc(`restore_failures "${path.join(dir, 'none.tsv')}"`) === 0,
+    'gate.sh: restore_failures lists each step that left a setting changed, and nothing (exit 0) without the file',
   );
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });

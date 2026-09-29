@@ -89,6 +89,10 @@ import {
   memoryChangeVerdict,
   recallIndexDims,
   recallHitsForConversation,
+  removeAgentUserFile,
+  recordRestoreFailure,
+  restoredIndexReasons,
+  EMBEDDING_WARNING,
   SETUP_STEPS,
   CHANGE_STEPS,
   IN_PLACE_STEPS,
@@ -1214,14 +1218,14 @@ const J12_STEP_HEADINGS: Record<string, string> = {
   memory: 'Set up memory',
   connectors: 'Connect a chat app (optional)',
 };
+/** How long J12 waits, after the restore and a chat under it, for the index to hold only the restored model's vectors. */
+const J12_RESTORED_INDEX_WAIT_MS = 60_000;
 /** J12's recall check after the embedding change: J9's question, whose fact a chat embedded with the old model holds. */
 const J12_RECALL_PROBE = "What is my dog's name? Answer with just the name.";
 /** The memory step's Test (the Console's proxy gives the embed check 25 s; a model's first load can take longer). */
 const J12_MEMORY_CHECK_MS = 90_000;
 /** A memory Test result that says the check ran out of time (a cold model load), not that the model can't embed. */
 const J12_TEST_AGAIN = /aborted|timed? ?out|no answer within/i;
-/** Words the product would use to warn that a new embedding model affects the memories already stored. */
-const J12_WARNING = /re-?index|re-?embed|incompatib|rebuil|(existing|stored|saved) (memor|vector|embedding)|(another|a different|other|the old|the previous) (embedding )?model|\d+ memor/i;
 
 type J12Config = {
   etag?: string;
@@ -1229,6 +1233,7 @@ type J12Config = {
     routing?: { mode?: string; defaultAgentId?: string; defaultModel?: string };
     memory?: { vectorStore?: string; embeddingProvider?: string; autoRecall?: boolean };
     onboarding?: { profile?: { id?: string; label?: string } };
+    agents?: Record<string, { userPath?: string }>;
   };
 };
 type J12UserFile = { exists?: boolean; bytes?: number; etag?: string; markdown?: string; tooLarge?: boolean; error?: string };
@@ -1317,6 +1322,18 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
         lines.push(`memory ${keys.map((key) => `${key} ${JSON.stringify(now.memory?.[key])}`).join(', ')} put back: HTTP ${r.status}, ${same ? 'as before' : `now ${JSON.stringify(back)}`}`);
       }
     }
+    if (parts.includes('user') && !original.user.exists) {
+      // There was no USER.md: the one J12 wrote goes (no admin route removes it, so the harness deletes the file).
+      const current = await readUser();
+      if (current.json.exists) {
+        const agentId = now.routing?.defaultAgentId ?? 'default';
+        const userPath = now.agents?.[agentId]?.userPath;
+        const removed = userPath ? removeAgentUserFile(userPath) : undefined;
+        const back = (await readUser()).json.exists;
+        ok &&= Boolean(removed) && back === false;
+        lines.push(`USER.md (none before J12) removed from the data dir: ${removed ?? `nothing removed (userPath ${userPath ?? 'unset'})`}; GET /admin/user now says ${back ? 'it EXISTS' : 'there is none'}`);
+      }
+    }
     if (parts.includes('user') && original.user.exists) {
       const current = await readUser();
       if (current.json.markdown !== original.user.markdown) {
@@ -1330,8 +1347,12 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
   };
 
   let completed = false;
+  /** The error that ended the step early, if one did (the finally reports a failed restore next to it). */
+  let failure: unknown;
   /** Parts this Console/Ollama couldn't exercise: J12 ends PENDING with them once everything else passed. */
   const pendingParts: string[] = [];
+  /** Set once the embedding model was changed: the model the restore puts back, whose vectors the index must hold again. */
+  let restoredModel: { spec: string; dims?: number } | undefined;
   try {
     await test.step('Access: advanced settings on, from the Advanced settings card on Settings', async () => {
       // J4's Start a chat turned them off and J7 turned them on; they last an hour. Saving on Settings needs them.
@@ -1365,6 +1386,12 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
         const href = (await link.count()) === 1 ? ((await link.getAttribute('href')) ?? undefined) : undefined;
         rows.push({ step, kind: href ? 'change' : 'none', shows: ((await row.textContent()) ?? '').replace(/\s+/g, ' ').trim(), href });
       }
+      // Any other "Your setup" row is a choice setup doesn't have (parityReasons flags it).
+      const known = new Set(Object.values(CHANGE_STEPS));
+      const listed = await yourSetup.locator('[data-testid^="ms-setup-"]').evaluateAll((els) => els.map((el) => el.getAttribute('data-testid') ?? ''));
+      for (const key of new Set(listed.filter((id) => !id.endsWith('-change')).map((id) => id.replace(/^ms-setup-/, '')))) {
+        if (!known.has(key)) rows.push({ step: `unknown:${key}`, kind: 'none' });
+      }
       // About you: USER.md, edited in place.
       const about = page.getByTestId('ms-about');
       if (await appears(about, 15_000)) {
@@ -1384,7 +1411,7 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
         if (value && rows.some((r) => r.step === step) && !shows(step).includes(value)) deferred.push(`Settings' ${step} row shows "${shows(step)}", not the saved ${value}`);
       }
 
-      // Each Change link opens just its step: "Change your setup", that step's heading, no step list, a way back.
+      // Each Change link opens just its step: "Change your setup", that step's heading and no other step's, no step list, a way back.
       for (const row of rows.filter((r) => r.kind === 'change')) {
         const change = CHANGE_STEPS[row.step];
         await navigate(page, '/mindstone');
@@ -1393,6 +1420,13 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
         const opened = {
           url: url.endsWith(`/mindstone/onboarding?change=${change}&from=settings`),
           heading: await appears(page.getByRole('heading', { name: J12_STEP_HEADINGS[change] }), 30_000),
+          noOtherStep: (
+            await Promise.all(
+              Object.entries(J12_STEP_HEADINGS)
+                .filter(([other]) => other !== change)
+                .map(([, name]) => page.getByRole('heading', { name }).count()),
+            )
+          ).every((n) => n === 0),
           title: await appears(page.getByRole('heading', { name: 'Change your setup', level: 1 }), 5_000),
           noStepList: (await page.getByRole('list', { name: 'Setup steps' }).count()) === 0,
           back: await appears(page.getByTestId('ms-onb-change-back'), 5_000),
@@ -1495,9 +1529,16 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
           .filter(Boolean);
       const sentencesBefore = new Set(await sentences());
       const testButton = section.getByRole('button', { name: 'Test', exact: true });
-      /** Test, for the model picked now: the page's own check request, then its result once the step is no longer busy. */
-      const testEmbedding = async (): Promise<string> => {
+      /**
+       * Test, for the model picked now: the page's own check request, which must be for that model (so the size it
+       * reports is the picked model's, not the saved one's), then its result once the step is no longer busy.
+       */
+      const testEmbedding = async (spec: string): Promise<string> => {
+        const sent = page.waitForRequest((r) => r.method() === 'POST' && new URL(r.url()).pathname === '/api/mindstone/admin/memory/check', { timeout: J12_MEMORY_CHECK_MS });
+        sent.catch(() => undefined);
         await uiResponse(page, { method: 'POST', path: '/api/mindstone/admin/memory/check', timeoutMs: J12_MEMORY_CHECK_MS }, () => testButton.click());
+        const checked = ((await sent).postDataJSON() as { embeddingProvider?: string } | null)?.embeddingProvider;
+        expect(checked, `the Test checks the picked model (${spec})`).toBe(spec);
         await expect(testButton, 'the Test finishes').toBeEnabled({ timeout: 15_000 });
         await expect(check, 'the Test shows its result').not.toHaveText(/^$/);
         return ((await check.textContent()) ?? '').trim();
@@ -1506,21 +1547,25 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
        * A pulled model that isn't loaded yet can outlast the gateway's embed timeout on its first Test ("This operation
        * was aborted"); Ollama goes on loading it, so the Test is pressed again (twice at most), as a person would.
        */
-      const testWithRetry = async (): Promise<string[]> => {
-        const results = [await testEmbedding()];
+      const testWithRetry = async (spec: string): Promise<string[]> => {
+        const results = [await testEmbedding(spec)];
         while (J12_TEST_AGAIN.test(results[results.length - 1]) && results.length < 3) {
           await page.waitForTimeout(5_000);
-          results.push(await testEmbedding());
+          results.push(await testEmbedding(spec));
         }
         return results;
       };
-      // Another embedding model that is already pulled: each other choice the step offers, tested; the harness never downloads one.
-      const others = (await select.locator('option').evaluateAll((o) => o.map((x) => (x as HTMLOptionElement).value))).filter((v) => v && v !== beforeModel && v !== 'custom');
+      // Another embedding model: each other choice the step offers that Ollama has pulled (run-journey.sh lists them in
+      // UAT_OLLAMA_EMBED_MODELS; without the list, every other choice), tested; the harness never downloads one. A pulled
+      // model whose Test fails is the product's failure, not a missing model.
+      const pulledList = (process.env.UAT_OLLAMA_EMBED_MODELS ?? '').split(/\s+/).filter(Boolean).map((m) => m.replace(/:latest$/, ''));
+      const offered = (await select.locator('option').evaluateAll((o) => o.map((x) => (x as HTMLOptionElement).value))).filter((v) => v && v !== beforeModel && v !== 'custom');
+      const others = pulledList.length ? offered.filter((v) => pulledList.includes(v)) : offered;
       const tried: { model: string; result: string }[] = [];
       let after: { spec: string; dims: number } | undefined;
       for (const candidate of others) {
         await select.selectOption(candidate);
-        const results = await testWithRetry();
+        const results = await testWithRetry(`ollama:${candidate}`);
         const result = results[results.length - 1];
         tried.push({ model: candidate, result: results.join(' -> ') });
         const dims = Number(result.match(/Embedding works: (\d+) dimensions/)?.[1] ?? 0);
@@ -1528,12 +1573,13 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
           after = { spec: `ollama:${candidate}`, dims };
           break;
         }
+        if (pulledList.length) deferred.push(`the memory step's Test failed for ${candidate}, which Ollama has pulled: "${results.join(' -> ')}"`);
       }
       let safeField: string | undefined;
       if (!after) {
         // Only one embedding model is pulled: change a safe memory field instead (automatic recall), with the saved model.
         await select.selectOption(beforeModel);
-        const results = await testWithRetry();
+        const results = await testWithRetry(beforeSpec);
         const result = results[results.length - 1];
         tried.push({ model: beforeModel, result: results.join(' -> ') });
         expect(result, `the saved embedding model still works (${beforeSpec})`).toMatch(/Embedding works: \d+ dimensions/);
@@ -1544,7 +1590,7 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       // (the Test result included), and new since the step opened with the saved model.
       const warned =
         (await sentences())
-          .filter((sentence) => J12_WARNING.test(sentence) && !sentencesBefore.has(sentence))
+          .filter((sentence) => EMBEDDING_WARNING.test(sentence) && !sentencesBefore.has(sentence))
           .join(' ') || undefined;
       await shot(page, testInfo, 'memory-change');
       const saved = await uiResponse(page, { method: 'PATCH', path: '/api/mindstone/admin/config/memory' }, () =>
@@ -1561,10 +1607,11 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       proof.memory = { before: { spec: beforeSpec, dims: beforeDims ?? null, chunks: chunksBefore }, after: after ?? null, safeField: safeField ?? null, tried, warned: warned ?? null, saved: memory, indexBefore };
       await saveProof();
       if (!after) {
-        note(testInfo, `memory: only one embedding model is pulled (tried ${tried.map((t) => `${t.model}: "${t.result}"`).join('; ')}), so a safe field was changed instead: ${safeField}`);
-        pendingParts.push(
-          `the embedding-model part: no other embedding model works on this Ollama (${tried.map((t) => `${t.model}: "${t.result}"`).join('; ')}), so the warning before Save and recall after the change could not be exercised; automatic recall was changed instead`,
-        );
+        const why = others.length
+          ? `no other embedding model works (tried ${tried.map((t) => `${t.model}: "${t.result}"`).join('; ')})`
+          : `no other embedding model the step offers is pulled (offered: ${offered.join(', ') || 'none'}; pulled: ${pulledList.join(', ') || 'not listed'})`;
+        note(testInfo, `memory: ${why}, so a safe field was changed instead: ${safeField}`);
+        pendingParts.push(`the embedding-model part: ${why}, so the warning before Save and recall after the change could not be exercised; automatic recall was changed instead`);
         await expect(memoryRow, 'Settings shows the new automatic-recall setting').toContainText(`automatic recall ${original.memory.autoRecall === true ? 'off' : 'on'}`, { timeout: 30_000 });
         await shot(page, testInfo, 'settings-after-memory');
         expect(memory.autoRecall, 'config.memory.autoRecall is what was chosen on Settings').toBe(!(original.memory.autoRecall === true));
@@ -1577,29 +1624,39 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       expect(memory.vectorStore, 'config.memory.vectorStore is unchanged').toBe(original.memory.vectorStore);
       expect(memory.autoRecall, 'config.memory.autoRecall is unchanged').toBe(original.memory.autoRecall);
 
-      // Recall after the change: a fresh chat asks for J9's fact (told in a chat embedded by the old model). The reply
-      // isn't judged; the chunks recall supplied to it are, by their vector size: none may be the old model's.
-      let recallHits: { chunkId: string; dims: number | null }[] | undefined;
-      if (memory.autoRecall === true && chunksBefore > 0) {
+      // Recall after the change: a fresh chat asks for J9's fact (told in a chat embedded by the old model). It must
+      // answer (a failed or empty chat is a FAIL, never clean evidence), and the chunks recall supplied to it are judged
+      // by their vector size: none may be the old model's, and one whose size can't be read leaves it unproven.
+      let probe: { error: boolean; errorText?: string; text: string; hits: { chunkId: string; dims: number | null }[] } | undefined;
+      if (memory.autoRecall === true) {
         await navigate(page, '/c/new');
         await ensureMindStoneModel(page, testInfo);
-        const probe = await sendAndWaitForReply(page, J12_RECALL_PROBE);
+        const reply = await sendAndWaitForReply(page, J12_RECALL_PROBE);
         await shot(page, testInfo, 'recall-after-change');
-        await attachText(testInfo, 'recall-after-change.txt', replyLog(probe));
-        recallHits = recallHitsForConversation(probe.conversationId);
-        proof.memory = { ...(proof.memory as object), recallProbe: { conversationId: probe.conversationId, error: probe.error, hits: recallHits } };
+        await attachText(testInfo, 'recall-after-change.txt', replyLog(reply));
+        const errorShown = !reply.error && ERROR_REPLY.test(reply.text);
+        probe = {
+          error: reply.error || errorShown,
+          errorText: reply.error ? reply.errorText : errorShown ? reply.text.slice(0, 200) : undefined,
+          text: reply.text,
+          hits: recallHitsForConversation(reply.conversationId),
+        };
+        proof.memory = { ...(proof.memory as object), recallProbe: { conversationId: reply.conversationId, error: probe.error, errorText: probe.errorText ?? null, hits: probe.hits } };
       }
       const index = recallIndexDims();
-      const verdict = memoryChangeVerdict({ before: { spec: beforeSpec, dims: beforeDims, chunks: chunksBefore }, after, warned, index, recallHits });
+      const verdict = memoryChangeVerdict({ before: { spec: beforeSpec, dims: beforeDims, chunks: chunksBefore }, after, warned, index, probe });
       proof.memory = { ...(proof.memory as object), indexAfter: index, verdict };
       await saveProof();
       note(
         testInfo,
         `embedding ${beforeSpec} (${beforeDims ?? '?'} dims, ${chunksBefore} chunks embedded) -> ${after.spec} (${after.dims} dims); warning before Save: ${warned ? `"${warned}"` : 'none'}; ` +
-          `recall after the change: ${recallHits ? `${recallHits.length} chunk(s) at sizes ${JSON.stringify(recallHits.map((h) => h.dims))}` : 'not run'}; ` +
+          `recall after the change: ${probe ? `${probe.error ? 'the chat FAILED; ' : ''}${probe.hits.length} chunk(s) at sizes ${JSON.stringify(probe.hits.map((h) => h.dims))}` : 'not run (automatic recall off)'}; ` +
           `recall index before ${JSON.stringify(indexBefore.byDims)}, after ${JSON.stringify(index.byDims)} (${index.pending} pending); ${verdict.why}`,
       );
       if (verdict.verdict === 'fail') deferred.push(verdict.why);
+      if (verdict.verdict === 'pending') pendingParts.push(`the embedding-model part: ${verdict.unproven.join('; ')}`);
+      // What the restore must bring the index back to, checked after the chat that follows it.
+      restoredModel = { spec: beforeSpec, dims: beforeDims };
     });
     // Put the memory setting back at once: no chat should embed with the changed model, and J10 recalls with the original.
     const memoryBack = await putBack(['memory']);
@@ -1697,8 +1754,16 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
         const extra = seen[kind].filter((f) => !planned.some((label) => f.label.startsWith(label)));
         if (extra.length) reasons.push(`${kind}: shown as planned but not planned by the gateway: ${extra.map((f) => f.label).join(', ')}`);
       }
-      const azure = wanted.find((k) => k.kind === 'azure-openai');
-      if (!azure?.planned.some((label) => /Entra/i.test(label))) reasons.push(`azure-openai has no planned Microsoft Entra ID / managed identity option (planned: ${azure?.planned.join(', ') || 'none'})`);
+      // #140's placeholders, by kind (when the gateway lists the kind): Entra ID for Azure, a role or access keys for Bedrock,
+      // workload identity for Vertex.
+      for (const [kind, label] of [['azure-openai', /Entra/i], ['bedrock', /role|access key/i], ['vertex', /workload identity/i]] as const) {
+        const listedKind = wanted.find((k) => k.kind === kind);
+        if (listedKind && !listedKind.planned.some((l) => label.test(l))) reasons.push(`${kind} has no planned ${label.source} sign-in option (planned: ${listedKind.planned.join(', ') || 'none'})`);
+      }
+      if (!wanted.some((k) => k.kind === 'azure-openai')) reasons.push('the gateway lists no azure-openai enterprise kind');
+      // Model providers also adds a local provider through setup's own step (#140).
+      const addLocal = await page.getByTestId('ms-prov-add-local').getAttribute('href').catch(() => null);
+      if (addLocal !== '/mindstone/onboarding?change=provider&from=providers') reasons.push(`Model providers' "Add a local provider" goes to ${JSON.stringify(addLocal)}, not /mindstone/onboarding?change=provider&from=providers`);
       // The request the page never sends: a value for a planned field, which the gateway must refuse before anything is saved.
       const refused = await consoleApi<{ error?: string }>(page, 'POST', '/api/mindstone/admin/providers/enterprise/azure-openai', { entraIdentity: `uat-${marker}` });
       proof.enterprise = { wanted, seen, refused: [refused.status, refused.json?.error], reasons };
@@ -1730,6 +1795,25 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       expect(reasons, `the chat ran on the model chosen on Settings (${chosenModel}): the saved route, the Settings row and the Pi session agree`).toEqual([]);
     });
 
+    await test.step('the recall index is back to the restored embedding model (J10 recalls with it)', async () => {
+      if (!restoredModel) return;
+      // The memory setting went back right after it was judged, and the chat above ran under it: the chunks J12's
+      // chat after the change embedded with the other model must have been re-embedded (or removed) by now.
+      const model = restoredModel;
+      const started = Date.now();
+      let index = recallIndexDims();
+      let reasons = restoredIndexReasons({ ...model, index });
+      while (reasons.length && Date.now() - started < J12_RESTORED_INDEX_WAIT_MS) {
+        await page.waitForTimeout(3_000);
+        index = recallIndexDims();
+        reasons = restoredIndexReasons({ ...model, index });
+      }
+      proof.restoredIndex = { model, index, waitedMs: Date.now() - started, reasons };
+      await saveProof();
+      note(testInfo, `recall index after the restore and a chat under ${model.spec}: ${JSON.stringify(index.byDims)} (${index.pending} pending)${reasons.length ? `; ${reasons.join('; ')}` : `; every vector at ${model.dims}`}`);
+      deferred.push(...reasons);
+    });
+
     expect(deferred, 'J12 checks that failed along the way (each is in the notes and logs/j12-evidence.json)').toEqual([]);
     completed = true;
     if (pendingParts.length) {
@@ -1740,13 +1824,24 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
           'memory step warns about the memories the old model embedded before Save, and recall after the change scores none of them.',
       );
     }
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
-    // Whatever happened above: the default model, the memory setting and USER.md go back to what they were, for J10, J11 and later runs.
+    // Whatever happened above: the default model, the memory setting and USER.md go back to what they were (USER.md
+    // absent when there was none), for J10, J11 and later runs.
     const restored = await putBack(['model', 'memory', 'user']).catch((error: Error) => ({ ok: false, lines: [`the settings could not be put back: ${error.message}`] }));
     note(testInfo, `put back in the finally: ${restored.lines.join('; ')}`);
     proof.restore = restored;
     await saveProof().catch(() => undefined);
-    if (completed && !restored.ok) throw new Error(`J12 could not put the settings back: ${restored.lines.join('; ')}`);
+    if (!restored.ok) {
+      // Always surfaced, whatever J12's own verdict: the gate and the DEMO SUBSET fail on it even when J12 isn't counted
+      // (restore-failures.tsv), and a J12 that failed already keeps its own error, with this one added.
+      recordRestoreFailure('J12', restored.lines.join('; '));
+      const what = `J12 could not put the settings back: ${restored.lines.join('; ')}`;
+      if (completed) throw new Error(what);
+      throw new Error(`${failure instanceof Error ? failure.message : String(failure)} | AND ${what}`);
+    }
   }
 });
 
@@ -1876,6 +1971,8 @@ test('J10 persona builder in the Console: a skill and a private KB, saved not ac
   };
 
   let completed = false;
+  /** The error that ended the step early, if one did (the finally reports a failed restore next to it). */
+  let failure: unknown;
   try {
     await test.step('build persona A: the picked skill, a global KB if there is one, saved', async () => {
       await build(A, 'Northwind', descA, { skill: picked, globalKb });
@@ -2075,13 +2172,22 @@ test('J10 persona builder in the Console: a skill and a private KB, saved not ac
           "Done when: with a second skill installed (J7 installs two), A's prompt holds only the picked one.",
       );
     }
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
     const restored = await restoreActivePersona().catch((error: Error) => ({ ok: false, text: `the active persona could not be put back: ${error.message}` }));
     note(testInfo, restored.text);
     proof.restore = restored;
     await saveProof().catch(() => undefined);
-    // A step that otherwise passed (or ended PENDING) fails when it leaves the wrong persona active; a failure above keeps its own error.
-    if (completed && !restored.ok) throw new Error(`J10 left the wrong active persona behind: ${restored.text}`);
+    if (!restored.ok) {
+      // Always surfaced, whatever J10's own verdict: the gate and the DEMO SUBSET fail on it even when J10 isn't counted
+      // (restore-failures.tsv), and a J10 that failed already keeps its own error, with this one added.
+      recordRestoreFailure('J10', restored.text);
+      const what = `J10 left the wrong active persona behind: ${restored.text}`;
+      if (completed) throw new Error(what);
+      throw new Error(`${failure instanceof Error ? failure.message : String(failure)} | AND ${what}`);
+    }
   }
 });
 

@@ -456,6 +456,9 @@ summary() {
     pw_explained_by "${PW_RC}" "${EVIDENCE}/playwright/results.json" "${LOG_DIR}/gate-rows.log" ${DEMO_UNCOUNTED} || demo_only+=("playwright exit ${PW_RC}")
   fi
   [[ "${rc}" == 0 ]] || common+=("harness exit ${rc}${FATAL:+ (${FATAL})}")
+  # A step that couldn't put back what it changed (lib/journey.ts recordRestoreFailure) fails both verdicts, even
+  # when that step itself is uncounted: the steps after it ran on changed settings.
+  while IFS= read -r line; do [[ -n "${line}" ]] && common+=("not put back by ${line}"); done < <(restore_failures "${EVIDENCE}/restore-failures.tsv")
   [[ -n "${UAT_SELFTEST_BLANK_MESSAGES:-}" && "${UAT_SELFTEST_BLANK_MESSAGES}" != 0 ]] && common+=("self-test sabotage on (UAT_SELFTEST_BLANK_MESSAGES=${UAT_SELFTEST_BLANK_MESSAGES})")
   # Stalls (lib/journey.ts recordStall): a request or page load that never answered. Their steps are
   # FAIL already; this says, at a glance, that the run hit the environment, and never lets it pass.
@@ -725,21 +728,35 @@ fi
 # The other default model J12 switches to on Settings: a cloud model Ollama lists that actually answers (a listed
 # cloud model can be retired upstream). Each candidate, smallest first, gets one short chat; the first reply with
 # text wins. "none" when none answers, so J12 keeps the model and says so; unset for other providers (J12 then
-# picks another cloud model the Model step offers). UAT_ALT_MODEL overrides it.
+# picks another cloud model the Model step offers). UAT_ALT_MODEL names the one candidate instead (probed the same
+# way; "none" skips the probe).
+# probe_chat <model>: "ok" when the model answers one short chat with text, else why not (the body is built by
+# node, so no model name is ever spliced into JSON).
+probe_chat() {
+  node -e 'process.stdout.write(JSON.stringify({model:process.argv[1],stream:false,messages:[{role:"user",content:"Say hello in one short sentence."}]}))' "$1" \
+    | curl -s -m 60 "${OLLAMA_URL}/api/chat" -H 'Content-Type: application/json' --data-binary @- 2>/dev/null \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(j.message&&j.message.content?"ok":`no text: ${String(j.error||"empty reply").slice(0,160)}`)}catch{process.stdout.write("no JSON answer")}})' 2>/dev/null || true
+}
 ALT_MODEL="${UAT_ALT_MODEL:-}"
-if [[ -z "${ALT_MODEL}" && "${PROVIDER}" == ollama ]]; then
+if [[ "${PROVIDER}" == ollama && "${ALT_MODEL}" != none ]]; then
+  if [[ -n "${ALT_MODEL}" ]]; then alt_candidates="${ALT_MODEL}"; alt_from="UAT_ALT_MODEL"; else
+    alt_candidates=$(printf '%s' "${tags}" | node "${HERE}/lib/pick-ollama-model.mjs" alt "${PROVIDER_MODEL}" 2>>"${LOG_DIR}/provider.log" || true)
+    alt_from="each other \`:cloud\` model Ollama lists, smallest first"
+  fi
   ALT_MODEL=none
   while IFS= read -r candidate; do
     [[ -n "${candidate}" ]] || continue
-    answer=$(curl -s -m 60 "${OLLAMA_URL}/api/chat" -H 'Content-Type: application/json' \
-      -d "{\"model\":\"${candidate}\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one short sentence.\"}]}" 2>/dev/null \
-      | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(j.message&&j.message.content?"ok":`no text: ${String(j.error||"empty reply").slice(0,160)}`)}catch{process.stdout.write("no JSON answer")}})' 2>/dev/null || true)
+    answer=$(probe_chat "${candidate}")
     echo "J12 alternate model ${candidate}: ${answer:-no answer}" >>"${LOG_DIR}/provider.log"
     if [[ "${answer}" == ok ]]; then ALT_MODEL="${candidate}"; break; fi
-  done < <(printf '%s' "${tags}" | node "${HERE}/lib/pick-ollama-model.mjs" alt "${PROVIDER_MODEL}" 2>>"${LOG_DIR}/provider.log")
-  deviation "J12: to pick the other default model it switches to on Settings, the harness sent one short chat (\"Say hello in one short sentence.\") to each other \`:cloud\` model Ollama lists, smallest first, until one answered: ${ALT_MODEL} (\`logs/provider.log\`)."
+  done <<<"${alt_candidates}"
+  deviation "J12: to pick the other default model it switches to on Settings, the harness sent one short chat (\"Say hello in one short sentence.\") to ${alt_from}, until one answered: ${ALT_MODEL} (\`logs/provider.log\`)."
 fi
-{ echo "provider=${PROVIDER}"; echo "provider_model=${PROVIDER_MODEL}"; echo "embed_model=${EMBED_MODEL:-none}"; echo "alt_model=${ALT_MODEL:-unset}"; } >>"${EVIDENCE}/run.env"
+# J12 changes the embedding model to another one that is pulled: the embedding models Ollama lists (a Test that
+# fails for one of these is the product's failure, not a missing model).
+EMBED_MODELS_PULLED=""
+[[ -n "${tags}" ]] && EMBED_MODELS_PULLED=$(printf '%s' "${tags}" | node "${HERE}/lib/pick-ollama-model.mjs" embeds 2>>"${LOG_DIR}/provider.log" | tr '\n' ' ' | sed 's/ *$//' || true)
+{ echo "provider=${PROVIDER}"; echo "provider_model=${PROVIDER_MODEL}"; echo "embed_model=${EMBED_MODEL:-none}"; echo "embed_models_pulled=${EMBED_MODELS_PULLED}"; echo "alt_model=${ALT_MODEL:-unset}"; } >>"${EVIDENCE}/run.env"
 log "model provider: ${PROVIDER}${PROVIDER_MODEL:+ (${PROVIDER_MODEL})}; embedding model: ${EMBED_MODEL:-none}; J12's other model: ${ALT_MODEL:-unset}"
 
 # =============================================================================
@@ -1150,7 +1167,7 @@ else
   stop_ent_stub
 fi
 { echo "ent_stub_port=${ENT_STUB_PORT}"; echo "ent_token=${ENT_TOKEN}"; } >>"${EVIDENCE}/run.env"
-rm -f "${EVIDENCE}/journey-results.tsv" "${EVIDENCE}/journey-state.json" "${EVIDENCE}/journey-flow.txt" "${EVIDENCE}/stalls.tsv"
+rm -f "${EVIDENCE}/journey-results.tsv" "${EVIDENCE}/journey-state.json" "${EVIDENCE}/journey-flow.txt" "${EVIDENCE}/stalls.tsv" "${EVIDENCE}/restore-failures.tsv"
 set +e
 (cd "${PW_DIR}" && \
   UAT_CONSOLE_URL="${CONSOLE_URL}" \
@@ -1163,6 +1180,7 @@ set +e
   UAT_OLLAMA_BASE_URL="${OLLAMA_URL}/v1" \
   UAT_OLLAMA_EMBED_MODEL="${EMBED_MODEL}" \
   UAT_ALT_MODEL="${ALT_MODEL}" \
+  UAT_OLLAMA_EMBED_MODELS="${EMBED_MODELS_PULLED}" \
   UAT_GATEWAY_URL="${GW_URL}" \
   UAT_GATEWAY_AUTH_HEADER_FILE="${SECRETS_DIR}/h-auth" \
   UAT_GATEWAY_ADMIN_HEADER_FILE="${SECRETS_DIR}/h-admin" \

@@ -61,3 +61,12 @@ stalls_counted() {
   [[ -s "${file}" ]] || { printf '0'; return 0; }
   awk -F'\t' -v skip=" $* " 'NF && index(skip, " " $1 " ") == 0' "${file}" | wc -l | tr -d ' '
 }
+
+# restore_failures <restore-failures.tsv>: the steps that could not put back what they changed (J10's active
+# persona, J12's default model, memory setting and USER.md), one "<step>: <what>" line each. Each one counts
+# against the gate AND the DEMO SUBSET, whatever that step's own verdict: an uncounted step must not silently
+# change what the counted steps after it run on.
+restore_failures() {
+  [[ -s "$1" ]] || return 0
+  awk -F'\t' 'NF { printf "%s: %s\n", $1, $2 }' "$1"
+}

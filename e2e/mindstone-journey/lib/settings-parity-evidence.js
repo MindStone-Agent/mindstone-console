@@ -16,9 +16,12 @@
  * - modelMatchReasons: the model chosen in Settings is the saved route, shown
  *   on Settings, and the model the gateway's Pi session actually called.
  * - memoryChangeVerdict: after the embedding model changed, the Console warned
- *   before Save when memories from the old model existed, and recall after the
- *   change scored no vector of another size; a silent change that leaves old
- *   vectors behind is the product bug #140 names.
+ *   before Save when memories from the old model existed, and a chat after the
+ *   change answered with no recalled vector of another size; a silent change
+ *   that leaves old vectors behind is the product bug #140 names. Whatever
+ *   couldn't be exercised is PENDING, never a pass.
+ * - restoredIndexReasons: once the memory setting is put back, the recall
+ *   index holds only vectors the restored model can score (for J10).
  */
 
 /** The guided-setup steps (#102 flow, less Finish), and how Settings changes each one. */
@@ -106,7 +109,8 @@ const isCloudModel = (id) => /[:-]cloud$/.test(String(id ?? ''));
 function pickAlternateModel(values, current, preferred) {
   const candidates = [...new Set((values ?? []).filter((value) => typeof value === 'string' && value && value !== current && isCloudModel(value)))].sort();
   if (preferred === 'none') return undefined;
-  if (preferred) return candidates.find((value) => value === preferred || value.endsWith(`/${preferred}`));
+  // The probed model is an Ollama name: its Ollama id first, then the same name through another provider.
+  if (preferred) return [preferred, `ollama/${preferred}`].map((id) => candidates.find((value) => value === id)).find(Boolean) ?? candidates.find((value) => value.endsWith(`/${preferred}`));
   return candidates[0];
 }
 
@@ -142,6 +146,17 @@ function indexTotals(index) {
 }
 
 /**
+ * The words the product would use, on the memory step before Save, to warn that a new embedding model affects the
+ * memories another model embedded (#140): re-embedding or re-indexing, incompatibility, or memories embedded by
+ * another model. A neutral count ("43 memories indexed") is not a warning.
+ */
+const EMBEDDING_WARNING =
+  /re-?index|re-?embed|incompatib|rebuil|(another|a different|the old|the previous|the current|this) (embedding )?model (embedded|made|produced)|(embedded|made) (by|with) (another|a different|the old|the previous) (embedding )?model/i;
+
+/** How a recalled chunk's size reads: a vector size, or unknown (null: not embedded or gone; -1: unreadable). */
+const knownSize = (dims) => typeof dims === 'number' && dims > 0;
+
+/**
  * The embedding change, judged (MindStone-Agent #140: vectors from another
  * model must never be scored against the new one). Inputs:
  * - `before` { spec, dims, chunks }: the saved embeddingProvider, its vector
@@ -151,44 +166,103 @@ function indexTotals(index) {
  * - `warned`: the product's own words about those memories, shown on the
  *   memory step before Save, if any;
  * - `index`: the recall index read after the save ({ present, byDims, pending });
- * - `recallHits` [{ chunkId, dims }]: the chunks recall supplied to a chat run
- *   after the change, with their vector size (undefined: no such chat ran).
- * Rules: the model must change and its Test give a size; when the index held
- * memories from the old model, the Console must say so before Save; and recall
- * after the change must not score a chunk whose vector is another size (it is
- * re-embedded first, or left out). A silent change with old vectors still in
- * the index is the product bug #140 names. Returns { verdict: 'pass' | 'fail',
- * why, stale } (`stale`: embedded chunks whose size isn't the new model's).
+ * - `probe`: the chat run after the change ({ error, text, hits: [{ chunkId,
+ *   dims }] }, `dims` each recalled chunk's size read after the chat), or
+ *   undefined when none could run (automatic recall off).
+ * Rules:
+ * - the warning: when the index held memories from the old model, the Console
+ *   must say so before Save (the same vector size is no excuse); with none,
+ *   the warning can't be exercised (PENDING, never a vacuous pass);
+ * - recall after the change: the chat must answer (an error or an empty reply
+ *   FAILs, it is never clean evidence); no recalled chunk may be of another
+ *   size than the new model's; a chunk whose size can't be read, no chunk
+ *   recalled at all, or no chat, leave it unproven (PENDING).
+ * Returns { verdict: 'pass' | 'fail' | 'pending', why, reasons, unproven,
+ * stale } (`stale`: embedded chunks whose size isn't the new model's).
  */
-function memoryChangeVerdict({ before, after, warned, index, recallHits }) {
-  if (!before?.spec || !after?.spec) return { verdict: 'fail', why: 'the embedding model before or after the change is not known', stale: 0 };
-  if (before.spec === after.spec) return { verdict: 'fail', why: `the embedding model did not change (${after.spec})`, stale: 0 };
-  if (!(after.dims > 0)) return { verdict: 'fail', why: `the new model's Test gave no dimension count (${after.spec})`, stale: 0 };
+function memoryChangeVerdict({ before, after, warned, index, probe }) {
+  const done = (verdict, why, extra = {}) => ({ verdict, why, reasons: [], unproven: [], stale: 0, ...extra });
+  if (!before?.spec || !after?.spec) return done('fail', 'the embedding model before or after the change is not known');
+  if (before.spec === after.spec) return done('fail', `the embedding model did not change (${after.spec})`);
+  if (!(after.dims > 0)) return done('fail', `the new model's Test gave no dimension count (${after.spec})`);
   const { byDims } = indexTotals(index);
   const stale = Object.entries(byDims)
     .filter(([dims]) => Number(dims) !== after.dims)
     .reduce((sum, [, n]) => sum + Number(n || 0), 0);
   const sizes = Object.entries(byDims).map(([dims, n]) => `${n} at ${dims}`).join(', ') || 'none';
   const state = `the recall index now holds ${sizes}${index?.pending ? ` (${index.pending} pending)` : ''}`;
-  const scored = (recallHits ?? []).filter((hit) => typeof hit?.dims === 'number' && hit.dims > 0 && hit.dims !== after.dims);
   const reasons = [];
-  if (before.chunks > 0 && !warned) {
+  const unproven = [];
+
+  // The warning before Save.
+  if (!(before.chunks > 0)) {
+    unproven.push(`the warning: no memories were embedded before the change (${index?.present ? `${before.chunks ?? 0} chunks` : 'no recall index'}), so there was nothing to warn about`);
+  } else if (!warned) {
     reasons.push(
       `${stale ? 'PRODUCT BUG: ' : ''}the Console saved ${after.spec} (${after.dims} dimensions) in place of ${before.spec} (${before.dims || '?'}) with no warning before Save, ` +
         `though ${before.chunks} memories were embedded by ${before.spec}; ${state}` +
         `${stale ? `, so recall compares ${after.dims}-dimension queries with ${stale} vector(s) of another size` : ''}`,
     );
   }
-  if (scored.length) {
+
+  // Recall after the change.
+  if (!probe) {
+    unproven.push('recall after the change: no chat ran with automatic recall on');
+  } else if (probe.error || !String(probe.text ?? '').trim()) {
     reasons.push(
-      `recall after the change scored ${scored.length} chunk(s) embedded at another size against ${after.spec} (${scored.map((hit) => `${hit.chunkId} at ${hit.dims}`).join(', ')}): ` +
-        'chunks from the old model must be re-embedded or left out',
+      `the chat after the embedding change did not answer (${probe.error ? `the Console stored an error: ${String(probe.errorText ?? '').slice(0, 200)}` : 'an empty reply'}); ` +
+        'recall with the new model must work, and a failed chat is no evidence that old vectors were left out',
+    );
+  } else {
+    const hits = Array.isArray(probe.hits) ? probe.hits : [];
+    const scored = hits.filter((hit) => knownSize(hit?.dims) && hit.dims !== after.dims);
+    const unknown = hits.filter((hit) => !knownSize(hit?.dims));
+    if (scored.length) {
+      reasons.push(
+        `recall after the change scored ${scored.length} chunk(s) embedded at another size against ${after.spec} (${scored.map((hit) => `${hit.chunkId} at ${hit.dims}`).join(', ')}): ` +
+          'chunks from the old model must be re-embedded or left out',
+      );
+    }
+    if (unknown.length) {
+      unproven.push(`recall after the change: ${unknown.length} recalled chunk(s) whose size can't be read after the chat (${unknown.map((hit) => `${hit.chunkId}: ${hit.dims === -1 ? 'unreadable' : 'no vector'}`).join(', ')})`);
+    }
+    if (!hits.length && before.chunks > 0) {
+      unproven.push('recall after the change: recall supplied no chunk to the chat, so whether it scores old vectors is not observable');
+    }
+  }
+
+  if (reasons.length) return done('fail', reasons.join('; '), { reasons, unproven, stale });
+  if (unproven.length) return done('pending', `not proven: ${unproven.join('; ')}; ${state}`, { unproven, stale });
+  const recalled = probe.hits.length;
+  return done(
+    'pass',
+    `the Console warned before Save ("${warned}"); recall after the change scored ${recalled} chunk(s), all at ${after.dims} dimensions; ${state}` +
+      `${before.dims === after.dims ? ' (the same size: old vectors cannot be told apart by size)' : ''}`,
+    { stale },
+  );
+}
+
+/**
+ * Why the recall index isn't back in a state the restored model can use
+ * (J12 puts the memory setting back, then J10 recalls with it): after the
+ * restore and a chat under it, every embedded chunk must be at the restored
+ * model's size `dims` (chunks J12's chat after the change embedded with the
+ * other model must have been re-embedded, or removed), and none unreadable.
+ * Pending chunks are fine: the restored model embeds them. Empty when usable.
+ */
+function restoredIndexReasons({ spec, dims, index }) {
+  if (!index?.present) return [];
+  if (!(dims > 0)) return [`the restored model's vector size (${spec}) is not known, so the index can't be checked`];
+  const reasons = [];
+  const other = Object.entries(index.byDims ?? {}).filter(([size, n]) => Number(size) !== dims && Number(n) > 0);
+  if (other.length) {
+    reasons.push(
+      `after the memory setting was put back to ${spec} (${dims} dimensions), the recall index still holds ${other.map(([size, n]) => `${n} chunk(s) at ${size}`).join(', ')}: ` +
+        'later recall (J10) would score them against the restored model',
     );
   }
-  if (reasons.length) return { verdict: 'fail', why: reasons.join('; '), stale };
-  const said = warned ? `the Console warned before Save ("${warned}")` : `no memories were embedded before the change (${before.chunks ?? 0}), so there was nothing to warn about`;
-  const recall = recallHits === undefined ? 'no recall ran after the change' : `recall after the change scored ${recallHits.length} chunk(s), none at another size`;
-  return { verdict: 'pass', why: `${said}; ${recall}; ${state}${before.dims === after.dims ? ' (the same size: old vectors cannot be told apart by size)' : ''}`, stale };
+  if (index.unreadable > 0) reasons.push(`the recall index holds ${index.unreadable} unreadable vector(s)`);
+  return reasons;
 }
 
 module.exports = {
@@ -202,4 +276,6 @@ module.exports = {
   pickAlternateModel,
   modelMatchReasons,
   memoryChangeVerdict,
+  restoredIndexReasons,
+  EMBEDDING_WARNING,
 };

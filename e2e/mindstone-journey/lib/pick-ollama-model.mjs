@@ -4,6 +4,7 @@
 //   node pick-ollama-model.mjs chat <allow-local 0|1> <max local GB>
 //   node pick-ollama-model.mjs embed
 //   node pick-ollama-model.mjs alt <current model>
+//   node pick-ollama-model.mjs embeds
 //
 // chat: the smallest ":cloud" model already listed. It runs remotely, so a
 //   shared Ollama never has to load anything for the journey. A local chat
@@ -16,7 +17,9 @@
 // alt: J12's candidates for another default model: every ":cloud" chat model
 //   other than <current>, smallest first, one per line (run-journey.sh asks
 //   each for a short reply and passes on the first that answers).
-// Prints the model name (alt: names), or nothing.
+// embeds: every embedding model already pulled (J12 changes to another), one
+//   per line.
+// Prints the model name (alt, embeds: names), or nothing.
 const mode = process.argv[2];
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
@@ -45,12 +48,16 @@ if (mode === 'embed') {
       `picked: ${pick?.name ?? 'none'}`,
   );
   if (pick) process.stdout.write(pick.name);
+} else if (mode === 'embeds') {
+  const embeds = all.filter((m) => isEmbed(m) && !isCloud(m)).map((m) => m.name).sort();
+  console.error(`ollama: embedding models pulled (for J12): ${embeds.join(', ') || 'none'}`);
+  if (embeds.length) process.stdout.write(`${embeds.join('\n')}\n`);
 } else if (mode === 'alt') {
   const current = process.argv[3] ?? '';
   const cloud = all.filter((m) => !isEmbed(m) && isCloud(m) && m.name !== current).sort((a, b) => a.size - b.size || a.name.localeCompare(b.name));
   console.error(`ollama: other cloud chat models for J12: ${cloud.map((m) => m.name).join(', ') || 'none'}`);
   if (cloud.length) process.stdout.write(`${cloud.map((m) => m.name).join('\n')}\n`);
 } else {
-  console.error('usage: pick-ollama-model.mjs chat <allow-local> <max-gb> | embed | alt <current>');
+  console.error('usage: pick-ollama-model.mjs chat <allow-local> <max-gb> | embed | embeds | alt <current>');
   process.exit(2);
 }
