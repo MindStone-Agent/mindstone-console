@@ -189,6 +189,7 @@ export default function PrivateKnowledgebases({
                 {kb.reembed && (
                   <KbReembedNote
                     reembed={kb.reembed}
+                    kbId={kb.id}
                     testId={`ms-pkb-reembed-${kb.id}`}
                     retryPath={`${personaPath}/${encodeURIComponent(kb.id)}/reembed`}
                     onRetried={() => void load()}

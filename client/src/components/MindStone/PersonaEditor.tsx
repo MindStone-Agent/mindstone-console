@@ -408,6 +408,7 @@ export default function PersonaEditor({
                 {kb.reembed && (
                   <KbReembedNote
                     reembed={kb.reembed}
+                    kbId={kb.id}
                     testId={`ms-pe-global-kb-reembed-${kb.id}`}
                     retryPath={
                       SHARED_KB_ID.test(kb.id)
