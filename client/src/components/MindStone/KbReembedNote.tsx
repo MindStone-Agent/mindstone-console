@@ -67,7 +67,8 @@ export default function KbReembedNote({
       )}
       {reembed.gaveUp && !retryPath && (
         <span className="block" data-testid={`${testId}-cli`}>
-          {localize('com_mindstone_kb_reembed_cli', { 0: visibleText(kbId) })}
+          {/* Quoted for the shell: these are the names with spaces (MindStone-Agent #164 review). */}
+          {localize('com_mindstone_kb_reembed_cli', { 0: visibleText(`'${kbId.replace(/'/g, "'\\''")}'`) })}
         </span>
       )}
       {retry === 'failed' && (
