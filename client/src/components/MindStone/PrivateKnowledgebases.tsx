@@ -75,7 +75,7 @@ export default function PrivateKnowledgebases({
     void load();
   }, [load]);
 
-  const run = async (work: () => Promise<unknown>, done: string) => {
+  const run = async (work: () => Promise<unknown>, done: string, slowNote?: string) => {
     setBusy(true);
     setMessage(null);
     try {
@@ -83,7 +83,12 @@ export default function PrivateKnowledgebases({
       setMessage({ ok: true, text: done });
       return true;
     } catch (error) {
-      setMessage({ ok: false, text: errorText(error) ?? localize('com_mindstone_not_changed') });
+      // The proxy stopped waiting (502/504 without the gateway's own text):
+      // the gateway may still finish, so the page doesn't say "not changed".
+      const status = (error as { response?: { status?: number } })?.response?.status;
+      const text =
+        errorText(error) ?? (slowNote && (status === 502 || status === 504) ? slowNote : undefined);
+      setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') });
       return false;
     } finally {
       setBusy(false);
@@ -103,6 +108,8 @@ export default function PrivateKnowledgebases({
     if (ok) {
       setNewKb({ id: '', name: '' });
       await load();
+      setText({ name: '', text: '' });
+      setUrl({ name: '', url: '' });
       setOpen(id);
       await loadSources(id);
     }
@@ -121,15 +128,19 @@ export default function PrivateKnowledgebases({
 
   const ingest = async (kbId: string) => {
     let entries = 0;
-    const ok = await run(async () => {
-      const result = (await request.post(
-        `${personaPath}/${encodeURIComponent(kbId)}/ingest`,
-        {},
-      )) as {
-        knowledgebase: { entryCount: number };
-      };
-      entries = result.knowledgebase.entryCount;
-    }, '');
+    const ok = await run(
+      async () => {
+        const result = (await request.post(
+          `${personaPath}/${encodeURIComponent(kbId)}/ingest`,
+          {},
+        )) as {
+          knowledgebase: { entryCount: number };
+        };
+        entries = result.knowledgebase.entryCount;
+      },
+      '',
+      localize('com_mindstone_pkb_ingest_slow'),
+    );
     if (ok) {
       setMessage({
         ok: true,
@@ -178,6 +189,9 @@ export default function PrivateKnowledgebases({
                   )}
                   onClick={() => {
                     const next = open === kb.id ? null : kb.id;
+                    // Drafts belong to the KB they were typed for.
+                    setText({ name: '', text: '' });
+                    setUrl({ name: '', url: '' });
                     setOpen(next);
                     setSources(null);
                     if (next) void loadSources(next);
@@ -191,7 +205,12 @@ export default function PrivateKnowledgebases({
                   type="button"
                   className={primary}
                   // Nothing to ingest until it has a source.
-                  disabled={busy || kb.sourceCount === 0}
+                  // A URL source is fetched at ingest, which needs advanced settings.
+                  disabled={
+                    busy ||
+                    kb.sourceCount === 0 ||
+                    (!advanced && sources?.kbId === kb.id && sources.list.urls.length > 0)
+                  }
                   aria-label={localize('com_mindstone_pkb_ingest_named', { 0: kb.id })}
                   data-testid={`ms-pkb-${kb.id}-ingest`}
                   onClick={() => void ingest(kb.id)}

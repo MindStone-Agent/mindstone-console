@@ -135,6 +135,11 @@ export default function PersonaEditor({
   const primary = 'rounded bg-surface-submit px-3 py-1 text-white disabled:opacity-50';
   const section = 'flex flex-col gap-2 border-t border-border-light pt-3';
   const workflowName = (id: string) => workflows.find((workflow) => workflow.id === id)?.name;
+  /** A listed workflow that no longer loads (or is gone): marked, so Remove can fix a save the gateway refuses. */
+  const workflowBroken = (id: string) => {
+    const found = workflows.find((workflow) => workflow.id === id);
+    return !found || Boolean(found.error);
+  };
   const attachable = workflows.filter(
     (workflow) => !workflow.error && !form.workflows.includes(workflow.id),
   );
@@ -242,6 +247,14 @@ export default function PersonaEditor({
               >
                 <span>
                   {index + 1}. {visibleText(workflowName(id) ?? id)}{' '}
+                  {workflowBroken(id) && (
+                    <span
+                      className="text-xs text-red-600"
+                      data-testid={`ms-pe-workflow-broken-${id}`}
+                    >
+                      {localize('com_mindstone_pe_workflow_broken')}
+                    </span>
+                  )}{' '}
                   <span className="font-mono text-xs text-text-secondary">{visibleText(id)}</span>
                 </span>
                 <span className="flex gap-1">

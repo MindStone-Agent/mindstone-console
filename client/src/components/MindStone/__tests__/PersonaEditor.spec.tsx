@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import PersonaEditor from '../PersonaEditor';
 
 const mockLocalize = (key: string, values?: Record<string, string>) =>
@@ -369,5 +369,57 @@ describe('persona editor (MindStone-Agent #125)', () => {
         expect.objectContaining({ name: 'Triage', version: '3' }),
       ),
     );
+  });
+
+  it('marks a listed workflow that is gone, and a broken global KB can not be newly ticked', async () => {
+    serve({ persona: { ...ATLAS, workflows: ['gone'] } });
+    const read = mockGet.getMockImplementation()!;
+    mockGet.mockImplementation((url: string) =>
+      url === `${BASE}/knowledgebases`
+        ? Promise.resolve({
+            knowledgebases: [
+              { id: 'g1', name: 'Plant handbook', indexed: true, entryCount: 3, sourceCount: 1 },
+              { id: 'bad', name: 'bad', indexed: false, entryCount: 0, sourceCount: 0, error: 'x' },
+            ],
+          })
+        : read(url),
+    );
+    await renderEditor('atlas');
+    expect(screen.getByTestId('ms-pe-workflow-broken-gone')).toBeInTheDocument();
+    expect(screen.getByTestId('ms-pe-global-kb-bad')).toBeDisabled();
+    expect(screen.getByTestId('ms-pe-global-kb-g1')).toBeEnabled();
+  });
+
+  it("a slow answer for one KB's sources never replaces the open KB's", async () => {
+    serve({
+      persona: ATLAS,
+      privateKbs: [
+        { id: 'aaa', name: 'aaa', indexed: true, entryCount: 1, sourceCount: 1 },
+        { id: 'bbb', name: 'bbb', indexed: true, entryCount: 1, sourceCount: 1 },
+      ],
+    });
+    const read = mockGet.getMockImplementation()!;
+    let releaseA: (value: unknown) => void = () => undefined;
+    mockGet.mockImplementation((url: string) => {
+      if (url.endsWith('/aaa/sources')) return new Promise((resolve) => (releaseA = resolve));
+      if (url.endsWith('/bbb/sources'))
+        return Promise.resolve({ sources: { text: ['b-source'], urls: [] } });
+      return read(url);
+    });
+    await renderEditor('atlas');
+    const kbs$ = await screen.findByTestId('ms-private-kbs');
+    fireEvent.click(
+      await within(kbs$).findByRole('button', { name: 'com_mindstone_pkb_sources_named:aaa' }),
+    );
+    fireEvent.click(
+      within(kbs$).getByRole('button', { name: 'com_mindstone_pkb_sources_named:bbb' }),
+    );
+    expect(await within(kbs$).findByText('b-source.md')).toBeInTheDocument();
+    await act(async () => {
+      releaseA({ sources: { text: ['a-source'], urls: [] } });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(within(kbs$).getByText('b-source.md')).toBeInTheDocument();
+    expect(within(kbs$).queryByText('a-source.md')).not.toBeInTheDocument();
   });
 });

@@ -3382,6 +3382,8 @@
   "com_mindstone_move_down_named": "Move {{0}} down",
   "com_mindstone_pe_edit_named": "Edit {{0}}",
   "com_mindstone_pe_kb_broken": "can't be loaded: uncheck it to save",
+  "com_mindstone_pe_workflow_broken": "can't be loaded: remove it to save",
+  "com_mindstone_pkb_ingest_slow": "The ingest took longer than this page waits; it may still finish. Reload the list in a minute to check.",
   "com_mindstone_pe_kb_missing": "attached, but no longer available: remove it to save",
   "com_mindstone_wf_live_note": "Saving a workflow takes effect at once wherever it runs: as the active workflow, through a workflow route rule, or for a persona that lists it. A step that hands the turn to a persona makes that persona answer those turns.",
   "com_mindstone_wf_persona_unavailable": "{{0}} (not available)",
