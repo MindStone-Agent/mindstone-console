@@ -168,35 +168,70 @@ const bareModel = (spec) =>
     .replace(/:latest$/, '');
 
 /**
- * THE rule both J12 memory checks judge by (MindStone-Agent #140's contract: every chunk records the model that
- * embedded it, recall never compares across models, the backfill re-embeds chunks from other models): whether a
- * chunk's vector is `model`'s ({ spec, dims }).
- * - 'same': the chunk records `model` (its model record decides when there is one), or, with no record, its
- *   vector is `model`'s size;
- * - 'other': it records another model, or, with no record, its vector is another size;
- * - 'unknown': no record, and no vector size to go by (not embedded, gone, or unreadable), or `model`'s size isn't known.
- * With no record, two models of the same size can't be told apart: that reads 'same'.
+ * THE rule both J12 memory checks judge by (MindStone-Agent #140 at 452aa06: `memory_chunks.embedding_spec` is exactly
+ * `<provider id>:<model>`; NULL means a vector embedded before the model was recorded, which never counts as the
+ * current model's; recall scores only the current model's vectors, and finds other chunks by their words until the
+ * per-turn backfill re-embeds them): whether a chunk's vector is `model`'s ({ spec, dims }).
+ * - 'same': it records `model`'s spec (provider prefix and `:latest` aside);
+ * - 'other': it records another spec; or the index records specs (`recorded`) and this embedded chunk has none;
+ *   or, in an index from before #140 (no record at all), its vector is another size;
+ * - 'unknown': no vector (not embedded yet, or gone), or, before #140, no size to go by.
  */
 function vectorOf(chunk, model) {
   if (chunk?.model) return bareModel(chunk.model) === bareModel(model?.spec) ? 'same' : 'other';
+  const embedded = knownSize(chunk?.dims) || chunk?.dims === -1;
+  if (chunk?.recorded) return embedded ? 'other' : 'unknown';
   if (!knownSize(chunk?.dims) || !(model?.dims > 0)) return 'unknown';
   return chunk.dims === model.dims ? 'same' : 'other';
 }
 
+/**
+ * How many embedded chunks aren't `model`'s (vectorOf): #140's index-clean count (`embedding_json IS NOT NULL AND
+ * (embedding_spec IS NULL OR embedding_spec != '<spec>')`), which the backfill after a turn brings to 0.
+ */
+function otherModelCount(chunks, model) {
+  return (chunks ?? []).filter((chunk) => (knownSize(chunk?.dims) || chunk?.dims === -1) && vectorOf(chunk, model) === 'other').length;
+}
+
 /** A chunk for a message: its id, its size or "no vector" / "unreadable", and its model record. */
 const describe = (chunk) =>
-  `${chunk?.chunkId} (${knownSize(chunk?.dims) ? `${chunk.dims} dims` : chunk?.dims === -1 ? 'unreadable' : 'no vector'}${chunk?.model ? `, ${chunk.model}` : ''})`;
+  `${chunk?.chunkId} (${knownSize(chunk?.dims) ? `${chunk.dims} dims` : chunk?.dims === -1 ? 'unreadable' : 'no vector'}${chunk?.model ? `, ${chunk.model}` : ''}${chunk?.recallMode ? `, by ${chunk.recallMode}` : ''})`;
 
 /**
- * The chunks recall supplied to a chat, judged by the rule against the model the chat ran under: { other, unknown }
- * (other: from another model, a failure; unknown: can't be told, unproven).
+ * Whether recall found a chunk by its vector. The gateway's memory_recall_injected event records each hit's
+ * `recallMode`: "embedding" (scored by vector) or "lexical" (found by its words). #140 finds a chunk another model
+ * embedded by its words until the backfill re-embeds it: that is by design, and never scores its vector. A hit with
+ * no recallMode (a gateway that doesn't record it) counts as a vector hit, so nothing is excused unseen.
+ */
+const byVector = (hit) => hit?.recallMode !== 'lexical';
+
+/**
+ * The chunks recall supplied to a chat, judged by the rule against the model the chat ran under: { other, unknown,
+ * lexical } (other: a vector hit from another model, a failure; unknown: a vector hit that can't be told, unproven;
+ * lexical: found by words, not judged).
  */
 function recalledFrom(hits, model) {
   const list = Array.isArray(hits) ? hits : [];
+  const vector = list.filter(byVector);
   return {
-    other: list.filter((hit) => vectorOf(hit, model) === 'other'),
-    unknown: list.filter((hit) => vectorOf(hit, model) === 'unknown'),
+    other: vector.filter((hit) => vectorOf(hit, model) === 'other'),
+    unknown: vector.filter((hit) => vectorOf(hit, model) === 'unknown'),
+    lexical: list.filter((hit) => !byVector(hit)),
   };
+}
+
+/**
+ * The chunks recall supplied, as they were when it scored them: `modes` the hits' [chunkId, recallMode] in order,
+ * `snapshot` the index read just before the chat, `now` the index read after it (for a chunk the snapshot doesn't
+ * have). What the chat's own turn embeds afterwards (the backfill re-embedding an old chunk) can't change the verdict.
+ */
+function hitsAsScored({ modes, snapshot, now }) {
+  const before = new Map((snapshot ?? []).map((chunk) => [chunk.chunkId, chunk]));
+  const after = new Map((now ?? []).map((chunk) => [chunk.chunkId, chunk]));
+  return (modes ?? []).map(([chunkId, mode]) => ({
+    ...(before.get(chunkId) ?? after.get(chunkId) ?? { chunkId, dims: null, model: null }),
+    ...(mode ? { recallMode: mode } : {}),
+  }));
 }
 
 /**
@@ -204,7 +239,10 @@ function recalledFrom(hits, model) {
  * - `before` { spec, dims, chunks }: the saved embeddingProvider, its vector size, and how many chunks the recall
  *   index held embedded before the change (the memories another model embedded);
  * - `after` { spec, dims }: the new model and its Test's dimension count;
- * - `warned`: the product's own words about those memories, shown on the memory step before Save, if any;
+ * - `warned`: the product's own words about those memories, shown on the memory step before Save, if any (#140:
+ *   ms-onb-memory-reembed, "N memories were embedded by another model…");
+ * - `reported`: the memory check's own count of them (POST /admin/memory/check `index.otherModel`), if it gave one:
+ *   with memories before the change it must be above 0, and the warning must show that number;
  * - `index`: the recall index read after the save ({ present, byDims, pending });
  * - `probe`: what ran after the change, or undefined when nothing could (automatic recall off): a fact told in one
  *   chat ({ fact: the index chunks that captured it, with dims and model }), asked for in a fresh chat
@@ -212,14 +250,17 @@ function recalledFrom(hits, model) {
  * Rules:
  * - the warning: when the index held memories from the old model, the Console must say so before Save (the same
  *   vector size is no excuse); with none, the warning can't be exercised (PENDING, never a vacuous pass);
- * - recall after the change (vectorOf): the chats must answer (an error or an empty reply FAILs, never clean
- *   evidence); the new fact must be embedded by the new model; no recalled chunk may be from another model. With
- *   the fact captured, recall supplying nothing FAILs (there was something to recall); PENDING only when there was
- *   genuinely nothing to recall (the fact wasn't captured), or a recalled chunk can't be told apart.
+ * - recall after the change (vectorOf, on the index as it was just before the asking chat): the chats must answer
+ *   (an error or an empty reply FAILs, never clean evidence); the new fact must be embedded by the new model and
+ *   recalled by its vector (recallMode "embedding"); no chunk recalled by its vector may be another model's (one
+ *   found by its words is #140's design). PENDING only when there was genuinely nothing to recall (the fact
+ *   wasn't captured), or a vector hit can't be told apart.
+ * - the re-embed (`reembedded` { otherLeft, waitedMs }): after those chats, the per-turn backfill must bring the
+ *   count of embedded chunks that aren't the new model's (otherModelCount) to 0.
  * Returns { verdict: 'pass' | 'fail' | 'pending', why, reasons, unproven, stale } (`stale`: embedded chunks whose
  * size isn't the new model's).
  */
-function memoryChangeVerdict({ before, after, warned, index, probe }) {
+function memoryChangeVerdict({ before, after, warned, reported, index, probe, reembedded }) {
   const done = (verdict, why, extra = {}) => ({ verdict, why, reasons: [], unproven: [], stale: 0, ...extra });
   if (!before?.spec || !after?.spec) return done('fail', 'the embedding model before or after the change is not known');
   if (before.spec === after.spec) return done('fail', `the embedding model did not change (${after.spec})`);
@@ -236,6 +277,10 @@ function memoryChangeVerdict({ before, after, warned, index, probe }) {
   // The warning before Save.
   if (!(before.chunks > 0)) {
     unproven.push(`the warning: no memories were embedded before the change (${index?.present ? `${before.chunks ?? 0} chunks` : 'no recall index'}), so there was nothing to warn about`);
+  } else if (reported !== undefined && !(reported > 0)) {
+    reasons.push(
+      `the memory check for ${after.spec} reported ${reported} memories embedded by another model (index.otherModel), though ${before.chunks} were embedded by ${before.spec}`,
+    );
   } else if (!warned) {
     reasons.push(
       `${stale ? 'PRODUCT BUG: ' : ''}the Console saved ${after.spec} (${after.dims} dimensions) in place of ${before.spec} (${before.dims || '?'}) with no warning before Save, ` +
@@ -244,8 +289,13 @@ function memoryChangeVerdict({ before, after, warned, index, probe }) {
     );
   }
 
+  // The warning's count is the gateway's (index.otherModel).
+  const shownCount = Number(String(warned ?? '').match(/\d+/)?.[0] ?? NaN);
+  if (warned && reported > 0 && shownCount !== reported) reasons.push(`the warning says ${shownCount || 'no number'}, but the memory check reported ${reported} memories embedded by another model`);
+
   // Recall after the change.
   let recalled = 0;
+  let lexicalNote = '';
   if (!probe) {
     unproven.push('recall after the change: no chat ran with automatic recall on');
   } else if (probe.error || !String(probe.text ?? '').trim()) {
@@ -257,15 +307,35 @@ function memoryChangeVerdict({ before, after, warned, index, probe }) {
     const fact = Array.isArray(probe.fact) ? probe.fact : [];
     const factOther = fact.filter((chunk) => vectorOf(chunk, after) === 'other');
     if (factOther.length) reasons.push(`the fact told after the change was embedded by another model than ${after.spec}: ${factOther.map(describe).join(', ')}`);
-    const { other, unknown } = recalledFrom(probe.hits, after);
+    const { other, unknown, lexical } = recalledFrom(probe.hits, after);
     recalled = (probe.hits ?? []).length;
+    lexicalNote = lexical.length ? `; ${lexical.length} found by words (not judged: #140 finds another model's chunks by words until the backfill re-embeds them)` : '';
     if (other.length) {
-      reasons.push(`recall after the change scored ${other.length} chunk(s) from another model than ${after.spec}: ${other.map(describe).join(', ')}; chunks from the old model must be re-embedded or left out`);
+      reasons.push(`recall after the change scored ${other.length} chunk(s) by the vector of another model than ${after.spec}: ${other.map(describe).join(', ')}; chunks from the old model must be re-embedded, or found by words only`);
     }
     if (unknown.length) unproven.push(`recall after the change: ${unknown.length} recalled chunk(s) whose model can't be told (${unknown.map(describe).join(', ')})`);
-    if (!recalled) {
-      if (fact.length) reasons.push(`recall after the change supplied nothing, though the fact told after it is in the index (${fact.map(describe).join(', ')}): recall with the new model doesn't work`);
-      else unproven.push('recall after the change: the fact told after it was not captured in time, so there was nothing to recall');
+    // The positive proof (N2): the new fact itself, recalled by its vector, from the new model.
+    if (!fact.length) {
+      unproven.push('recall after the change: the fact told after it was not captured in time, so there was nothing to recall');
+    } else {
+      const ids = new Set(fact.map((chunk) => chunk.chunkId));
+      const factHits = (probe.hits ?? []).filter((hit) => ids.has(hit.chunkId));
+      const proven = factHits.filter((hit) => hit.recallMode === 'embedding' && vectorOf(hit, after) === 'same');
+      if (!proven.length) {
+        reasons.push(
+          `recall after the change did not find the new fact by the new model's vector (${after.spec}): the fact is in ${fact.map(describe).join(', ')}; ` +
+            `recall supplied ${factHits.length ? factHits.map(describe).join(', ') : 'none of its chunks'}${recalled ? ` among ${recalled} hit(s)` : ' (nothing at all)'}`,
+        );
+      }
+    }
+  }
+
+  // The backfill after the post-change turns re-embeds every chunk from another model (#140): the index-clean
+  // count must reach 0 (`reembedded` { otherLeft, waitedMs }, polled after the chats).
+  if (probe && !reasons.length) {
+    if (!reembedded) unproven.push('the re-embed after the change: the index-clean count was not read');
+    else if (reembedded.otherLeft > 0) {
+      reasons.push(`${reembedded.otherLeft} embedded chunk(s) were still another model's ${Math.round((reembedded.waitedMs ?? 0) / 1000)} s after the chats under ${after.spec}: the backfill did not re-embed them`);
     }
   }
 
@@ -273,7 +343,7 @@ function memoryChangeVerdict({ before, after, warned, index, probe }) {
   if (unproven.length) return done('pending', `not proven: ${unproven.join('; ')}; ${state}`, { unproven, stale });
   return done(
     'pass',
-    `the Console warned before Save ("${warned}"); recall after the change scored ${recalled} chunk(s), none from another model; ${state}` +
+    `the Console warned before Save ("${warned}"); recall after the change supplied ${recalled} chunk(s), none by another model's vector${lexicalNote}; ${state}` +
       `${before.dims === after.dims ? ' (the same size: without a model record, old vectors cannot be told apart by size)' : ''}`,
     { stale },
   );
@@ -294,9 +364,10 @@ function restoredIndexReasons({ spec, dims, present, chunks, recalled }) {
   const reasons = [];
   const list = Array.isArray(chunks) ? chunks : [];
   const other = list.filter((chunk) => vectorOf(chunk, model) === 'other');
-  const untagged = other.filter((chunk) => !chunk.model);
-  const tagged = other.filter((chunk) => chunk.model);
-  const unreadable = list.filter((chunk) => chunk?.dims === -1 && !chunk.model);
+  // Another model's by its record (a spec, or none in an index that records them) vs by size alone (an index from before #140).
+  const untagged = other.filter((chunk) => !chunk.model && !chunk.recorded);
+  const tagged = other.filter((chunk) => chunk.model || chunk.recorded);
+  const unreadable = list.filter((chunk) => chunk?.dims === -1 && !chunk.model && !chunk.recorded);
   if (untagged.length) {
     reasons.push(
       `after the memory setting was put back to ${spec} (${dims} dimensions), the recall index still holds ${untagged.length} chunk(s) of another size with no model record ` +
@@ -309,7 +380,7 @@ function restoredIndexReasons({ spec, dims, present, chunks, recalled }) {
       reasons.push(`${tagged.length} chunk(s) record another model (${summarize(tagged)}), and no chat ran under ${spec} to show recall leaves them out`);
     } else {
       const { other: scored } = recalledFrom(recalled, model);
-      if (scored.length) reasons.push(`recall under the restored ${spec} scored ${scored.length} chunk(s) from another model: ${scored.map(describe).join(', ')}`);
+      if (scored.length) reasons.push(`recall under the restored ${spec} scored ${scored.length} chunk(s) by the vector of another model: ${scored.map(describe).join(', ')}`);
     }
   }
   return reasons;
@@ -355,5 +426,8 @@ module.exports = {
   restoredIndexReasons,
   restoreOutcome,
   vectorOf,
+  otherModelCount,
+  byVector,
+  hitsAsScored,
   EMBEDDING_WARNING,
 };

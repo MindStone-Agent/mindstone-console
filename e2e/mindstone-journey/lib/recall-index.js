@@ -43,18 +43,14 @@ function queryRecallIndex(dbPath, mode, args = []) {
 }
 
 /**
- * The SQL for the embedding model a chunk records: a column named for it (the first of EMBEDDING_MODEL_COLUMNS the
- * table has), else a key in metadata_json, else NULL (the index records none). MindStone-Agent #140 adds the record;
- * adjust the names here if it lands under another one.
+ * The embedding model a chunk records: MindStone-Agent #140 (452aa06) adds `memory_chunks.embedding_spec` (TEXT),
+ * exactly `<provider id>:<model>` (e.g. `ollama:nomic-embed-text`), NULL for a vector embedded before it was recorded
+ * (which never counts as the current model's). `recorded` says whether the index has the column at all: an index
+ * from before #140 records no model, and J12 then judges by vector size.
  */
-const EMBEDDING_MODEL_COLUMNS = ['embedding_model', 'embedding_provider', 'embedding_spec', 'embedded_by'];
-const EMBEDDING_MODEL_KEYS = ['$.embeddingModel', '$.embeddingProvider', '$.embedding.model'];
 function embeddingModelColumn(db) {
-  const columns = db.prepare('PRAGMA table_info(memory_chunks)').all().map((c) => c.name);
-  const column = EMBEDDING_MODEL_COLUMNS.find((name) => columns.includes(name));
-  if (column) return column;
-  if (!columns.includes('metadata_json')) return 'NULL';
-  return `CASE WHEN json_valid(metadata_json) THEN coalesce(${EMBEDDING_MODEL_KEYS.map((key) => `json_extract(metadata_json, '${key}')`).join(', ')}) END`;
+  const recorded = db.prepare('PRAGMA table_info(memory_chunks)').all().some((c) => c.name === 'embedding_spec');
+  return { model: recorded ? 'embedding_spec' : 'NULL', recorded: recorded ? 1 : 0 };
 }
 
 /** The reader itself (run as a child). */
@@ -88,16 +84,15 @@ function read(dbPath, mode, args) {
         .all();
     }
     if (mode === 'chunkdims' || mode === 'vectors') {
-      // J12: each chunk's vector size (as in `dims`) and the embedding model it records, if the index records one
-      // (MindStone-Agent #140: every chunk records the model that embedded it). `chunkdims`: the given chunks (what
-      // recall scored); `vectors`: every chunk.
+      // J12: each chunk's vector size (as in `dims`), the embedding model it records (embedding_spec) and whether the
+      // index records models at all. `chunkdims`: the given chunks (what recall scored); `vectors`: every chunk.
       if (mode === 'chunkdims' && !args.length) return [];
-      const model = embeddingModelColumn(db);
+      const { model, recorded } = embeddingModelColumn(db);
       return db
         .prepare(
           `SELECT chunk_id,
                   CASE WHEN embedding_json IS NULL THEN NULL WHEN json_valid(embedding_json) THEN json_array_length(embedding_json) ELSE -1 END AS dims,
-                  ${model} AS model
+                  ${model} AS model, ${recorded} AS recorded
            FROM memory_chunks${mode === 'chunkdims' ? ` WHERE chunk_id IN (${args.map(() => '?').join(', ')})` : ''}`,
         )
         .all(...(mode === 'chunkdims' ? args : []));

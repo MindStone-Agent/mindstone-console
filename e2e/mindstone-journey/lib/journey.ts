@@ -901,12 +901,13 @@ export function recallIndexDims(): IndexDims {
 }
 
 /** A recall-index chunk as J12 judges it: its vector's size (null: no vector or gone; -1: unreadable) and the model it records, if any. */
-export type IndexVector = { chunkId: string; dims: number | null; model: string | null };
+export type IndexVector = { chunkId: string; dims: number | null; model: string | null; recorded?: boolean; recallMode?: string };
 
 const toVector = (r: Record<string, unknown>): IndexVector => ({
   chunkId: String(r.chunk_id),
   dims: r.dims === null || r.dims === undefined ? null : Number(r.dims),
   model: typeof r.model === 'string' && r.model ? r.model : null,
+  recorded: Number(r.recorded) === 1,
 });
 
 /**
@@ -923,18 +924,45 @@ export function recallIndexVectors(ids?: string[]): { present: boolean; chunks: 
 
 /**
  * The chunks recall supplied to a Console conversation (every memory_recall_injected event's hits), each with its
- * vector's size and model record in the recall index now (J12).
+ * vector's size and model record in the recall index now, and how recall found it (the event's `recallMode`:
+ * "embedding" by vector, "lexical" by words; "embedding" when any of its hits was by vector) (J12).
  */
-export function recallHitsForConversation(conversationId: string): IndexVector[] {
-  const ids = [
-    ...new Set(
-      conversationEntries(conversationId)
-        .filter((e) => e.role === 'event' && e.metadata?.event === 'memory_recall_injected')
-        .flatMap((e) => ((e.metadata as { hits?: { chunkId?: unknown }[] }).hits ?? []).map((h) => h?.chunkId))
-        .filter((id): id is string => typeof id === 'string'),
-    ),
-  ];
-  return ids.length ? recallIndexVectors(ids).chunks : [];
+export function recallHitsForConversation(conversationId: string, snapshot?: IndexVector[]): IndexVector[] {
+  const modes = new Map<string, string | undefined>();
+  for (const entry of conversationEntries(conversationId)) {
+    if (entry.role !== 'event' || entry.metadata?.event !== 'memory_recall_injected') continue;
+    for (const hit of (entry.metadata as { hits?: { chunkId?: unknown; recallMode?: unknown }[] }).hits ?? []) {
+      if (typeof hit?.chunkId !== 'string') continue;
+      const mode = typeof hit.recallMode === 'string' ? hit.recallMode : undefined;
+      const seen = modes.get(hit.chunkId);
+      // A vector hit (or one with no mode recorded) outweighs a word hit on the same chunk.
+      modes.set(hit.chunkId, modes.has(hit.chunkId) && seen !== 'lexical' ? seen : mode);
+    }
+  }
+  const ids = [...modes.keys()];
+  if (!ids.length) return [];
+  // As the index was when recall scored them (the snapshot taken just before the chat; lib/settings-parity-evidence.js
+  // hitsAsScored); a chunk the snapshot doesn't have is read as it is now.
+  const known = new Set((snapshot ?? []).map((chunk) => chunk.chunkId));
+  const missing = ids.filter((id) => !known.has(id));
+  return settingsParity.hitsAsScored({ modes: [...modes], snapshot, now: missing.length ? recallIndexVectors(missing).chunks : [] });
+}
+
+/**
+ * The recall index once it has settled (J12): read until two readings 3 s apart agree (the background indexing of
+ * the last turn is done), at most `timeoutMs`. Taken just before a chat whose recall J12 judges.
+ */
+export async function settledIndexVectors(page: Page, timeoutMs = 60_000): Promise<{ present: boolean; chunks: IndexVector[]; settled: boolean; waitedMs: number }> {
+  const started = Date.now();
+  const sig = (r: { chunks: IndexVector[] }) => JSON.stringify(r.chunks.map((c) => [c.chunkId, c.dims, c.model]).sort());
+  let last = recallIndexVectors();
+  for (;;) {
+    await page.waitForTimeout(3_000);
+    const next = recallIndexVectors();
+    if (sig(next) === sig(last)) return { ...next, settled: true, waitedMs: Date.now() - started };
+    last = next;
+    if (Date.now() - started >= timeoutMs) return { ...last, settled: false, waitedMs: Date.now() - started };
+  }
 }
 
 /**
@@ -1246,10 +1274,14 @@ const settingsParity = require('./settings-parity-evidence.js') as {
     before: { spec?: string; dims?: number; chunks?: number };
     after: { spec?: string; dims?: number };
     warned?: string;
+    reported?: number;
     index?: IndexDims;
     probe?: { error: boolean; errorText?: string; text: string; fact: IndexVector[]; hits: IndexVector[] };
+    reembedded?: { otherLeft: number; waitedMs: number };
   }) => { verdict: 'pass' | 'fail' | 'pending'; why: string; reasons: string[]; unproven: string[]; stale: number };
   restoredIndexReasons: (arg: { spec?: string; dims?: number; present: boolean; chunks: IndexVector[]; recalled?: IndexVector[] }) => string[];
+  otherModelCount: (chunks: IndexVector[], model: { spec?: string; dims?: number }) => number;
+  hitsAsScored: (arg: { modes: [string, string | undefined][]; snapshot?: IndexVector[]; now?: IndexVector[] }) => IndexVector[];
   restoreOutcome: (arg: {
     settings: { ok: boolean; lines: string[] };
     index?: { required: boolean; ran: boolean; reasons?: string[]; why?: string };
@@ -1268,6 +1300,7 @@ export const {
   memoryChangeVerdict,
   restoredIndexReasons,
   restoreOutcome,
+  otherModelCount,
   EMBEDDING_WARNING,
 } = settingsParity;
 

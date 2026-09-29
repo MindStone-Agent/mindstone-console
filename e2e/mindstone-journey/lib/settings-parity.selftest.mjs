@@ -23,7 +23,11 @@
 //   warned before Save (whenever the old model had embedded memories) and the
 //   chats after the change answered, the new fact was embedded by the new
 //   model, and recall scored no other model's chunk; a failed or empty chat,
-//   another model's chunk, or nothing recalled with the fact captured FAIL;
+//   another model's chunk scored by its vector, or nothing recalled with the
+//   fact captured FAIL; a chunk found by its words (recallMode "lexical",
+//   #140's design until the backfill re-embeds it) is never judged; the
+//   check's index.otherModel must count the old memories, and the warning
+//   (ms-onb-memory-reembed) must show that count;
 //   what couldn't be exercised is PENDING, never a pass;
 // - restoredIndexReasons: after the restore, every chunk is the restored
 //   model's, or records another model that recall under it left out;
@@ -67,6 +71,9 @@ const {
   restoredIndexReasons,
   restoreOutcome,
   vectorOf,
+  otherModelCount,
+  byVector,
+  hitsAsScored,
   EMBEDDING_WARNING,
 } = require('./settings-parity-evidence.js');
 const { queryRecallIndex } = require('./recall-index.js');
@@ -160,14 +167,24 @@ const v = (chunkId, dims, model = null) => ({ chunkId, dims, model });
 // Chunks as a product with the #140 fix records them (tagged), and as one without a record (untagged).
 const oldTagged = v('transcript:j9#0', 768, 'ollama:nomic-embed-text');
 const newTagged = v('transcript:cat#0', 1024, 'ollama:mxbai-embed-large:latest');
+const lex = (chunk) => ({ ...chunk, recallMode: 'lexical' });
+const vec = (chunk) => ({ ...chunk, recallMode: 'embedding' });
 const probeOf = (hits, patch = {}) => ({ error: false, text: 'Your cat is quince-x.', fact: [newTagged], hits, ...patch });
-const mv = (patch) => memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: WARNING, index: idx({ 768: 40, 1024: 1 }), probe: probeOf([newTagged]), ...patch });
+const CLEAN = { otherLeft: 0, waitedMs: 6_000 };
+const mv = (patch) => memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: WARNING, index: idx({ 768: 40, 1024: 1 }), probe: probeOf([vec(newTagged)]), reembedded: CLEAN, ...patch });
 
 // vectorOf, the rule itself.
 check(vectorOf(oldTagged, NOMIC) === 'same' && vectorOf(oldTagged, MXBAI) === 'other' && vectorOf(newTagged, MXBAI) === 'same', 'rule: a model record decides (with or without provider prefix and :latest)');
 check(vectorOf(v('x', 1024, 'nomic-embed-text'), NOMIC) === 'same', 'rule: the record wins over the size (a record says which model; size alone can mislead)');
 check(vectorOf(v('x', 768), NOMIC) === 'same' && vectorOf(v('x', 1024), NOMIC) === 'other' && vectorOf(v('x', 384), NOMIC) === 'other', 'rule: with no record, the size decides (smaller and larger both other)');
 check(vectorOf(v('x', null), NOMIC) === 'unknown' && vectorOf(v('x', -1), NOMIC) === 'unknown' && vectorOf(v('x', 768), { spec: NOMIC.spec }) === 'unknown', "rule: no record and no size, or the model's size unknown: can't be told");
+// #140 at 452aa06: in an index that records specs, an embedded chunk with a NULL embedding_spec is another model's,
+// even at the same size; one with no vector is unknown (it is embedded later).
+const recNull = (chunkId, dims) => ({ chunkId, dims, model: null, recorded: true });
+check(vectorOf(recNull('x', 768), NOMIC) === 'other' && vectorOf(recNull('x', -1), NOMIC) === 'other' && vectorOf(recNull('x', null), NOMIC) === 'unknown', 'rule: a NULL embedding_spec on an embedded chunk is another model (the same size too); no vector is unknown');
+check(vectorOf({ ...oldTagged, recorded: true }, NOMIC) === 'same' && vectorOf(v('x', 768), NOMIC) === 'same', 'rule: a recorded spec decides; an index from before #140 (no column) falls back to size');
+// The index-clean count: embedded chunks that aren't the model's.
+check(otherModelCount([newTagged, oldTagged, recNull('n', 768), recNull('p', null), v('u', 1024)], MXBAI) === 2 && otherModelCount([newTagged], MXBAI) === 0, 'index-clean count: another spec and a NULL spec count, a chunk with no vector does not');
 
 // Recall after the change.
 check(mv({}).verdict === 'pass' && /warned before Save/.test(mv({}).why), 'change: warned, the new fact embedded and recalled by the new model, nothing from the old: pass');
@@ -177,15 +194,23 @@ check(mv({ warned: undefined }).verdict === 'fail' && mv({ warned: undefined, af
 const errored = mv({ probe: probeOf([], { error: true, errorText: 'routing_error: embedding size mismatch', text: '' }) });
 check(errored.verdict === 'fail' && /did not answer \(the Console stored an error: routing_error/.test(errored.why), 'change: a chat after the change stored an error: FAIL, even with no hits');
 check(mv({ probe: probeOf([], { text: '  ' }) }).verdict === 'fail' && /an empty reply/.test(mv({ probe: probeOf([], { text: '  ' }) }).why), 'change: a chat after the change came back empty: FAIL');
-const scoredOld = mv({ probe: probeOf([newTagged, oldTagged]) });
-check(scoredOld.verdict === 'fail' && /scored 1 chunk\(s\) from another model than ollama:mxbai-embed-large: transcript:j9#0 \(768 dims, ollama:nomic-embed-text\)/.test(scoredOld.why), 'change: recall scored J9\'s old-model chunk against the new model: FAIL');
-check(mv({ probe: probeOf([newTagged, v('old', 768)]) }).verdict === 'fail' && mv({ probe: probeOf([v('big', 1536)]) }).verdict === 'fail', 'change: untagged, another size (smaller or larger): FAIL');
-check(mv({ probe: probeOf([newTagged], { fact: [v('cat', 768, 'nomic-embed-text')] }) }).verdict === 'fail', 'change: the new fact embedded by the old model: FAIL');
-check(mv({ probe: probeOf([]) }).verdict === 'fail' && /supplied nothing, though the fact told after it is in the index/.test(mv({ probe: probeOf([]) }).why), 'change: the fact captured but recall supplied nothing: FAIL (there was something to recall)');
+const scoredOld = mv({ probe: probeOf([vec(newTagged), oldTagged]) });
+check(scoredOld.verdict === 'fail' && /scored 1 chunk\(s\) by the vector of another model than ollama:mxbai-embed-large: transcript:j9#0 \(768 dims, ollama:nomic-embed-text\)/.test(scoredOld.why), 'change: recall scored J9\'s old-model chunk against the new model: FAIL');
+check(mv({ probe: probeOf([vec(newTagged), vec(v('old', 768))]) }).verdict === 'fail' && mv({ probe: probeOf([vec(newTagged), vec(v('big', 1536))]) }).verdict === 'fail', 'change: untagged, another size (smaller or larger), by vector: FAIL');
+check(mv({ probe: probeOf([vec(newTagged)], { fact: [v('cat', 768, 'nomic-embed-text')] }) }).verdict === 'fail', 'change: the new fact embedded by the old model: FAIL');
+check(mv({ probe: probeOf([]) }).verdict === 'fail' && /did not find the new fact by the new model's vector.*\(nothing at all\)/.test(mv({ probe: probeOf([]) }).why), 'change: the fact captured but recall supplied nothing: FAIL (there was something to recall)');
+// N2: the positive proof is the new fact itself, recalled by the new model's vector; any other hit is not enough.
+check(mv({ probe: probeOf([lex(newTagged)]) }).verdict === 'fail', 'N2: the new fact found only by its words: FAIL (recall by the new vector not shown)');
+check(mv({ probe: probeOf([vec(v('transcript:other#0', 1024, 'mxbai-embed-large'))]) }).verdict === 'fail', 'N2: another new-model chunk recalled by vector, but not the fact: FAIL');
+check(mv({ probe: probeOf([vec(v('transcript:cat#0', 768, 'nomic-embed-text'))], { fact: [v('transcript:cat#0', 768, 'nomic-embed-text')] }) }).verdict === 'fail', "N2: the fact scored by the old model's vector: FAIL");
+check(mv({ probe: probeOf([newTagged]) }).verdict === 'fail', 'N2: the fact recalled with no recallMode recorded: not shown to be by vector, FAIL');
 check(mv({ probe: probeOf([], { fact: [] }) }).verdict === 'pending' && /not captured in time/.test(mv({ probe: probeOf([], { fact: [] }) }).why), 'change: nothing captured and nothing recalled: PENDING (genuinely nothing to recall)');
-check(mv({ probe: probeOf([newTagged, v('gone', null)]) }).verdict === 'pending' && mv({ probe: probeOf([v('bad', -1)]) }).verdict === 'pending', "change: a recalled chunk that can't be told apart (no vector, unreadable, no record): PENDING, not clean");
-check(mv({ probe: probeOf([v('gone', null), oldTagged]) }).verdict === 'fail', 'change: another model\'s chunk still fails next to an unknown one');
+check(mv({ probe: probeOf([vec(newTagged), vec(v('gone', null))]) }).verdict === 'pending' && mv({ probe: probeOf([vec(newTagged), vec(v('bad', -1))]) }).verdict === 'pending', "change: a vector hit that can't be told apart (no vector, unreadable, no record): PENDING, not clean");
+check(mv({ probe: probeOf([vec(newTagged), vec(v('gone', null)), vec(oldTagged)]) }).verdict === 'fail', 'change: another model\'s chunk still fails next to an unknown one');
 check(mv({ before: { ...NOMIC, chunks: 0 }, index: idx({ 1024: 1 }) }).verdict === 'pending' && mv({ probe: undefined }).verdict === 'pending', 'change: nothing to warn about, or no chat (recall off): PENDING, never a vacuous pass');
+// The re-embed after the change (#140: the backfill after each owner turn re-embeds another model's chunks).
+check(mv({ reembedded: { otherLeft: 12, waitedMs: 120_000 } }).verdict === 'fail' && /12 embedded chunk\(s\) were still another model's 120 s after/.test(mv({ reembedded: { otherLeft: 12, waitedMs: 120_000 } }).why), "change: another model's chunks left after the wait: FAIL (the backfill didn't re-embed them)");
+check(mv({ reembedded: undefined }).verdict === 'pending', 'change: the index-clean count not read: PENDING, not a pass');
 check(mv({ after: NOMIC }).verdict === 'fail' && mv({ after: { spec: MXBAI.spec } }).verdict === 'fail' && mv({ before: { dims: 768 } }).verdict === 'fail', 'change: no change, no dimension count, or no model before: fails');
 for (const text of [WARNING, 'Changing the model re-indexes 40 memories.', 'Memories made with the previous model are incompatible.', '12 memories were embedded by a different embedding model.']) {
   check(EMBEDDING_WARNING.test(text), `warning words: "${text}" is a warning`);
@@ -194,13 +219,41 @@ for (const text of ['43 memories indexed.', 'Embedding works: 1024 dimensions.',
   check(!EMBEDDING_WARNING.test(text), `warning words: "${text}" is not a warning`);
 }
 
+// Found by words, not by vector (#140: another model's chunks are found by their words until the backfill re-embeds
+// them): the recall event's recallMode decides, and a word hit is never judged.
+check(byVector(vec(oldTagged)) && byVector(oldTagged) && !byVector(lex(oldTagged)), 'by vector: recallMode "embedding", or none recorded (never excused unseen); not "lexical"');
+const wordHit = mv({ probe: probeOf([vec(newTagged), lex(oldTagged), lex(v('old2', 768))]) });
+check(wordHit.verdict === 'pass' && /2 found by words \(not judged/.test(wordHit.why), `change: J9's old-model chunk found by its words after the change: by design, PASS ("${wordHit.why.slice(0, 60)}…")`);
+check(mv({ probe: probeOf([vec(newTagged), vec(oldTagged)]) }).verdict === 'fail', "change: the same old-model chunk scored by its vector: FAIL");
+check(mv({ probe: probeOf([vec(newTagged), lex(v('gone', null))]) }).verdict === 'pass', "change: a word hit whose vector can't be read now is not judged (nor unproven)");
+// N1: judged as the index was when recall scored the chunks (the snapshot before the chat), not as the chat's own
+// turn left it.
+{
+  const snapshot = [newTagged, oldTagged];
+  const now = [newTagged, v('transcript:j9#0', 1024, 'ollama:mxbai-embed-large')];
+  const hits = hitsAsScored({ modes: [['transcript:cat#0', 'embedding'], ['transcript:j9#0', 'embedding']], snapshot, now });
+  check(hits[1].dims === 768 && hits[1].model === 'ollama:nomic-embed-text' && hits[1].recallMode === 'embedding', "N1: a chunk the chat's own turn re-embedded afterwards is judged as it was scored (the old model's)");
+  check(mv({ probe: probeOf(hits) }).verdict === 'fail', 'N1: so scoring the old vector still FAILs, though the index now shows it re-embedded');
+  const late = hitsAsScored({ modes: [['transcript:new#0', undefined]], snapshot, now: [v('transcript:new#0', 1024, 'mxbai-embed-large')] });
+  check(late[0].model === 'mxbai-embed-large' && !('recallMode' in late[0]), "N1: a chunk the snapshot doesn't have is read as it is now, with no mode invented");
+  check(hitsAsScored({ modes: [['gone', 'lexical']], snapshot: [], now: [] })[0].dims === null, 'N1: a chunk in neither reading: no vector');
+}
+// The memory check's own count (index.otherModel) and the warning that shows it (ms-onb-memory-reembed).
+const REEMBED = '40 memories were embedded by another model. Once you save, they are embedded again with this one after your next chat; until then, recall finds them by their words.';
+check(EMBEDDING_WARNING.test(REEMBED), "warning words: #140's own ms-onb-memory-reembed text is a warning");
+check(mv({ warned: REEMBED, reported: 40 }).verdict === 'pass', 'change: the check reported 40 memories from another model and the warning shows 40: pass');
+check(mv({ warned: REEMBED, reported: 0 }).verdict === 'fail' && /reported 0 memories embedded by another model/.test(mv({ warned: REEMBED, reported: 0 }).why), 'change: memories before the change but the check reports 0 from another model: FAIL');
+check(mv({ warned: REEMBED, reported: 38 }).verdict === 'fail' && /the warning says 40, but the memory check reported 38/.test(mv({ warned: REEMBED, reported: 38 }).why), 'change: the warning shows another number than the check reported: FAIL');
+check(mv({ warned: undefined, reported: 40 }).verdict === 'fail', 'change: the check reported them but the step showed no warning: FAIL');
+
 // The index after the restore, by the same rule.
 const R = { spec: NOMIC.spec, dims: 768, present: true };
 const rr = (chunks, recalled) => restoredIndexReasons({ ...R, chunks, recalled });
 check(rr([oldTagged, v('a', 768), v('p', null)], [oldTagged]).length === 0, 'restore: every chunk the restored model\'s (pending ones allowed), recall under it clean: usable');
 check(rr([oldTagged, newTagged], [oldTagged]).length === 0, "restore: the new model's chunk left in the index but recorded as its own and left out by recall: usable (the leave-out product)");
 check(rr([oldTagged, newTagged], undefined).some((r) => /no chat ran/.test(r)), "restore: another model's recorded chunk, but no chat under the restored model to show it's left out: not proven");
-check(rr([oldTagged, newTagged], [oldTagged, newTagged]).some((r) => /scored 1 chunk\(s\) from another model/.test(r)), "restore: recall under the restored model scored the new model's chunk: a reason");
+check(rr([oldTagged, newTagged], [oldTagged, newTagged]).some((r) => /scored 1 chunk\(s\) by the vector of another model/.test(r)), "restore: recall under the restored model scored the new model's chunk by its vector: a reason");
+check(rr([oldTagged, newTagged], [vec(oldTagged), lex(newTagged)]).length === 0, "restore: the new model's chunk found by its words under the restored model: by design, usable");
 check(rr([oldTagged, v('cat', 1024)], [oldTagged]).some((r) => /1 chunk\(s\) of another size with no model record/.test(r)), 'restore: an untagged chunk of another size (neither re-embedded nor recorded): a reason');
 check(rr([v('a', 768), v('small', 384)], []).length === 1, 'restore: an untagged chunk smaller than the restored size is a reason too');
 check(rr([v('a', 768), v('bad', -1)], []).some((r) => /unreadable/.test(r)), 'restore: an unreadable vector: a reason');
@@ -209,20 +262,41 @@ check(restoredIndexReasons({ spec: NOMIC.spec, dims: undefined, present: true, c
 // End to end, the correct product (#140's contract): the change, the probe chats, the restore, then PASS both ways.
 {
   const reembed = {
-    change: memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: WARNING, index: idx({ 1024: 42 }), probe: probeOf([v('transcript:cat#0', 1024), v('transcript:j9#0', 1024)], { fact: [v('transcript:cat#0', 1024)] }) }),
+    change: memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: WARNING, index: idx({ 1024: 42 }), probe: probeOf([vec(v('transcript:cat#0', 1024)), vec(v('transcript:j9#0', 1024))], { fact: [v('transcript:cat#0', 1024)] }), reembedded: CLEAN }),
     restore: rr([v('transcript:cat#0', 768), v('transcript:j9#0', 768), v('transcript:new#0', 768)], [v('transcript:cat#0', 768)]),
   };
   check(reembed.change.verdict === 'pass' && reembed.restore.length === 0, 'end to end: a product that re-embeds (no model record): the change passes, the restored index is usable');
   const leaveOut = {
-    change: memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: WARNING, index: idx({ 768: 40, 1024: 1 }), probe: probeOf([newTagged]) }),
+    change: memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: WARNING, index: idx({ 768: 40, 1024: 1 }), probe: probeOf([vec(newTagged)]), reembedded: CLEAN }),
     restore: rr([oldTagged, v('transcript:j9#1', 768, 'nomic-embed-text'), newTagged, v('transcript:asked#0', 1024, 'mxbai-embed-large')], [oldTagged]),
   };
-  check(leaveOut.change.verdict === 'pass' && leaveOut.restore.length === 0, 'end to end: a product that records each chunk\'s model and leaves other models out: the change passes, the restored index is usable');
+  check(leaveOut.change.verdict === 'pass' && leaveOut.restore.length === 0, 'end to end: a product that records each chunk\'s model, leaves other models out and re-embeds them: the change passes, the restored index is usable');
+  const leaveOutOnly = memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: WARNING, index: idx({ 768: 40, 1024: 1 }), probe: probeOf([vec(newTagged)]), reembedded: { otherLeft: 40, waitedMs: 120_000 } });
+  check(leaveOutOnly.verdict === 'fail', "end to end: one that never re-embeds fails the change (#140's contract re-embeds after the next turn)");
   const broken = {
     change: memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: undefined, index: idx({ 768: 40, 1024: 1 }), probe: probeOf([v('transcript:cat#0', 1024), v('transcript:j9#0', 768)], { fact: [v('transcript:cat#0', 1024)] }) }),
     restore: rr([v('transcript:j9#0', 768), v('transcript:cat#0', 1024)], [v('transcript:cat#0', 1024)]),
   };
   check(broken.change.verdict === 'fail' && broken.restore.length > 0, 'end to end: the product without the fix fails both (silent change, old chunk scored; a mixed index after the restore)');
+  // #140 as built (452aa06): embedding_spec on each chunk; after the change, old chunks are found by words and the next
+  // turn's backfill re-embeds them; after the restore, the same the other way.
+  const spec = (m) => `ollama:${m}`;
+  const built = {
+    change: memoryChangeVerdict({
+      before: NOMIC,
+      after: MXBAI,
+      warned: REEMBED,
+      reported: 40,
+      index: idx({ 1024: 41 }),
+      probe: probeOf([vec(v('transcript:cat#0', 1024, spec('mxbai-embed-large'))), lex(v('transcript:j9#0', 768, spec('nomic-embed-text')))], { fact: [v('transcript:cat#0', 1024, spec('mxbai-embed-large'))] }),
+      reembedded: { otherLeft: 0, waitedMs: 9_000 },
+    }),
+    restore: rr(
+      [v('transcript:j9#0', 768, spec('nomic-embed-text')), v('transcript:cat#0', 768, spec('nomic-embed-text')), v('transcript:asked#0', 1024, spec('mxbai-embed-large')), recNull('transcript:old#0', 768)],
+      [lex(v('transcript:cat#0', 1024, spec('mxbai-embed-large'))), vec(v('transcript:j9#0', 768, spec('nomic-embed-text')))],
+    ),
+  };
+  check(built.change.verdict === 'pass' && built.restore.length === 0, `end to end: #140 as built (a model record, old chunks found by words, the backfill re-embeds): the change passes, the restored index is usable${built.change.verdict === 'pass' ? '' : ` (${built.change.why})`}${built.restore.length ? ` (${built.restore.join('; ')})` : ''}`);
 }
 
 // restoreOutcome (A2): the index check is a restore failure, never a deferred J12 check.
@@ -274,19 +348,15 @@ check(!restoreOutcome({ settings: { ok: false, lines: ['USER.md NOT as before'] 
     check(queryRecallIndex(file, 'vectors', []).length === 5 && queryRecallIndex(file, 'vectors', []).every((r) => r.model === null), 'recall-index vectors: every chunk, and no model record when the index keeps none');
     const tagged = path.join(tmp, 'tagged.sqlite');
     const t = new DatabaseSync(tagged);
-    t.exec('CREATE TABLE memory_chunks (chunk_id TEXT PRIMARY KEY, text TEXT NOT NULL, embedding_json TEXT, embedding_model TEXT, metadata_json TEXT, updated_at TEXT NOT NULL)');
+    // MindStone-Agent #140 (452aa06): memory_chunks.embedding_spec, "<provider id>:<model>".
+    t.exec('CREATE TABLE memory_chunks (chunk_id TEXT PRIMARY KEY, text TEXT NOT NULL, embedding_json TEXT, embedding_spec TEXT, metadata_json TEXT, updated_at TEXT NOT NULL)');
     t.prepare('INSERT INTO memory_chunks VALUES (?, ?, ?, ?, ?, ?)').run('a', 'x', vec(768), 'ollama:nomic-embed-text', null, 't');
     t.prepare('INSERT INTO memory_chunks VALUES (?, ?, ?, ?, ?, ?)').run('b', 'x', vec(1024), 'ollama:mxbai-embed-large', null, 't');
+    t.prepare('INSERT INTO memory_chunks VALUES (?, ?, ?, ?, ?, ?)').run('c', 'x', vec(768), null, null, 't');
     t.close();
-    const meta = path.join(tmp, 'meta.sqlite');
-    const m = new DatabaseSync(meta);
-    m.exec('CREATE TABLE memory_chunks (chunk_id TEXT PRIMARY KEY, text TEXT NOT NULL, embedding_json TEXT, metadata_json TEXT, updated_at TEXT NOT NULL)');
-    m.prepare('INSERT INTO memory_chunks VALUES (?, ?, ?, ?, ?)').run('a', 'x', vec(768), JSON.stringify({ embeddingModel: 'nomic-embed-text' }), 't');
-    m.prepare('INSERT INTO memory_chunks VALUES (?, ?, ?, ?, ?)').run('b', 'x', vec(768), 'not json', 't');
-    m.close();
-    const models = (file) => Object.fromEntries(queryRecallIndex(file, 'chunkdims', ['a', 'b']).map((r) => [r.chunk_id, r.model]));
-    check(models(tagged).a === 'ollama:nomic-embed-text' && models(tagged).b === 'ollama:mxbai-embed-large', 'recall-index: a model column is read as each chunk\'s model record');
-    check(models(meta).a === 'nomic-embed-text' && models(meta).b === null, 'recall-index: a model key in metadata_json is read too (unreadable metadata: no record)');
+    const models = (file) => Object.fromEntries(queryRecallIndex(file, 'chunkdims', ['a', 'b', 'c']).map((r) => [r.chunk_id, [r.model, r.recorded]]));
+    check(models(tagged).a[0] === 'ollama:nomic-embed-text' && models(tagged).b[0] === 'ollama:mxbai-embed-large' && models(tagged).a[1] === 1, "recall-index: #140's embedding_spec column is read as each chunk's model record");
+    check(JSON.stringify(models(tagged).c) === '[null,1]' && JSON.stringify(models(file).a) === '[null,0]', 'recall-index: a NULL embedding_spec reads as recorded with no model; an index without the column records nothing');
   } finally {
     writer.close();
     fs.rmSync(tmp, { recursive: true, force: true });

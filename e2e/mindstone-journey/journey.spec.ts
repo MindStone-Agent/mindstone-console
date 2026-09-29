@@ -90,6 +90,8 @@ import {
   recallIndexDims,
   recallHitsForConversation,
   recallIndexVectors,
+  settledIndexVectors,
+  otherModelCount,
   restoreOutcome,
   removeAgentUserFile,
   recordRestoreFailure,
@@ -1220,12 +1222,20 @@ const J12_STEP_HEADINGS: Record<string, string> = {
   memory: 'Set up memory',
   connectors: 'Connect a chat app (optional)',
 };
-/** How long J12 waits, after the restore and a chat under it, for the index to hold only the restored model's vectors. */
-const J12_RESTORED_INDEX_WAIT_MS = 60_000;
-/** J12's question after the embedding change: the fact it tells in a chat under the new model. */
-const J12_RECALL_PROBE = "What is my cat's name? Answer with just the name.";
+/**
+ * How long J12 polls the index-clean count after chats under a model (#140: the backfill runs after each owner turn,
+ * in the background, one update at a time): after the change, and after the restore.
+ */
+const J12_REEMBED_WAIT_MS = 120_000;
+const J12_RESTORED_INDEX_WAIT_MS = J12_REEMBED_WAIT_MS;
+/**
+ * J12's question after the embedding change: the fact it tells in a chat under the new model ("My cat is called …").
+ * Worded to share few words with earlier chats (J9 asks "What is my dog's name?"), so recall's word hits on older
+ * chunks don't crowd the fact's vector hit out of the top results.
+ */
+const J12_RECALL_PROBE = 'What is my cat called? Answer with just the name.';
 /** J12's question under the restored memory setting (the restore check's chat): the same fact. */
-const J12_RESTORED_PROBE = "What is my cat's name? If you don't know, say so in one short sentence.";
+const J12_RESTORED_PROBE = "What is my cat called? If you don't know, say so in one short sentence.";
 /** The memory step's Test (the Console's proxy gives the embed check 25 s; a model's first load can take longer). */
 const J12_MEMORY_CHECK_MS = 90_000;
 /** A memory Test result that says the check ran out of time (a cold model load), not that the model can't embed. */
@@ -1359,6 +1369,8 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
   let restoredModel: { spec: string; dims?: number } | undefined;
   /** The chat that ran under the restored memory setting, whose recall shows whether another model's chunks are left out. */
   let restoredChat: string | undefined;
+  /** The index just before that chat, which its recall is judged against. */
+  let restoredSnapshot: IndexVector[] | undefined;
   /**
    * The index check after the restore (A2): runs in the finally, after putBack, whenever an embedding change was about
    * to be saved. With no chat under the restored setting yet (something threw first), it runs one. Then it waits up to
@@ -1366,6 +1378,7 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
    */
   const checkRestoredIndex = async (model: { spec: string; dims?: number }): Promise<string[]> => {
     if (!restoredChat) {
+      restoredSnapshot = (await settledIndexVectors(page)).chunks;
       await navigate(page, '/c/new');
       await ensureMindStoneModel(page, testInfo);
       const reply = await sendAndWaitForReply(page, J12_RESTORED_PROBE);
@@ -1375,16 +1388,17 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
     const started = Date.now();
     const read = () => {
       const index = recallIndexVectors();
-      const recalled = recallHitsForConversation(restoredChat!);
-      return { index, recalled, reasons: restoredIndexReasons({ ...model, present: index.present, chunks: index.chunks, recalled }) };
+      const recalled = recallHitsForConversation(restoredChat!, restoredSnapshot);
+      return { index, recalled, otherLeft: otherModelCount(index.chunks, model), reasons: restoredIndexReasons({ ...model, present: index.present, chunks: index.chunks, recalled }) };
     };
+    // Poll until the backfill after the restored chat has re-embedded everything (#140), or the wait ends; then judge.
     let now = read();
-    while (now.reasons.length && Date.now() - started < J12_RESTORED_INDEX_WAIT_MS) {
+    while ((now.reasons.length || now.otherLeft > 0) && Date.now() - started < J12_RESTORED_INDEX_WAIT_MS) {
       await page.waitForTimeout(3_000);
       now = read();
     }
-    const other = now.index.chunks.filter((c) => c.dims !== null && c.dims !== model.dims);
-    proof.restoredIndex = { model, chat: restoredChat, waitedMs: Date.now() - started, chunks: now.index.chunks.length, otherModel: other, recalled: now.recalled, reasons: now.reasons };
+    const otherSize = now.index.chunks.filter((c) => c.dims !== null && c.dims !== model.dims);
+    proof.restoredIndex = { model, chat: restoredChat, waitedMs: Date.now() - started, chunks: now.index.chunks.length, otherLeft: now.otherLeft, otherSize, recalled: now.recalled, reasons: now.reasons };
     return now.reasons;
   };
   try {
@@ -1567,12 +1581,22 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
        * Test, for the model picked now: the page's own check request, which must be for that model (so the size it
        * reports is the picked model's, not the saved one's), then its result once the step is no longer busy.
        */
+      /** The last Test's own answer: how many memories another model embedded, by the gateway's count (#140). */
+      let lastCheck: { otherModel?: number; embedded?: number } | undefined;
       const testEmbedding = async (spec: string): Promise<string> => {
-        const sent = page.waitForRequest((r) => r.method() === 'POST' && new URL(r.url()).pathname === '/api/mindstone/admin/memory/check', { timeout: J12_MEMORY_CHECK_MS });
+        const isCheck = (url: string) => new URL(url).pathname === '/api/mindstone/admin/memory/check';
+        const sent = page.waitForRequest((r) => r.method() === 'POST' && isCheck(r.url()), { timeout: J12_MEMORY_CHECK_MS });
+        const answered = page.waitForResponse((r) => r.request().method() === 'POST' && isCheck(r.url()), { timeout: J12_MEMORY_CHECK_MS });
         sent.catch(() => undefined);
+        answered.catch(() => undefined);
         await uiResponse(page, { method: 'POST', path: '/api/mindstone/admin/memory/check', timeoutMs: J12_MEMORY_CHECK_MS }, () => testButton.click());
         const checked = ((await sent).postDataJSON() as { embeddingProvider?: string } | null)?.embeddingProvider;
         expect(checked, `the Test checks the picked model (${spec})`).toBe(spec);
+        const body = (await (await answered).json().catch(() => ({}))) as { index?: { otherModel?: unknown; embedded?: unknown } };
+        lastCheck = {
+          otherModel: typeof body.index?.otherModel === 'number' ? body.index.otherModel : undefined,
+          embedded: typeof body.index?.embedded === 'number' ? body.index.embedded : undefined,
+        };
         await expect(testButton, 'the Test finishes').toBeEnabled({ timeout: 15_000 });
         await expect(check, 'the Test shows its result').not.toHaveText(/^$/);
         return ((await check.textContent()) ?? '').trim();
@@ -1622,10 +1646,17 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       }
       // A warning is the product's own words about the memories another model embedded, on the step before Save
       // (the Test result included), and new since the step opened with the saved model.
+      // #140's own warning is ms-onb-memory-reembed ("N memories were embedded by another model…", N the check's
+      // index.otherModel); another product's words on the step count too.
+      const reembed = section.getByTestId('ms-onb-memory-reembed');
+      const reembedText = (await reembed.count()) ? ((await reembed.textContent()) ?? '').replace(/\s+/g, ' ').trim() : '';
       const warned =
+        reembedText ||
         (await sentences())
           .filter((sentence) => EMBEDDING_WARNING.test(sentence) && !sentencesBefore.has(sentence))
-          .join(' ') || undefined;
+          .join(' ') ||
+        undefined;
+      const reported = after ? lastCheck?.otherModel : undefined;
       await shot(page, testInfo, 'memory-change');
       // From here on the index may hold another model's vectors: the finally checks it after the restore, whatever
       // throws from now on (set before the Save, so no failure after it can skip the check).
@@ -1641,7 +1672,7 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       await expect(page).toHaveURL(/\/mindstone$/);
       const memoryRow = page.getByTestId('ms-setup-memory');
       const memory = (await readConfig()).config?.memory ?? {};
-      proof.memory = { before: { spec: beforeSpec, dims: beforeDims ?? null, chunks: chunksBefore }, after: after ?? null, safeField: safeField ?? null, tried, warned: warned ?? null, saved: memory, indexBefore };
+      proof.memory = { before: { spec: beforeSpec, dims: beforeDims ?? null, chunks: chunksBefore }, after: after ?? null, safeField: safeField ?? null, tried, warned: warned ?? null, check: lastCheck ?? null, saved: memory, indexBefore };
       await saveProof();
       if (!after) {
         const why = others.length
@@ -1671,12 +1702,15 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
         const failed = (reply: Reply) => reply.error || !reply.text.trim() || ERROR_REPLY.test(reply.text);
         await navigate(page, '/c/new');
         await ensureMindStoneModel(page, testInfo);
-        const told = await sendAndWaitForReply(page, `My cat's name is ${token}. Please remember it.`);
+        const told = await sendAndWaitForReply(page, `My cat is called ${token}. Please remember it.`);
         await attachText(testInfo, 'recall-after-change-told.txt', replyLog(told));
         const captured = failed(told) ? { chunks: [], waitedMs: 0 } : await waitForEmbeddedChunk(page, token, RECALL_CAPTURE_WAIT_MS);
-        const fact = recallIndexVectors(captured.chunks.map((c) => c.chunkId)).chunks;
+        let fact = recallIndexVectors(captured.chunks.map((c) => c.chunkId)).chunks;
         let asked: Reply | undefined;
+        let snapshot: Awaited<ReturnType<typeof settledIndexVectors>> | undefined;
         if (!failed(told)) {
+          // The index as recall will score it: once the told turn's background indexing is done, just before asking.
+          snapshot = await settledIndexVectors(page);
           await navigate(page, '/c/new');
           await ensureMindStoneModel(page, testInfo);
           asked = await sendAndWaitForReply(page, J12_RECALL_PROBE);
@@ -1689,21 +1723,47 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
           errorText: bad ? (bad.errorText ?? bad.text.slice(0, 200)) : undefined,
           text: bad ? bad.text : (asked?.text ?? ''),
           fact,
-          hits: asked ? recallHitsForConversation(asked.conversationId) : [],
+          hits: asked ? recallHitsForConversation(asked.conversationId, snapshot?.chunks) : [],
         };
+        // The fact's chunks as they were when recall scored them.
+        if (snapshot) fact = fact.map((chunk) => snapshot!.chunks.find((c) => c.chunkId === chunk.chunkId) ?? chunk);
+        probe.fact = fact;
         proof.memory = {
           ...(proof.memory as object),
-          recallProbe: { token, told: told.conversationId, asked: asked?.conversationId ?? null, capturedAfterMs: captured.waitedMs, fact, hits: probe.hits, error: probe.error, errorText: probe.errorText ?? null },
+          recallProbe: {
+            token,
+            told: told.conversationId,
+            asked: asked?.conversationId ?? null,
+            capturedAfterMs: captured.waitedMs,
+            snapshot: snapshot ? { chunks: snapshot.chunks.length, settled: snapshot.settled, waitedMs: snapshot.waitedMs } : null,
+            fact,
+            hits: probe.hits,
+            error: probe.error,
+            errorText: probe.errorText ?? null,
+          },
         };
       }
+      // The per-turn backfill after those chats re-embeds every chunk from another model (#140): poll the index-clean
+      // count (embedded chunks that aren't the new model's) until it reaches 0.
+      let reembedded: { otherLeft: number; waitedMs: number } | undefined;
+      if (probe) {
+        const started = Date.now();
+        let left = otherModelCount(recallIndexVectors().chunks, after);
+        while (left > 0 && Date.now() - started < J12_REEMBED_WAIT_MS) {
+          await page.waitForTimeout(3_000);
+          left = otherModelCount(recallIndexVectors().chunks, after);
+        }
+        reembedded = { otherLeft: left, waitedMs: Date.now() - started };
+        proof.memory = { ...(proof.memory as object), reembedded };
+      }
       const index = recallIndexDims();
-      const verdict = memoryChangeVerdict({ before: { spec: beforeSpec, dims: beforeDims, chunks: chunksBefore }, after, warned, index, probe });
+      const verdict = memoryChangeVerdict({ before: { spec: beforeSpec, dims: beforeDims, chunks: chunksBefore }, after, warned, reported, index, probe, reembedded });
       proof.memory = { ...(proof.memory as object), indexAfter: index, verdict };
       await saveProof();
       note(
         testInfo,
-        `embedding ${beforeSpec} (${beforeDims ?? '?'} dims, ${chunksBefore} chunks embedded) -> ${after.spec} (${after.dims} dims); warning before Save: ${warned ? `"${warned}"` : 'none'}; ` +
-          `recall after the change: ${probe ? `${probe.error || !probe.text.trim() ? 'a chat FAILED; ' : ''}the fact in ${probe.fact.length} chunk(s); ${probe.hits.length} chunk(s) recalled ${JSON.stringify(probe.hits.map((h) => [h.dims, h.model]))}` : 'not run (automatic recall off)'}; ` +
+        `embedding ${beforeSpec} (${beforeDims ?? '?'} dims, ${chunksBefore} chunks embedded) -> ${after.spec} (${after.dims} dims); the check's index.otherModel ${reported ?? 'not reported'}; warning before Save: ${warned ? `"${warned}"` : 'none'}; ` +
+          `recall after the change: ${probe ? `${probe.error || !probe.text.trim() ? 'a chat FAILED; ' : ''}the fact in ${probe.fact.length} chunk(s); ${probe.hits.length} chunk(s) recalled ${JSON.stringify(probe.hits.map((h) => [h.dims, h.model, h.recallMode ?? null]))}` : 'not run (automatic recall off)'}; ` +
           `recall index before ${JSON.stringify(indexBefore.byDims)}, after ${JSON.stringify(index.byDims)} (${index.pending} pending); ${verdict.why}`,
       );
       if (verdict.verdict === 'fail') deferred.push(verdict.why);
@@ -1831,8 +1891,12 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       await ensureMindStoneModel(page, testInfo);
       // Under the restored memory setting: the fact the chat after the embedding change told is the chunk most tempting
       // to recall from another model, so asking for it is the restore check's evidence too (the finally judges it).
+      const snapshot = restoredModel ? (await settledIndexVectors(page)).chunks : undefined;
       const reply = await sendAndWaitForReply(page, J12_RESTORED_PROBE);
-      if (restoredModel) restoredChat = reply.conversationId;
+      if (restoredModel) {
+        restoredChat = reply.conversationId;
+        restoredSnapshot = snapshot;
+      }
       await attachText(testInfo, 'reply.txt', replyLog(reply));
       await shot(page, testInfo, 'chat');
       await gatewayExcerpt(testInfo, 40);
