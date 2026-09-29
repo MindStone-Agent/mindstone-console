@@ -76,7 +76,7 @@ type MemoryCheck = {
   missingModel?: boolean;
   /** Memories another model embedded (MindStone-Agent #140): embedded again after a switch. */
   reembed?: number;
-  /** Memories this model refused three times (MindStone-Agent #170): found by their words only. */
+  /** Memories this model refused three times (MindStone-Agent #170): skipped, found by their words, tried again a day later. */
   skipped?: number;
 };
 type MemoryCheckResult = {
