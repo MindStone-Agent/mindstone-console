@@ -450,6 +450,18 @@ describe('persona editor (MindStone-Agent #125)', () => {
     expect(within(kbs$).queryByText('com_mindstone_pkb_ingest_slow')).not.toBeInTheDocument();
   });
 
+  it('a front proxy\'s own 504 page (no JSON) on an ingest says it may still finish, not "not changed"', async () => {
+    serve({ persona: ATLAS, privateKbs: TWO_KBS });
+    mockPost.mockRejectedValueOnce({
+      response: { status: 504, data: '<html><body>504 Gateway Time-out</body></html>' },
+    });
+    await renderEditor('atlas');
+    const kbs$ = await screen.findByTestId('ms-private-kbs');
+    fireEvent.click(await within(kbs$).findByTestId('ms-pkb-aaa-ingest'));
+    expect(await within(kbs$).findByText('com_mindstone_pkb_ingest_slow')).toBeInTheDocument();
+    expect(within(kbs$).queryByText('com_mindstone_not_changed')).not.toBeInTheDocument();
+  });
+
   it("a draft typed for one KB is cleared when another KB's sources are opened", async () => {
     serve({ persona: ATLAS, privateKbs: TWO_KBS });
     await renderEditor('atlas');

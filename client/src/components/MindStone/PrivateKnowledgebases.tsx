@@ -83,11 +83,17 @@ export default function PrivateKnowledgebases({
       setMessage({ ok: true, text: done });
       return true;
     } catch (error) {
-      // The Console stopped waiting (the proxy's gateway_timeout): the gateway
-      // may still finish, so the page doesn't say "not changed". A gateway
-      // that is down is a 502 and says so.
-      const code = (error as { response?: { data?: { code?: unknown } } })?.response?.data?.code;
-      const text = slowNote && code === 'gateway_timeout' ? slowNote : errorText(error);
+      // The Console stopped waiting (its gateway_timeout), or a proxy in front
+      // of it answered with its own 5xx page and no JSON: the gateway may still
+      // finish, so the page doesn't say "not changed". A gateway that is down
+      // is the Console's own 502 JSON, and says so (#125 review).
+      const response = (
+        error as { response?: { status?: number; data?: { code?: unknown } | string } }
+      )?.response;
+      const data = typeof response?.data === 'object' ? response.data : undefined;
+      const proxyPage = (response?.status ?? 0) >= 500 && !data;
+      const stillWorking = data?.code === 'gateway_timeout' || proxyPage;
+      const text = slowNote && stillWorking ? slowNote : errorText(error);
       setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') });
       return false;
     } finally {

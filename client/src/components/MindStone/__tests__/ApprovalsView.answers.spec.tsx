@@ -183,4 +183,41 @@ describe('MindStone approvals: what counts as an answer (MindStone-Agent #125)',
     await act(async () => undefined);
     expect(screen.getByRole('status')).toHaveTextContent('Forbidden');
   });
+
+  it('a 4xx with no JSON body is an answer: "not changed", not "outcome unknown"', async () => {
+    mockGet.mockImplementation((url: string) =>
+      url.endsWith(`/approvals/${A}`)
+        ? Promise.resolve({ action: memCard })
+        : Promise.resolve(list([memCard])),
+    );
+    mockPost.mockRejectedValue({ response: { status: 413, data: 'Payload Too Large' } });
+    renderPage();
+    fireEvent.click(await screen.findByText(memCard.summary));
+    approve(await screen.findByRole('region', { name: memCard.summary }));
+    expect(await screen.findByText('com_mindstone_not_changed')).toBeInTheDocument();
+  });
+
+  it('the Console\'s own 504 JSON, then a failed re-read: the decision\'s text stays, not "no answer"', async () => {
+    let reads = 0;
+    mockGet.mockImplementation((url: string) => {
+      if (url.endsWith(`/approvals/${A}`)) {
+        reads += 1;
+        return reads === 1
+          ? Promise.resolve({ action: memCard })
+          : Promise.reject({ message: 'Network Error' });
+      }
+      return Promise.resolve(list([memCard]));
+    });
+    mockPost.mockRejectedValue({
+      response: {
+        status: 504,
+        data: { ok: false, error: 'CONSOLE-TIMEOUT-TEXT', code: 'gateway_timeout' },
+      },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByText(memCard.summary));
+    approve(await screen.findByRole('region', { name: memCard.summary }));
+    expect(await screen.findByText('CONSOLE-TIMEOUT-TEXT')).toBeInTheDocument();
+    expect(screen.queryByText('com_mindstone_appr_no_answer_no_card')).toBeNull();
+  });
 });
