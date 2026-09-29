@@ -65,7 +65,7 @@ stack_guard() {
 # problems, one per line (none: both hold).
 stack_check_installed() {
   local used reasons=()
-  used=$(stack_env_value "${STACK_DIR}/.env" COMPOSE_PROJECT_NAME)
+  used=$(stack_env_value "${STACK_DIR}/.env" COMPOSE_PROJECT_NAME) || used="" # no .env: the installer failed early
   if [[ "${used}" == "${PROJECT}" ]]; then STACK_PROJECT_OK=1; else
     STACK_PROJECT_OK=0
     reasons+=("the install folder's .env has COMPOSE_PROJECT_NAME=${used:-(none)}, not ${PROJECT} (MINDSTONE_PROJECT): the installer ran another project")
@@ -263,6 +263,13 @@ stack_install_steps() {
   # First, whatever the exit: the project and compose file the installer actually used (teardown depends on both).
   # (Not in $(...): it sets the flags teardown reads.)
   stack_check_installed >"${LOG_DIR}/stack-installed-check.log"
+  # A failed install reports as one (with the checks' notes), not as a project/compose mismatch.
+  if [[ "${install_rc}" != 0 ]]; then
+    tail_to "${LOG_DIR}/stack-install.log" "${LOG_DIR}/stack-install.tail.log" 80
+    [[ -s "${LOG_DIR}/stack-installed-check.log" ]] && { echo "---"; cat "${LOG_DIR}/stack-installed-check.log"; } >>"${LOG_DIR}/stack-install.tail.log"
+    record S1 FAIL "Stack A1: install-stack.sh exited ${install_rc}" "${LOG_DIR}/stack-install.tail.log"
+    die "install-stack.sh failed"
+  fi
   if [[ -s "${LOG_DIR}/stack-installed-check.log" ]]; then
     record S1 FAIL "Stack A1: install-stack.sh didn't install this run's project from the guarded compose file" "${LOG_DIR}/stack-installed-check.log" \
       "$(tr '\n' ';' <"${LOG_DIR}/stack-installed-check.log")"
@@ -270,17 +277,12 @@ stack_install_steps() {
     die "install-stack.sh didn't install this run's project from the guarded compose file"
   fi
   stack_compose ps --format '{{.Service}} {{.Status}}' >"${LOG_DIR}/stack-ps.txt" 2>&1 || true
-  if [[ "${install_rc}" != 0 ]]; then
-    tail_to "${LOG_DIR}/stack-install.log" "${LOG_DIR}/stack-install.tail.log" 80
-    record S1 FAIL "Stack A1: install-stack.sh exited ${install_rc}" "${LOG_DIR}/stack-install.tail.log"
-    die "install-stack.sh failed"
-  fi
   # The installer is the thing under test: from a local file, it's compared with the one at the pinned commit.
   local exactly=""
   if [[ -n "${STACK_INSTALLER_FILE}" ]]; then
     local mine theirs
     mine=$({ shasum -a 256 2>/dev/null || sha256sum; } <"${STACK_INSTALLER_COPY}" | cut -c1-64)
-    theirs=$(curl -fsSL "${MSA_RAW}/${STACK_MSA_INSTALL_REF}/install-stack.sh" 2>/dev/null | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-64)
+    theirs=$(curl -fsSL "${MSA_RAW}/${STACK_MSA_INSTALL_REF}/install-stack.sh" 2>/dev/null | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-64) || theirs="(couldn't download)"
     if [[ "${mine}" == "${theirs}" ]]; then
       STACK_INSTALLER_NOTE="installer: a local file (UAT_STACK_INSTALLER_FILE), sha256 ${mine:0:12}…, the same as install-stack.sh at ${MSA_SHA}"
       [[ "${STACK_PIN}" != 0 ]] && exactly=", installed at exactly those commits"
