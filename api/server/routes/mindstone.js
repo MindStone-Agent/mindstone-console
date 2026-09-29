@@ -99,6 +99,8 @@ const ROUTE_TIMEOUT_MS = { 'memory/check': 55_000, 'memory/pull': 16 * 60_000 };
  */
 const INGEST_PATH = /^personas\/[A-Za-z0-9._-]+\/knowledgebases\/[a-z0-9-]+\/ingest$/;
 const INGEST_TIMEOUT_MS = 4 * 60_000;
+/** Approving a proposed private KB ingests it before answering (#125), so it gets an ingest's wait. */
+const APPROVE_PATH = /^approvals\/[A-Za-z0-9-]+\/approve$/;
 
 /** Gateway base URL: MINDSTONE_GATEWAY_URL is the OpenAI base (…/v1); the admin API sits at the root. */
 function gatewayBase() {
@@ -189,7 +191,8 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
       // the body, which can hold a secret) to wherever it points.
       redirect: 'error',
       signal: AbortSignal.timeout(
-        ROUTE_TIMEOUT_MS[path] ?? (INGEST_PATH.test(path) ? INGEST_TIMEOUT_MS : TIMEOUT_MS),
+        ROUTE_TIMEOUT_MS[path] ??
+          (INGEST_PATH.test(path) || APPROVE_PATH.test(path) ? INGEST_TIMEOUT_MS : TIMEOUT_MS),
       ),
     });
     const text = await response.text();
@@ -231,6 +234,15 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
     // Logged here, never sent: a fetch error can quote a header value (the
     // tokens) or a URL with credentials.
     logger.error('[mindstone] gateway request failed', error);
+    // The Console stopped waiting: the gateway may still be working on it (a
+    // long ingest), which isn't the same as a gateway that is down (#125).
+    if (error?.name === 'TimeoutError') {
+      return res.status(504).json({
+        ok: false,
+        error: "the MindStone gateway didn't answer in time; it may still finish",
+        code: 'gateway_timeout',
+      });
+    }
     return res.status(502).json({ ok: false, error: "the MindStone gateway didn't answer" });
   }
 });
