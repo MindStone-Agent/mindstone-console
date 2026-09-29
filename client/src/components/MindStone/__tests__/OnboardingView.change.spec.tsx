@@ -232,6 +232,20 @@ describe('changing one setup choice', () => {
     expect(screen.queryByTestId('ms-onb-memory-skipped')).toBeNull();
   });
 
+  it('says nothing about refused memories when the count is 0 (MindStone-Agent #170)', async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/memory/check`) {
+        return { ok: true, dimensions: 768, index: { embedded: 7, otherModel: 0, skipped: 0 } };
+      }
+      throw new Error(`unexpected POST ${url}`);
+    });
+    renderAt('change=memory&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    await screen.findByText('com_mindstone_onb_memory_ok 768');
+    expect(screen.queryByTestId('ms-onb-memory-skipped')).toBeNull();
+  });
+
   it('the provider change offers no way on to the model step', async () => {
     renderAt('change=provider&from=providers');
     await screen.findByRole('heading', { name: 'com_mindstone_onb_provider_title' });
