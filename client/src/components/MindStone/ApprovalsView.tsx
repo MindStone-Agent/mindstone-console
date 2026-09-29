@@ -315,17 +315,23 @@ function componentOutcome(
   if (result.kind === 'persona_kb_create' && result.ingested) {
     const { error, entryCount } = result.ingested;
     // Written into a persona that doesn't load: not in use, whatever the ingest did.
-    const unused = result.listed === false ? ` ${visibleText(result.note ?? '')}` : '';
+    const unused = result.listed === false;
+    const notInUse = (l: ReturnType<typeof useLocalize>) =>
+      unused
+        ? ` ${l('com_mindstone_appr_component_not_joined', {
+            0: visibleText(result.note?.trim() || l('com_mindstone_appr_persona_not_loading')),
+          })}`
+        : '';
     return typeof error === 'string'
       ? {
           ok: false,
           text: (l) =>
-            `${l('com_mindstone_appr_kb_ingest_failed', { 0: visibleText(error) })}${unused}`,
+            `${l('com_mindstone_appr_kb_ingest_failed', { 0: visibleText(error) })}${notInUse(l)}`,
         }
       : {
           ok: !unused,
           text: (l) =>
-            `${l('com_mindstone_appr_kb_ingested', { 0: String(entryCount ?? 0) })}${unused}`,
+            `${l('com_mindstone_appr_kb_ingested', { 0: String(entryCount ?? 0) })}${notInUse(l)}`,
         };
   }
   const joined =
@@ -531,11 +537,14 @@ export default function MindStoneApprovalsView() {
       // Refusals that changed the card anyway (its persona was rejected, so it
       // was too; or the Console stopped waiting on an approve that went on):
       // the list and the card are read again (#125 review).
+      // A reject that didn't get through keeps the owner's note and form for a retry.
       if (
         code === 'persona_rejected' ||
         code === 'gateway_timeout' ||
         code === 'already_decided' ||
-        code === undefined
+        code === 'queue_busy' ||
+        code === 'changed' ||
+        (code === undefined && decision === 'approve')
       ) {
         void load();
         void open(decided.id).then(() => {
@@ -596,13 +605,19 @@ export default function MindStoneApprovalsView() {
               <input
                 type="checkbox"
                 checked={showAll}
+                // Locked with the list: the decision's own list read would undo it.
+                disabled={busy}
                 onChange={(event) => setShowAll(event.target.checked)}
               />
               {localize('com_mindstone_appr_show_all')}
             </label>
           </div>
           {busy && (
-            <p className="text-sm text-text-secondary" data-testid="ms-appr-deciding">
+            <p
+              className="text-sm text-text-secondary"
+              aria-live="polite"
+              data-testid="ms-appr-deciding"
+            >
               {localize('com_mindstone_appr_deciding')}
             </p>
           )}
@@ -614,7 +629,7 @@ export default function MindStoneApprovalsView() {
                 <li key={action.id}>
                   <button
                     type="button"
-                    className="w-full rounded px-2 py-1 text-left hover:bg-surface-hover"
+                    className="w-full rounded px-2 py-1 text-left hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
                     aria-current={detail?.id === action.id}
                     // One decision at a time: while it is in flight the list
                     // is locked, so its answer always lands on its own card.
