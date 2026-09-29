@@ -698,6 +698,48 @@ describe('MindStone admin proxy', () => {
       expect(JSON.parse(response.text).code).toBe('gateway_timeout');
     });
 
+    it('gets each newline past compression as it is written, not at the end', async () => {
+      // The Console mounts compression(), which holds small writes until flushed.
+      const http = require('node:http');
+      const compressed = express();
+      compressed.use(require('compression')());
+      compressed.use(express.json());
+      compressed.use((req, _res, next) => {
+        req.user = CALLERS.manage;
+        next();
+      });
+      compressed.use('/api/mindstone', require('../mindstone'));
+      fetchMock.mockImplementation(async () =>
+        accepted(() => later((resolve) => resolve('{"ok":true}'), 300)),
+      );
+      const server = compressed.listen(0);
+      try {
+        const started = Date.now();
+        const firstByteAfter = await new Promise((resolve, reject) => {
+          const req = http.request(
+            {
+              port: server.address().port,
+              method: 'POST',
+              path: '/api/mindstone/admin/memory/pull',
+              headers: { 'content-type': 'application/json', 'accept-encoding': 'gzip' },
+            },
+            (res) => {
+              // Decoded: gzip sends its own header at the first write, before any newline.
+              const decoded = res.pipe(require('node:zlib').createGunzip());
+              decoded.once('data', () => resolve(Date.now() - started));
+              decoded.on('error', reject);
+            },
+          );
+          req.on('error', reject);
+          req.end('{}');
+        });
+        expect(firstByteAfter).toBeLessThan(200);
+      } finally {
+        server.closeAllConnections?.();
+        server.close();
+      }
+    });
+
     it('a browser that leaves stops the download on the gateway', async () => {
       let signal;
       fetchMock.mockImplementation(async (_url, init) => {
