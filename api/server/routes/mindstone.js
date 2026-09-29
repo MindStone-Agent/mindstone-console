@@ -101,6 +101,13 @@ const INGEST_PATH = /^personas\/[A-Za-z0-9._-]+\/knowledgebases\/[a-z0-9-]+\/ing
 const INGEST_TIMEOUT_MS = 4 * 60_000;
 /** Approving a proposed private KB ingests it before answering (#125), so it gets an ingest's wait. */
 const APPROVE_PATH = /^approvals\/[A-Za-z0-9-]+\/approve$/;
+/**
+ * A model download answers only when it ends, up to 15 minutes on the gateway
+ * (MindStone-Agent #145). Once the gateway accepts it, the browser gets the
+ * headers and a newline this often, so neither the browser (Firefox gives up
+ * after 5 minutes with nothing) nor a proxy in between stops waiting.
+ */
+const LONG_WAIT = { paths: new Set(['memory/pull']), heartbeatMs: 10_000 };
 
 /** Gateway base URL: MINDSTONE_GATEWAY_URL is the OpenAI base (…/v1); the admin API sits at the root. */
 function gatewayBase() {
@@ -182,6 +189,21 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
     }
     query = `?lines=${lines}`;
   }
+  const longWait = LONG_WAIT.paths.has(path);
+  // A browser that leaves a download stops it on the gateway, which frees its
+  // one download slot at once (#145).
+  const browserGone = new AbortController();
+  if (longWait) {
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        browserGone.abort();
+      }
+    });
+  }
+  /** An error answer; once the headers have gone, its JSON ends the 200. */
+  const fail = (status, body) =>
+    res.headersSent ? res.end(JSON.stringify(body)) : res.status(status).json(body);
+  let heartbeat;
   try {
     const response = await fetch(`${base}/admin/${path}${query}`, {
       method: req.method,
@@ -190,17 +212,34 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
       // Never follow a redirect: fetch would carry the admin credential (and
       // the body, which can hold a secret) to wherever it points.
       redirect: 'error',
-      signal: AbortSignal.timeout(
-        ROUTE_TIMEOUT_MS[path] ??
-          (INGEST_PATH.test(path) || APPROVE_PATH.test(path) ? INGEST_TIMEOUT_MS : TIMEOUT_MS),
-      ),
+      signal: AbortSignal.any([
+        AbortSignal.timeout(
+          ROUTE_TIMEOUT_MS[path] ??
+            (INGEST_PATH.test(path) || APPROVE_PATH.test(path) ? INGEST_TIMEOUT_MS : TIMEOUT_MS),
+        ),
+        browserGone.signal,
+      ]),
     });
+    if (longWait && response.status === 200) {
+      // Accepted: a refusal (403, 409) came as its own status, before this.
+      res.status(200);
+      res.type('application/json');
+      res.flushHeaders();
+      heartbeat = setInterval(() => {
+        if (res.writableEnded || res.destroyed) {
+          return;
+        }
+        res.write('\n');
+        // Compression holds a small write back until it is flushed.
+        res.flush?.();
+      }, LONG_WAIT.heartbeatMs);
+    }
     const text = await response.text();
     if (response.status === 401) {
       // The gateway refused the Console's own credentials. Passing 401 through
       // would read as an expired session in the browser and log the admin out.
       logger.error('[mindstone] the gateway refused the Console credentials (401)');
-      return res.status(502).json({
+      return fail(502, {
         ok: false,
         error:
           "the MindStone gateway refused the Console's credentials; check MINDSTONE_GATEWAY_TOKEN and MINDSTONE_ADMIN_TOKEN",
@@ -219,9 +258,10 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
       logger.error(
         `[mindstone] the gateway answered ${response.status}${isJson ? '' : ' with a body that is not JSON'}`,
       );
-      return res
-        .status(502)
-        .json({ ok: false, error: "the MindStone gateway couldn't handle the request" });
+      return fail(502, { ok: false, error: "the MindStone gateway couldn't handle the request" });
+    }
+    if (res.headersSent) {
+      return res.end(text);
     }
     const etag = response.headers.get('etag');
     if (etag) {
@@ -234,17 +274,24 @@ router.all('/admin/*path', requireForMethod, async (req, res) => {
     // Logged here, never sent: a fetch error can quote a header value (the
     // tokens) or a URL with credentials.
     logger.error('[mindstone] gateway request failed', error);
+    if (browserGone.signal.aborted) {
+      // Nobody is waiting for an answer.
+      return;
+    }
     // The Console stopped waiting: the gateway may still be working on it (a
     // long ingest), which isn't the same as a gateway that is down (#125).
     if (error?.name === 'TimeoutError') {
-      return res.status(504).json({
+      return fail(504, {
         ok: false,
         error: "the MindStone gateway didn't answer in time; it may still finish",
         code: 'gateway_timeout',
       });
     }
-    return res.status(502).json({ ok: false, error: "the MindStone gateway didn't answer" });
+    return fail(502, { ok: false, error: "the MindStone gateway didn't answer" });
+  } finally {
+    clearInterval(heartbeat);
   }
 });
 
 module.exports = router;
+module.exports.LONG_WAIT = LONG_WAIT;

@@ -635,4 +635,85 @@ describe('MindStone admin proxy', () => {
     expect(response.status).toBe(504);
     expect(response.body.code).toBe('gateway_timeout');
   });
+
+  describe('a model download, which answers only when it ends (MindStone-Agent #145)', () => {
+    const { LONG_WAIT } = require('../mindstone');
+    const saved = LONG_WAIT.heartbeatMs;
+    beforeEach(() => {
+      LONG_WAIT.heartbeatMs = 20;
+    });
+    afterEach(() => {
+      LONG_WAIT.heartbeatMs = saved;
+    });
+    const later = (settle, ms) =>
+      new Promise((resolve, reject) => setTimeout(() => settle(resolve, reject), ms));
+    const accepted = (text) => ({ status: 200, headers: { get: () => null }, text });
+    const pull = () => call('manage', { method: 'post', path: 'memory/pull' });
+
+    it('sends newlines while it runs, then the JSON', async () => {
+      fetchMock.mockImplementation(async () =>
+        accepted(() => later((resolve) => resolve('{"ok":true}'), 150)),
+      );
+      const response = await pull();
+      expect(response.status).toBe(200);
+      expect(response.headers['content-type']).toMatch(/application\/json/);
+      expect(response.headers['cache-control']).toBe('no-store');
+      expect(response.text.startsWith('\n')).toBe(true);
+      expect(JSON.parse(response.text)).toEqual({ ok: true });
+    });
+
+    it("passes the gateway's refusals through with their status, so the page can offer the permission", async () => {
+      for (const status of [403, 409]) {
+        fetchMock.mockImplementation(async () =>
+          gatewayAnswer(status, '{"ok":false,"error":"refused"}'),
+        );
+        const response = await pull();
+        expect(response.status).toBe(status);
+        expect(response.body.error).toBe('refused');
+      }
+    });
+
+    it("ends with an error of its own when the gateway's answer isn't JSON, never the answer", async () => {
+      fetchMock.mockImplementation(async () =>
+        accepted(() => later((resolve) => resolve('<html>ENOENT /home/synthetic</html>'), 60)),
+      );
+      const response = await pull();
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.text).ok).toBe(false);
+      expect(response.text).not.toMatch(/ENOENT|synthetic/);
+    });
+
+    it('ends with gateway_timeout when the Console stops waiting', async () => {
+      fetchMock.mockImplementation(async () =>
+        accepted(() =>
+          later((_resolve, reject) => {
+            const error = new Error('The operation was aborted due to timeout');
+            error.name = 'TimeoutError';
+            reject(error);
+          }, 60),
+        ),
+      );
+      const response = await pull();
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.text).code).toBe('gateway_timeout');
+    });
+
+    it('a browser that leaves stops the download on the gateway', async () => {
+      let signal;
+      fetchMock.mockImplementation(async (_url, init) => {
+        signal = init.signal;
+        return accepted(
+          () =>
+            new Promise((_resolve, reject) =>
+              init.signal.addEventListener('abort', () => reject(init.signal.reason)),
+            ),
+        );
+      });
+      await expect(pull().timeout(150)).rejects.toThrow();
+      for (let i = 0; i < 50 && !signal?.aborted; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(signal?.aborted).toBe(true);
+    });
+  });
 });
