@@ -31,7 +31,8 @@ export default function PrivateKnowledgebases({
   const personaPath = `${BASE}/personas/${encodeURIComponent(personaId)}/knowledgebases`;
   const [knowledgebases, setKnowledgebases] = useState<KnowledgebaseSummary[] | null>(null);
   const [open, setOpen] = useState<string | null>(null);
-  const [sources, setSources] = useState<Sources | null>(null);
+  /** The open KB's sources, with the KB they belong to (a slow answer for another KB is ignored). */
+  const [sources, setSources] = useState<{ kbId: string; list: Sources } | null>(null);
   const [newKb, setNewKb] = useState({ id: '', name: '' });
   const [text, setText] = useState({ name: '', text: '' });
   const [url, setUrl] = useState({ name: '', url: '' });
@@ -56,7 +57,7 @@ export default function PrivateKnowledgebases({
         const result = await request.get<{ sources: Sources }>(
           `${personaPath}/${encodeURIComponent(kbId)}/sources`,
         );
-        setSources(result.sources);
+        setSources({ kbId, list: result.sources });
       } catch (error) {
         setMessage({
           ok: false,
@@ -111,7 +112,7 @@ export default function PrivateKnowledgebases({
     );
     if (ok) {
       reset();
-      await loadSources(kbId);
+      await Promise.all([loadSources(kbId), load()]);
     }
   };
 
@@ -166,6 +167,12 @@ export default function PrivateKnowledgebases({
                 <button
                   type="button"
                   className={secondary}
+                  aria-label={localize(
+                    open === kb.id
+                      ? 'com_mindstone_pkb_close_named'
+                      : 'com_mindstone_pkb_sources_named',
+                    { 0: kb.id },
+                  )}
                   onClick={() => {
                     const next = open === kb.id ? null : kb.id;
                     setOpen(next);
@@ -180,7 +187,9 @@ export default function PrivateKnowledgebases({
                 <button
                   type="button"
                   className={primary}
-                  disabled={busy}
+                  // Nothing to ingest until it has a source.
+                  disabled={busy || kb.sourceCount === 0}
+                  aria-label={localize('com_mindstone_pkb_ingest_named', { 0: kb.id })}
                   data-testid={`ms-pkb-${kb.id}-ingest`}
                   onClick={() => void ingest(kb.id)}
                 >
@@ -190,19 +199,19 @@ export default function PrivateKnowledgebases({
             </div>
             {open === kb.id && (
               <div className="mt-2 flex flex-col gap-2">
-                {sources && (
+                {sources && sources.kbId === kb.id && (
                   <ul className="text-xs">
-                    {sources.text.map((name) => (
+                    {sources.list.text.map((name) => (
                       <li key={`t-${name}`} className="font-mono">
                         {`${visibleText(name)}.md`}
                       </li>
                     ))}
-                    {sources.urls.map((source) => (
+                    {sources.list.urls.map((source) => (
                       <li key={`u-${source.id}`} className="font-mono">
                         {visibleText(source.id)}: {visibleText(source.url)}
                       </li>
                     ))}
-                    {sources.text.length + sources.urls.length === 0 && (
+                    {sources.list.text.length + sources.list.urls.length === 0 && (
                       <li className="text-text-secondary">
                         {localize('com_mindstone_pkb_no_sources')}
                       </li>
@@ -213,6 +222,7 @@ export default function PrivateKnowledgebases({
                   <input
                     className={input}
                     placeholder={localize('com_mindstone_pkb_source_name')}
+                    aria-label={localize('com_mindstone_pkb_text_name_label')}
                     value={text.name}
                     data-testid={`ms-pkb-${kb.id}-text-name`}
                     onChange={(event) => setText({ ...text, name: event.target.value })}
@@ -221,6 +231,7 @@ export default function PrivateKnowledgebases({
                     className={input}
                     rows={5}
                     placeholder={localize('com_mindstone_pkb_text_placeholder')}
+                    aria-label={localize('com_mindstone_pkb_text_label')}
                     value={text.text}
                     data-testid={`ms-pkb-${kb.id}-text`}
                     onChange={(event) => setText({ ...text, text: event.target.value })}
@@ -246,6 +257,7 @@ export default function PrivateKnowledgebases({
                     <input
                       className={input}
                       placeholder={localize('com_mindstone_pkb_source_name')}
+                      aria-label={localize('com_mindstone_pkb_url_name_label')}
                       value={url.name}
                       disabled={!advanced}
                       onChange={(event) => setUrl({ ...url, name: event.target.value })}
@@ -253,6 +265,7 @@ export default function PrivateKnowledgebases({
                     <input
                       className={`${input} flex-1`}
                       placeholder="https://"
+                      aria-label={localize('com_mindstone_pkb_url_label')}
                       value={url.url}
                       disabled={!advanced}
                       onChange={(event) => setUrl({ ...url, url: event.target.value })}

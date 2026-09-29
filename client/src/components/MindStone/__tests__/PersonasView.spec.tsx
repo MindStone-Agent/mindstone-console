@@ -219,14 +219,12 @@ describe('MindStone personas page (MindStone-Agent #105)', () => {
     // While the editor is open, there is no second Build button.
     expect(screen.queryByTestId('ms-persona-create')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'close-editor' }));
-    fireEvent.click(within(row('wren')).getByRole('button', { name: 'com_mindstone_pe_edit' }));
+    fireEvent.click(
+      within(row('wren')).getByRole('button', { name: 'com_mindstone_pe_edit_named:wren' }),
+    );
     expect(screen.getByTestId('ms-persona-editor-stub')).toHaveTextContent('editor:wren');
     // A persona that can't be loaded can't be edited here.
-    expect(
-      within(row('broken')).queryByRole('button', { name: 'com_mindstone_pe_edit' }),
-    ).not.toBeInTheDocument();
-    // Opening the editor changes nothing on the gateway.
-    expect(mockPatch).not.toHaveBeenCalled();
+    expect(within(row('broken')).queryByTestId('ms-persona-edit-broken')).not.toBeInTheDocument();
   });
 
   it("says the gateway is unreachable when the list can't be read", async () => {

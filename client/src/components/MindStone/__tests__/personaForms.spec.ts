@@ -4,6 +4,7 @@ import {
   emptyStep,
   idList,
   moveItem,
+  nextStepId,
   personaBody,
   stepBody,
   stepForm,
@@ -107,6 +108,28 @@ describe('persona builder forms (MindStone-Agent #125)', () => {
       'edit',
     );
     expect(body).toEqual({ name: 'WF', steps });
+  });
+
+  it('an edit sends only the text fields that changed, and an emptied description as ""', () => {
+    const original = { ...form, description: 'Old' };
+    expect(personaBody({ ...original, description: '' }, 'edit', original)).toEqual({
+      description: '',
+      skills: ['a', 'b'],
+      workflows: ['wf-1'],
+      knowledgebases: [],
+    });
+    expect(personaBody(original, 'edit', original)).not.toHaveProperty('name');
+  });
+
+  it('keeps a workflow version, and never repeats a step id', () => {
+    expect(
+      workflowBody(
+        { id: 'wf', name: '', description: '', version: '3', steps: [emptyStep(0)] },
+        'edit',
+      ),
+    ).toMatchObject({ version: '3' });
+    expect(nextStepId([{ ...emptyStep(0), id: 'step-2' }])).toBe('step-3');
+    expect(nextStepId([emptyStep(0), emptyStep(1)])).toBe('step-3');
   });
 
   it('small helpers', () => {

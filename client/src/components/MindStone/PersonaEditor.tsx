@@ -56,6 +56,8 @@ export default function PersonaEditor({
   const [addWorkflow, setAddWorkflow] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  /** The persona as last loaded or saved: an edit sends only the text fields changed since. */
+  const [original, setOriginal] = useState<PersonaForm | undefined>(undefined);
 
   const loadSkills = useCallback(async () => {
     const result = await request.get<{ skills: PickerSkill[] }>(`${BASE}/skills`);
@@ -82,7 +84,10 @@ export default function PersonaEditor({
         ]);
         setAdvanced(permissions.permissions.advancedSettings);
         setGlobalKbs(kbs.knowledgebases);
-        if (persona) setForm(formFromPersona(persona.persona));
+        if (persona) {
+          setForm(formFromPersona(persona.persona));
+          setOriginal(formFromPersona(persona.persona));
+        }
         setLoaded(true);
       } catch (error) {
         setMessage({
@@ -100,8 +105,9 @@ export default function PersonaEditor({
       if (editingId) {
         const result = (await request.patch(
           `${BASE}/personas/${encodeURIComponent(editingId)}`,
-          personaBody(form, 'edit'),
+          personaBody(form, 'edit', original),
         )) as { persona: { active: boolean } };
+        setOriginal(form);
         setMessage({
           ok: true,
           text: localize(
@@ -113,6 +119,7 @@ export default function PersonaEditor({
         const id = form.id.trim();
         await request.post(`${BASE}/personas`, personaBody(form, 'create'));
         setEditingId(id);
+        setOriginal({ ...form, id });
         setMessage({ ok: true, text: localize('com_mindstone_pe_created', { 0: id }) });
         onSaved(id, false);
       }
@@ -133,7 +140,15 @@ export default function PersonaEditor({
   );
 
   if (!loaded) {
-    return message ? <p className="text-sm text-red-600">{visibleText(message.text)}</p> : null;
+    // A failed load can still be closed, so the list is usable again.
+    return message ? (
+      <div className="flex items-center gap-2" data-testid="ms-persona-editor-failed">
+        <p className="text-sm text-red-600">{visibleText(message.text)}</p>
+        <button type="button" className={secondary} onClick={onClose}>
+          {localize('com_mindstone_pe_close')}
+        </button>
+      </div>
+    ) : null;
   }
 
   return (
@@ -234,6 +249,7 @@ export default function PersonaEditor({
                     type="button"
                     className={secondary}
                     disabled={index === 0}
+                    aria-label={localize('com_mindstone_move_up_named', { 0: id })}
                     onClick={() =>
                       setForm({ ...form, workflows: moveItem(form.workflows, index, -1) })
                     }
@@ -244,6 +260,7 @@ export default function PersonaEditor({
                     type="button"
                     className={secondary}
                     disabled={index === form.workflows.length - 1}
+                    aria-label={localize('com_mindstone_move_down_named', { 0: id })}
                     onClick={() =>
                       setForm({ ...form, workflows: moveItem(form.workflows, index, 1) })
                     }
@@ -253,6 +270,7 @@ export default function PersonaEditor({
                   <button
                     type="button"
                     className={secondary}
+                    aria-label={localize('com_mindstone_pe_edit_named', { 0: id })}
                     onClick={() => setWorkflowEditor({ id })}
                   >
                     {localize('com_mindstone_pe_edit')}
@@ -260,6 +278,7 @@ export default function PersonaEditor({
                   <button
                     type="button"
                     className={secondary}
+                    aria-label={localize('com_mindstone_picker_remove', { 0: id })}
                     onClick={() =>
                       setForm({ ...form, workflows: toggleId(form.workflows, id, false) })
                     }
@@ -350,7 +369,7 @@ export default function PersonaEditor({
                   <input
                     type="checkbox"
                     checked={form.knowledgebases.includes(kb.id)}
-                    disabled={Boolean(kb.error)}
+                    disabled={Boolean(kb.error) && !form.knowledgebases.includes(kb.id)}
                     data-testid={`ms-pe-global-kb-${kb.id}`}
                     onChange={(event) =>
                       setForm({
@@ -368,6 +387,32 @@ export default function PersonaEditor({
             ))}
           </ul>
         )}
+        {form.knowledgebases
+          .filter((id) => !globalKbs.some((kb) => kb.id === id))
+          .map((id) => (
+            <div
+              key={id}
+              className="flex items-center justify-between gap-2 text-sm"
+              data-testid={`ms-pe-global-kb-missing-${id}`}
+            >
+              <span>
+                <span className="font-mono">{visibleText(id)}</span>{' '}
+                <span className="text-xs text-red-600">
+                  {localize('com_mindstone_pe_kb_missing')}
+                </span>
+              </span>
+              <button
+                type="button"
+                className={secondary}
+                aria-label={localize('com_mindstone_picker_remove', { 0: id })}
+                onClick={() =>
+                  setForm({ ...form, knowledgebases: toggleId(form.knowledgebases, id, false) })
+                }
+              >
+                {localize('com_mindstone_picker_remove_short')}
+              </button>
+            </div>
+          ))}
         <h4 className="text-sm font-medium">{localize('com_mindstone_pe_private_kbs')}</h4>
         {editingId ? (
           <PrivateKnowledgebases personaId={editingId} advanced={advanced} />

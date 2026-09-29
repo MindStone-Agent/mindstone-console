@@ -204,6 +204,7 @@ export default function MindStonePersonasView() {
                         className={secondary}
                         disabled={busy}
                         data-testid={`ms-persona-edit-${persona.id}`}
+                        aria-label={localize('com_mindstone_pe_edit_named', { 0: persona.id })}
                         onClick={() => setEditing(persona.id)}
                       >
                         {localize('com_mindstone_pe_edit')}

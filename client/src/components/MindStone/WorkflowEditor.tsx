@@ -9,7 +9,7 @@
 import { useEffect, useState } from 'react';
 import { request } from 'librechat-data-provider';
 import type { ConditionForm, WorkflowForm, WorkflowStepForm } from './personaForms';
-import { emptyStep, moveItem, stepForm, workflowBody } from './personaForms';
+import { emptyStep, moveItem, nextStepId, stepForm, workflowBody } from './personaForms';
 import { visibleText } from './visibleText';
 import { useLocalize } from '~/hooks';
 
@@ -56,12 +56,18 @@ export default function WorkflowEditor({
       try {
         const result = await request.get<{
           id: string;
-          workflow: { name?: string; description?: string; steps: Array<Record<string, unknown>> };
+          workflow: {
+            name?: string;
+            description?: string;
+            version?: string;
+            steps: Array<Record<string, unknown>>;
+          };
         }>(`${BASE}/workflows/${encodeURIComponent(workflowId)}`);
         setForm({
           id: result.id,
           name: result.workflow.name ?? '',
           description: result.workflow.description ?? '',
+          version: result.workflow.version,
           steps: result.workflow.steps.map(stepForm),
         });
         setLoaded(true);
@@ -102,6 +108,26 @@ export default function WorkflowEditor({
   const secondary = 'rounded border border-border-medium px-2 py-1 text-sm disabled:opacity-50';
   const primary = 'rounded bg-surface-submit px-3 py-1 text-white disabled:opacity-50';
 
+  /**
+   * The personas a step can name, plus the one it names now if that isn't
+   * among them (it doesn't load, or isn't listed), so the page shows what a
+   * save sends back.
+   */
+  const personaOptions = (current: string) => [
+    ...personas.map((persona) => (
+      <option key={persona.id} value={persona.id}>
+        {`${visibleText(persona.name)} (${visibleText(persona.id)})`}
+      </option>
+    )),
+    ...(current && !personas.some((persona) => persona.id === current)
+      ? [
+          <option key={`missing-${current}`} value={current}>
+            {localize('com_mindstone_wf_persona_unavailable', { 0: visibleText(current) })}
+          </option>,
+        ]
+      : []),
+  ];
+
   const conditionInputs = (
     condition: ConditionForm,
     onChange: (next: ConditionForm) => void,
@@ -123,7 +149,14 @@ export default function WorkflowEditor({
   );
 
   if (!loaded) {
-    return message ? <p className="text-sm text-red-600">{message}</p> : null;
+    return message ? (
+      <div className="flex items-center gap-2" data-testid="ms-workflow-editor-failed">
+        <p className="text-sm text-red-600">{visibleText(message)}</p>
+        <button type="button" className={secondary} onClick={onCancel}>
+          {localize('com_mindstone_cancel')}
+        </button>
+      </div>
+    ) : null;
   }
 
   return (
@@ -137,6 +170,9 @@ export default function WorkflowEditor({
           : localize('com_mindstone_wf_new_title')}
       </h3>
       <p className="text-xs text-text-secondary">{localize('com_mindstone_wf_intro')}</p>
+      <p className="text-xs text-text-secondary" data-testid="ms-wf-live-note">
+        {localize('com_mindstone_wf_live_note')}
+      </p>
       {!workflowId && (
         <label className="flex flex-col gap-1 text-sm">
           {localize('com_mindstone_wf_id')}
@@ -228,11 +264,7 @@ export default function WorkflowEditor({
                     onChange={(event) => setStep(index, { personaId: event.target.value })}
                   >
                     <option value="">{localize('com_mindstone_wf_route_persona_none')}</option>
-                    {personas.map((persona) => (
-                      <option key={persona.id} value={persona.id}>
-                        {visibleText(persona.name)} ({visibleText(persona.id)})
-                      </option>
-                    ))}
+                    {personaOptions(step.personaId)}
                   </select>
                 </label>
                 <label className="flex flex-col gap-1 text-xs">
@@ -279,11 +311,7 @@ export default function WorkflowEditor({
                     onChange={(event) => setStep(index, { gatePersona: event.target.value })}
                   >
                     <option value="">{localize('com_mindstone_wf_route_persona_none')}</option>
-                    {personas.map((persona) => (
-                      <option key={persona.id} value={persona.id}>
-                        {visibleText(persona.name)} ({visibleText(persona.id)})
-                      </option>
-                    ))}
+                    {personaOptions(step.gatePersona)}
                   </select>
                 ) : (
                   conditionInputs(
@@ -300,7 +328,7 @@ export default function WorkflowEditor({
                       value={step.attempts}
                       onChange={(event) => setStep(index, { attempts: event.target.value })}
                     >
-                      {['1', '2', '3', '4', '5'].map((value) => (
+                      {[...new Set(['1', '2', '3', '4', '5', step.attempts])].map((value) => (
                         <option key={value} value={value}>
                           {value}
                         </option>
@@ -332,7 +360,15 @@ export default function WorkflowEditor({
         <button
           type="button"
           className={secondary}
-          onClick={() => setForm({ ...form, steps: [...form.steps, emptyStep(form.steps.length)] })}
+          onClick={() =>
+            setForm({
+              ...form,
+              steps: [
+                ...form.steps,
+                { ...emptyStep(form.steps.length), id: nextStepId(form.steps) },
+              ],
+            })
+          }
         >
           {localize('com_mindstone_wf_add_step')}
         </button>

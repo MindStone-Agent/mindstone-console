@@ -66,20 +66,42 @@ function unique(ids: string[]): string[] {
 }
 
 /**
- * POST /admin/personas (create) or PATCH /admin/personas/<id> (edit). An
- * edit sends every list, so the persona holds exactly what the page shows;
- * an empty list clears it (then all skills, all global collections).
+ * POST /admin/personas (create) or PATCH /admin/personas/<id> (edit).
+ * - An edit sends every list, so the persona holds exactly what the page
+ *   shows; an empty list clears it (then all skills, all global collections).
+ * - An edit sends a text field only when it changed from `original`, so a
+ *   persona whose text the gateway wouldn't accept today (a pack persona over
+ *   a limit) can still have its components changed. A description emptied
+ *   is sent as "", which clears it.
  */
-export function personaBody(form: PersonaForm, mode: 'create' | 'edit'): Record<string, unknown> {
-  const description = form.description.trim();
-  return {
-    ...(mode === 'create' ? { id: form.id.trim() } : {}),
-    name: form.name.trim(),
-    ...(description ? { description } : {}),
-    personaMarkdown: form.personaMarkdown,
+export function personaBody(
+  form: PersonaForm,
+  mode: 'create' | 'edit',
+  original?: PersonaForm,
+): Record<string, unknown> {
+  const lists = {
     skills: unique(form.skills),
     workflows: unique(form.workflows),
     knowledgebases: unique(form.knowledgebases),
+  };
+  const name = form.name.trim();
+  const description = form.description.trim();
+  if (mode === 'create') {
+    return {
+      id: form.id.trim(),
+      name,
+      ...(description ? { description } : {}),
+      personaMarkdown: form.personaMarkdown,
+      ...lists,
+    };
+  }
+  return {
+    ...(!original || name !== original.name.trim() ? { name } : {}),
+    ...(!original || description !== original.description.trim() ? { description } : {}),
+    ...(!original || form.personaMarkdown !== original.personaMarkdown
+      ? { personaMarkdown: form.personaMarkdown }
+      : {}),
+    ...lists,
   };
 }
 
@@ -145,6 +167,8 @@ export type WorkflowForm = {
   id: string;
   name: string;
   description: string;
+  /** Kept as read, so a save doesn't drop it (the page doesn't edit it). */
+  version?: string;
   steps: WorkflowStepForm[];
 };
 
@@ -204,6 +228,7 @@ export function workflowBody(form: WorkflowForm, mode: 'create' | 'edit'): Recor
     ...(mode === 'create' ? { id: form.id.trim() } : {}),
     ...(name ? { name } : {}),
     ...(description ? { description } : {}),
+    ...(form.version ? { version: form.version } : {}),
     steps: form.steps.map(stepBody),
   };
 }
@@ -229,4 +254,12 @@ export function stepForm(step: Record<string, unknown>, index: number): Workflow
     attempts: String((step.retry as { maxAttempts?: number } | undefined)?.maxAttempts ?? 1),
     onFail: step.onFail === 'continue' ? 'continue' : 'stop',
   };
+}
+
+/** The first `step-N` id no step has, so an added step never repeats one. */
+export function nextStepId(steps: WorkflowStepForm[]): string {
+  const taken = new Set(steps.map((step) => step.id.trim()));
+  let n = steps.length + 1;
+  while (taken.has(`step-${n}`)) n += 1;
+  return `step-${n}`;
 }

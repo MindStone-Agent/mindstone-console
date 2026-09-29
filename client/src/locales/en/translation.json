@@ -3319,7 +3319,7 @@
   "com_mindstone_pe_workflow_choose": "Add an existing workflow",
   "com_mindstone_pe_workflow_all_added": "Every workflow is listed",
   "com_mindstone_pe_workflow_new": "Build a new workflow",
-  "com_mindstone_pe_workflow_saved": "Saved workflow {{0}} and listed it. Save the persona to keep the list.",
+  "com_mindstone_pe_workflow_saved": "Saved workflow {{0}}; it is live wherever it already runs. It is listed here: save the persona to keep this list.",
   "com_mindstone_pe_kbs": "Knowledge bases",
   "com_mindstone_pe_global_kbs_hint": "Shared collections this persona searches. With none selected, it searches all of them.",
   "com_mindstone_pe_global_kbs_none": "No shared knowledge bases yet.",
@@ -3377,5 +3377,18 @@
   "com_mindstone_wf_on_fail_stop": "Stop the workflow",
   "com_mindstone_wf_on_fail_continue": "Skip the gate",
   "com_mindstone_wf_add_step": "Add a step",
-  "com_mindstone_wf_save": "Save workflow"
+  "com_mindstone_wf_save": "Save workflow",
+  "com_mindstone_move_up_named": "Move {{0}} up",
+  "com_mindstone_move_down_named": "Move {{0}} down",
+  "com_mindstone_pe_edit_named": "Edit {{0}}",
+  "com_mindstone_pe_kb_missing": "attached, but no longer available: remove it to save",
+  "com_mindstone_wf_live_note": "Saving a workflow takes effect at once wherever it runs: as the active workflow, or for a persona that lists it. A step that hands the turn to a persona makes that persona answer those turns.",
+  "com_mindstone_wf_persona_unavailable": "{{0}} (not available)",
+  "com_mindstone_pkb_sources_named": "Show the sources of {{0}}",
+  "com_mindstone_pkb_close_named": "Hide the sources of {{0}}",
+  "com_mindstone_pkb_ingest_named": "Ingest {{0}}",
+  "com_mindstone_pkb_text_name_label": "Text source name",
+  "com_mindstone_pkb_text_label": "Text source (markdown)",
+  "com_mindstone_pkb_url_name_label": "URL source name",
+  "com_mindstone_pkb_url_label": "URL"
 }
