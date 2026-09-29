@@ -273,7 +273,7 @@ write_header_files() {
 secret_sources() {
   if [[ "${INSTALL_MODE}" == stack ]]; then
     # The stack's generated secrets: console.env and gateway.env (600), the admin password, and the harness's copies.
-    printf '%s\n' "${SECRETS_DIR}" "${STACK_DIR}/console.env" "${STACK_DIR}/gateway.env" "${STACK_DIR}/admin-password"
+    printf '%s\n' "${SECRETS_DIR}" "${STACK_DIR}/console.env" "${STACK_DIR}/gateway.env" "${STACK_DIR}/admin-password" "${STACK_MIRROR}/data/secrets"
   else
     printf '%s\n' "${SECRETS_DIR}" "${MSA_DIR}/.runtime/mindstone/secrets" "${COMPOSE_DIR}/.env"
   fi
@@ -423,6 +423,7 @@ teardown() {
       echo "containers: ${n_cont}"; echo "volumes: ${n_vol}"; echo "image ${HARNESS_IMAGES// /, }: ${img}"
       echo "scratch exists: ${scratch_left}"; echo "gateway port ${GW_PORT:-none} listening: ${port_left}"
       [[ "${INSTALL_MODE}" == stack ]] && echo "Console port ${CONSOLE_PORT:-none} listening: ${console_left}"
+      [[ "${INSTALL_MODE}" == stack ]] && echo "stack --uninstall and down -v: $([[ "${STACK_PROJECT_OK}" == 1 && "${STACK_COMPOSE_OK}" == 1 ]] && echo ran || echo "skipped (${STACK_TEARDOWN_SKIP:-unchecked}); label sweep only")"
       echo "J11 stub (port ${ENT_STUB_PORT:-none}) still running: ${stub_left}"
     } >"${EVIDENCE}/cleanup.txt" 2>/dev/null
     [[ "${n_cont}" == 0 ]] || leftovers+=("${n_cont} containers")

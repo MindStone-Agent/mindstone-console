@@ -34,12 +34,50 @@ STACK_CA_IN_GATEWAY="/run/uat-j11/ca.pem" # where compose.override.yml mounts J1
 HARNESS_IMAGES="${PROJECT}-gateway ${PROJECT}-console"
 CONSOLE_IMAGE="${PROJECT}-console"
 GW_TOKEN_FILE="${SECRETS_DIR}/gateway-token"
+# What teardown may run against the stack's own compose file. install-stack.sh --uninstall takes the project from the
+# install folder's .env (no -p), and `down -v` removes what the file names, so both run only when the installer used
+# this run's project (STACK_PROJECT_OK: .env's COMPOSE_PROJECT_NAME is PROJECT) and the file it used is the one the
+# guard passed (STACK_COMPOSE_OK). Otherwise teardown skips both, says why (STACK_TEARDOWN_SKIP), and leaves the
+# cleanup to run-journey.sh's sweep of what carries this project's label.
+STACK_PROJECT_OK=0
+STACK_COMPOSE_OK=0
+STACK_TEARDOWN_SKIP="the install didn't get far enough to check its project and compose file"
+STACK_PREFLIGHT="${SCRATCH}/stack-preflight" # the compose file the guard passed before the install, kept to compare
+STACK_INSTALLER_NOTE=""
 
 # Variables Compose would read from the harness's own environment ahead of the stack's .env (interpolation), or that
 # would change what the installer does. Unset for every stack command, so the stack's .env alone decides.
 STACK_UNSET=(-u MINDSTONE_BUILD_CONTEXT -u CONSOLE_BUILD_CONTEXT -u OLLAMA_BASE_URL -u COMPOSE_PROFILES -u COMPOSE_FILE
   -u COMPOSE_PROJECT_NAME -u MINDSTONE_DIR -u MINDSTONE_REF -u CONSOLE_REF -u CONSOLE_PORT -u MINDSTONE_GATEWAY_PORT
   -u MINDSTONE_PROJECT -u MINDSTONE_OLLAMA_BASE_URL -u COMPOSE_PATH_SEPARATOR)
+
+# stack_guard <dir> <log>: compose-guard.mjs on <dir>'s compose.yml (and compose.override.yml), resolved the way
+# install-stack.sh runs compose: no -p, so the project comes from <dir>/.env as it does for the installer.
+stack_guard() {
+  local files=(-f "$1/compose.yml")
+  [[ -f "$1/compose.override.yml" ]] && files+=(-f "$1/compose.override.yml")
+  env "${STACK_UNSET[@]}" docker compose --project-directory "$1" "${files[@]}" config --format json 2>>"$2" \
+    | node "${HERE}/lib/compose-guard.mjs" "${PROJECT}" "$1" >>"$2" 2>&1
+}
+
+# stack_check_installed: after install-stack.sh ran (whether it succeeded or not), whether it used this run's project
+# and the compose file the guard passed. Sets STACK_PROJECT_OK, STACK_COMPOSE_OK and STACK_TEARDOWN_SKIP; prints the
+# problems, one per line (none: both hold).
+stack_check_installed() {
+  local used reasons=()
+  used=$(stack_env_value "${STACK_DIR}/.env" COMPOSE_PROJECT_NAME)
+  if [[ "${used}" == "${PROJECT}" ]]; then STACK_PROJECT_OK=1; else
+    STACK_PROJECT_OK=0
+    reasons+=("the install folder's .env has COMPOSE_PROJECT_NAME=${used:-(none)}, not ${PROJECT} (MINDSTONE_PROJECT): the installer ran another project")
+  fi
+  if [[ ! -f "${STACK_DIR}/compose.yml" ]]; then
+    STACK_COMPOSE_OK=0; reasons+=("the installer left no compose.yml")
+  elif ! cmp -s "${STACK_PREFLIGHT}/compose.yml" "${STACK_DIR}/compose.yml"; then
+    STACK_COMPOSE_OK=0; reasons+=("the installer's compose.yml isn't the file the guard passed before the install")
+  fi
+  if [[ ${#reasons[@]} -eq 0 ]]; then STACK_TEARDOWN_SKIP=""; else STACK_TEARDOWN_SKIP="$(IFS=';'; echo "${reasons[*]}")"; fi
+  [[ ${#reasons[@]} -eq 0 ]] || printf '%s\n' "${reasons[@]}"
+}
 
 # stack_compose <args…>: docker compose for this run's project only: -p, and the stack's own compose file, plus its
 # compose.override.yml when there is one (as install-stack.sh and a plain `docker compose` in the folder use it).
@@ -151,6 +189,8 @@ CNF
         -extfile "${d}/openssl.cnf" -extensions server
   ) >"${LOG_DIR}/j11-tls.log" 2>&1 || return 1
   chmod 644 "${d}/ca.pem" # the CA's certificate is public; its key stays 0600 here and never leaves this dir
+  # The private keys' bodies as one-line files, so X1 and the scrub look for them (they skip multi-line files).
+  (umask 077; for k in ca stub; do grep -v '^-----' "${d}/${k}.key" | tr -d '\n' >"${d}/${k}.key.body"; done)
   STACK_CA_FILE="${d}/ca.pem"
   STACK_STUB_CERT="${d}/stub.pem"
   STACK_STUB_KEY="${d}/stub.key"
@@ -162,7 +202,8 @@ CNF
 stack_install_steps() {
   local t out problems ps running with without admin_status onboarded code count
   log "MindStone-Agent: README install guide path A (the whole stack in Docker)"
-  ADMIN_EMAIL="${UAT_ADMIN_EMAIL:-uat-admin@example.com}"
+  # install-stack.sh lowercases the admin's email; so does the harness, for its checks and the sign-in.
+  ADMIN_EMAIL=$(printf '%s' "${UAT_ADMIN_EMAIL:-uat-admin@example.com}" | tr '[:upper:]' '[:lower:]')
 
   # --- A0: requirements --------------------------------------------------------------
   CURRENT_STEP=S0
@@ -193,7 +234,7 @@ stack_install_steps() {
   # Before the installer brings anything up: the compose file at <msa-ref> must resolve to this run's project, with
   # only its own names and binds inside its own dir (teardown removes what it names). Checked the way the installer
   # will run it (the project name from .env, no -p), with empty placeholder env files.
-  local pre="${SCRATCH}/stack-preflight"
+  local pre="${STACK_PREFLIGHT}"
   mkdir -p "${pre}"
   if ! curl -fsSL "${MSA_RAW}/${STACK_MSA_INSTALL_REF}/deploy/docker/compose.yml" -o "${pre}/compose.yml" 2>"${LOG_DIR}/compose-guard.log"; then
     record S1 FAIL "Stack A1: deploy/docker/compose.yml at ${MSA_REF}" "${LOG_DIR}/compose-guard.log" "couldn't download it"
@@ -202,13 +243,12 @@ stack_install_steps() {
   printf 'COMPOSE_PROJECT_NAME=%s\nMINDSTONE_REF=%s\nCONSOLE_REF=%s\nCONSOLE_PORT=%s\nMINDSTONE_GATEWAY_PORT=%s\nUID=%s\nGID=%s\n' \
     "${PROJECT}" "${STACK_MSA_INSTALL_REF}" "${STACK_CONSOLE_INSTALL_REF}" "${CONSOLE_PORT}" "${GW_PORT}" "$(id -u)" "$(id -g)" >"${pre}/.env"
   : >"${pre}/gateway.env"; : >"${pre}/console.env"; : >"${pre}/librechat.yaml"
-  if ! env "${STACK_UNSET[@]}" docker compose --project-directory "${pre}" -f "${pre}/compose.yml" config --format json 2>>"${LOG_DIR}/compose-guard.log" \
-       | node "${HERE}/lib/compose-guard.mjs" "${PROJECT}" "${pre}" >>"${LOG_DIR}/compose-guard.log" 2>&1; then
+  if ! stack_guard "${pre}" "${LOG_DIR}/compose-guard.log"; then
     record S1 FAIL "Stack A1: the stack's compose project isn't safe to run and tear down" "${LOG_DIR}/compose-guard.log" \
       "$(grep -v '^compose-guard' "${LOG_DIR}/compose-guard.log" | head -3 | tr '\n' ' ')"
     die "compose-guard refused the stack's compose file"
   fi
-  rm -rf "${pre}"
+  STACK_COMPOSE_OK=1 # this file only: after the install, the installer's copy must be the same (stack_check_installed)
   { echo "msa_sha=${MSA_SHA}"; echo "console_sha=${CONSOLE_SHA}"; echo "stack_msa_install_ref=${STACK_MSA_INSTALL_REF}"; echo "stack_console_install_ref=${STACK_CONSOLE_INSTALL_REF}"; } >>"${EVIDENCE}/run.env"
   curl -fsSL "${MSA_RAW}/${STACK_MSA_INSTALL_REF}/README.md" -o "${EVIDENCE}/msa-README.md" 2>/dev/null || : >"${EVIDENCE}/msa-README.md"
   MSA_README="${EVIDENCE}/msa-README.md"
@@ -220,11 +260,36 @@ stack_install_steps() {
     --admin-email "${ADMIN_EMAIL}" --admin-name "UAT Admin" ${UAT_STACK_OLLAMA_BASE_URL:+--ollama-url "${STACK_OLLAMA_BASE_URL}"} \
     >"${LOG_DIR}/stack-install.log" 2>&1 || install_rc=$?
   [[ -s "${STACK_INSTALLER_COPY}" ]] && cp "${STACK_INSTALLER_COPY}" "${EVIDENCE}/msa-install-stack.sh"
+  # First, whatever the exit: the project and compose file the installer actually used (teardown depends on both).
+  # (Not in $(...): it sets the flags teardown reads.)
+  stack_check_installed >"${LOG_DIR}/stack-installed-check.log"
+  if [[ -s "${LOG_DIR}/stack-installed-check.log" ]]; then
+    record S1 FAIL "Stack A1: install-stack.sh didn't install this run's project from the guarded compose file" "${LOG_DIR}/stack-installed-check.log" \
+      "$(tr '\n' ';' <"${LOG_DIR}/stack-installed-check.log")"
+    log "${c_red}${c_bold}the installer used another project or compose file: teardown won't run --uninstall or down -v on it${c_reset}"
+    die "install-stack.sh didn't install this run's project from the guarded compose file"
+  fi
   stack_compose ps --format '{{.Service}} {{.Status}}' >"${LOG_DIR}/stack-ps.txt" 2>&1 || true
   if [[ "${install_rc}" != 0 ]]; then
     tail_to "${LOG_DIR}/stack-install.log" "${LOG_DIR}/stack-install.tail.log" 80
     record S1 FAIL "Stack A1: install-stack.sh exited ${install_rc}" "${LOG_DIR}/stack-install.tail.log"
     die "install-stack.sh failed"
+  fi
+  # The installer is the thing under test: from a local file, it's compared with the one at the pinned commit.
+  local exactly=""
+  if [[ -n "${STACK_INSTALLER_FILE}" ]]; then
+    local mine theirs
+    mine=$({ shasum -a 256 2>/dev/null || sha256sum; } <"${STACK_INSTALLER_COPY}" | cut -c1-64)
+    theirs=$(curl -fsSL "${MSA_RAW}/${STACK_MSA_INSTALL_REF}/install-stack.sh" 2>/dev/null | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-64)
+    if [[ "${mine}" == "${theirs}" ]]; then
+      STACK_INSTALLER_NOTE="installer: a local file (UAT_STACK_INSTALLER_FILE), sha256 ${mine:0:12}…, the same as install-stack.sh at ${MSA_SHA}"
+      [[ "${STACK_PIN}" != 0 ]] && exactly=", installed at exactly those commits"
+    else
+      STACK_INSTALLER_NOTE="installer: a local file (UAT_STACK_INSTALLER_FILE), sha256 ${mine:0:12}…, NOT install-stack.sh at ${MSA_SHA} (${theirs:0:12}…)"
+    fi
+    echo "stack_installer_sha256=${mine}" >>"${EVIDENCE}/run.env"
+  elif [[ "${STACK_PIN}" != 0 ]]; then
+    exactly=", installed at exactly those commits"
   fi
   problems=()
   grep -qF "Open http://localhost:${CONSOLE_PORT}" "${LOG_DIR}/stack-install.log" || problems+=("no \"Open http://localhost:${CONSOLE_PORT}\"")
@@ -232,8 +297,8 @@ stack_install_steps() {
   grep -qE '^console Up' "${LOG_DIR}/stack-ps.txt" || problems+=("console isn't Up")
   grep -qE '^mongodb Up' "${LOG_DIR}/stack-ps.txt" || problems+=("mongodb isn't Up")
   if [[ ${#problems[@]} -eq 0 ]]; then
-    record S1 PASS "Stack A1: \`curl -fsSL …/<ref>/install-stack.sh | bash -s -- --dir --ref --console-ref --admin-email\`, MindStone-Agent ${MSA_REF} (${MSA_SHA}) and Console ${CONSOLE_REF} (${CONSOLE_SHA})$([[ "${STACK_PIN}" != 0 ]] && echo ', installed at exactly those commits'); \`docker compose ps\`: gateway healthy, console and mongodb up" \
-      "${LOG_DIR}/stack-install.log" "$(elapsed "$t"); $(tail -n 1 "${LOG_DIR}/compose-guard.log")"
+    record S1 PASS "Stack A1: \`curl -fsSL …/<ref>/install-stack.sh | bash -s -- --dir --ref --console-ref --admin-email\`, MindStone-Agent ${MSA_REF} (${MSA_SHA}) and Console ${CONSOLE_REF} (${CONSOLE_SHA})${exactly}; project ${PROJECT} in .env; the guarded compose file; \`docker compose ps\`: gateway healthy, console and mongodb up" \
+      "${LOG_DIR}/stack-install.log" "$(elapsed "$t"); $(tail -n 1 "${LOG_DIR}/compose-guard.log")${STACK_INSTALLER_NOTE:+; ${STACK_INSTALLER_NOTE}}"
   else
     record S1 FAIL "Stack A1: install-stack.sh checks" "${LOG_DIR}/stack-ps.txt" "$(IFS=';'; echo "${problems[*]}")"
     die "the stack didn't come up as the README says"
@@ -413,8 +478,14 @@ YAML
 
   # --- the running stack ---
   CURRENT_STEP=C3
-  stack_compose config --format json 2>"${LOG_DIR}/compose-config.err" | node "${HERE}/lib/compose-guard.mjs" "${PROJECT}" "${STACK_DIR}" >"${LOG_DIR}/compose-guard-installed.log" 2>&1 \
-    || { record C3 FAIL "Console in the stack: the installed compose project isn't this run's alone" "${LOG_DIR}/compose-guard-installed.log"; die "compose-guard refused the installed stack"; }
+  # The installed files (compose.yml and the harness's compose.override.yml), resolved as the installer resolves them.
+  if ! stack_guard "${STACK_DIR}" "${LOG_DIR}/compose-guard-installed.log"; then
+    STACK_COMPOSE_OK=0
+    STACK_TEARDOWN_SKIP="compose-guard refused the installed compose files (C3)"
+    record C3 FAIL "Console in the stack: the installed compose project isn't this run's alone" "${LOG_DIR}/compose-guard-installed.log" \
+      "$(grep -v '^compose-guard' "${LOG_DIR}/compose-guard-installed.log" | head -3 | tr '\n' ' ')"
+    die "compose-guard refused the installed stack"
+  fi
   stack_compose ps >"${LOG_DIR}/compose-ps.txt" 2>&1
   running=$(stack_compose ps --status running --services 2>/dev/null | sort | tr '\n' ' ')
   code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:${CONSOLE_PORT}")
@@ -431,9 +502,9 @@ YAML
 stack_admin_step() {
   local code mode problems=()
   CURRENT_STEP=C4
-  mode=$(stack_mode_of "${STACK_DIR}/admin-password")
+  mode=$(stack_mode_of "${STACK_DIR}/admin-password") || true
   [[ "${mode}" == "-rw-------" ]] || problems+=("admin-password is ${mode:-missing}, want -rw-------")
-  (umask 077; head -n 1 "${STACK_DIR}/admin-password" >"${SECRETS_DIR}/admin-password" 2>/dev/null)
+  (umask 077; head -n 1 "${STACK_DIR}/admin-password" >"${SECRETS_DIR}/admin-password" 2>/dev/null) || : >"${SECRETS_DIR}/admin-password"
   grep -qF "Admin account created: ${ADMIN_EMAIL}" "${LOG_DIR}/stack-install.log" || problems+=("the installer didn't say \"Admin account created: ${ADMIN_EMAIL}\"")
   # README A3, as written: the request comes from stdin, so the password is in no argv; only the status is printed.
   code=$(printf '{"email":"%s","password":"%s"}' "${ADMIN_EMAIL}" "$(head -n 1 "${SECRETS_DIR}/admin-password")" \
@@ -453,16 +524,22 @@ stack_admin_step() {
 stack_teardown() {
   [[ "${STACK_STARTED}" == 1 || -f "${STACK_DIR}/compose.yml" ]] || return 0
   if [[ -f "${STACK_DIR}/compose.yml" ]]; then
+    # Read only, and named by project (-p): safe whatever the installer did.
     stack_compose logs --no-color --timestamps gateway >"${LOG_DIR}/gateway.log" 2>&1
     stack_compose logs --no-color --timestamps console >"${LOG_DIR}/console.log" 2>&1
     stack_compose logs --no-color --timestamps mongodb >"${LOG_DIR}/mongodb.log" 2>&1
-    if [[ -s "${STACK_INSTALLER_COPY}" ]]; then
-      echo "\$ install-stack.sh --dir <scratch>/stack --uninstall" >>"${LOG_DIR}/teardown.log"
-      env "${STACK_UNSET[@]}" bash "${STACK_INSTALLER_COPY}" --dir "${STACK_DIR}" --uninstall >>"${LOG_DIR}/teardown.log" 2>&1 \
-        || echo "install-stack.sh --uninstall exited $?" >>"${LOG_DIR}/teardown.log"
-    fi
-    # Whatever --uninstall left (or couldn't reach): down, with this project's volumes.
-    stack_compose --profile ollama down -v --remove-orphans --timeout 10 >>"${LOG_DIR}/teardown.log" 2>&1
   fi
+  if [[ "${STACK_PROJECT_OK}" != 1 || "${STACK_COMPOSE_OK}" != 1 ]]; then
+    echo "stack teardown: install-stack.sh --uninstall and down -v SKIPPED: ${STACK_TEARDOWN_SKIP:-unchecked}; only what carries the label com.docker.compose.project=${PROJECT} is removed" >>"${LOG_DIR}/teardown.log"
+    return 0
+  fi
+  # The installer's own uninstall (README A5). It takes the project from .env, which was checked to be ${PROJECT}.
+  if [[ -s "${STACK_INSTALLER_COPY}" ]]; then
+    echo "\$ install-stack.sh --dir <scratch>/stack --uninstall" >>"${LOG_DIR}/teardown.log"
+    env "${STACK_UNSET[@]}" bash "${STACK_INSTALLER_COPY}" --dir "${STACK_DIR}" --uninstall >>"${LOG_DIR}/teardown.log" 2>&1 \
+      || echo "install-stack.sh --uninstall exited $?" >>"${LOG_DIR}/teardown.log"
+  fi
+  # What --uninstall keeps on purpose (the volumes), for this project only (-p) and the guarded file only.
+  stack_compose --profile ollama down -v --remove-orphans --timeout 10 >>"${LOG_DIR}/teardown.log" 2>&1
   return 0
 }

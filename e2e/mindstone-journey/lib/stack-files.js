@@ -5,7 +5,13 @@
 // them in place. In the stack they live in the gateway container's Docker volumes, so before a step reads them,
 // refresh() copies them out with `docker compose cp` (the log with `docker compose logs`) into a host mirror in the
 // scratch dir, and the step reads the mirror as it would the native files. The container is only read, except for
-// removeInGateway (J12's USER.md restore), which removes one file inside it with `docker compose exec`.
+// removeInGateway (J12's USER.md restore), which removes one file inside it with `docker compose exec`, and the
+// SQLite snapshots below, written to the container's /tmp and removed again.
+//
+// A live SQLite store in WAL mode (the recall index) can't be copied file by file: a checkpoint between copying the
+// database and its -wal would leave an old state. So each SQLite file under the data dir is first snapshotted inside
+// the container with SQLite's online backup (node:sqlite), which reads one consistent state, and the mirror gets that
+// snapshot (one file, no -wal) in place of the copied file.
 //
 // Without UAT_INSTALL=stack every function here is a no-op (refresh returns false, hostPath returns its input), so
 // the native path is unchanged.
@@ -65,6 +71,66 @@ function copyOut(s, from, to) {
   fs.renameSync(tmp, to);
 }
 
+// Run in the gateway container: node -e SNAPSHOT <data dir> <out dir>. Each *.sqlite, *.sqlite3 or *.db under the data
+// dir, backed up to the same relative path under the out dir, in rollback-journal mode (a single file).
+const SNAPSHOT = `
+const fs = require('fs'), path = require('path');
+const { DatabaseSync, backup } = require('node:sqlite');
+const [root, out] = process.argv.slice(1);
+fs.rmSync(out, { recursive: true, force: true });
+fs.mkdirSync(out, { recursive: true });
+const found = [];
+const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) walk(f); else if (/\\.(sqlite3?|db)$/.test(e.name)) found.push(f); } };
+walk(root);
+(async () => {
+  for (const f of found) {
+    const dst = path.join(out, path.relative(root, f));
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    const src = new DatabaseSync(f, { readOnly: true });
+    await backup(src, dst);
+    src.close();
+    const copy = new DatabaseSync(dst);
+    copy.exec('PRAGMA journal_mode=DELETE');
+    copy.close();
+  }
+})().catch((e) => { console.error(e.message); process.exit(1); });
+`;
+
+/** Overlays consistent snapshots of the gateway's SQLite files onto the mirror's data copy (see above). */
+function snapshotSqlite(s, dataCopy) {
+  const inContainer = `/tmp/uat-sqlite-snapshot-${process.pid}`;
+  const local = `${dataCopy}.sqlite-${process.pid}`;
+  try {
+    compose(s, ['exec', '-T', 'gateway', 'node', '--no-warnings', '-e', SNAPSHOT, s.dataDir, inContainer]);
+    fs.rmSync(local, { recursive: true, force: true });
+    compose(s, ['cp', `gateway:${inContainer}/.`, local]);
+  } catch (error) {
+    fs.rmSync(local, { recursive: true, force: true });
+    const detail = String(error.stderr || error.message).trim().split('\n').pop();
+    throw new Error(`stack mode: couldn't snapshot the gateway's SQLite files (${detail})`);
+  } finally {
+    try {
+      compose(s, ['exec', '-T', 'gateway', 'rm', '-rf', '--', inContainer]);
+    } catch {
+      // the next refresh writes it afresh; /tmp goes with the container
+    }
+  }
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(file);
+      else {
+        const target = path.join(dataCopy, path.relative(local, file));
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.copyFileSync(file, target);
+        for (const side of ['-wal', '-shm', '-journal']) fs.rmSync(`${target}${side}`, { force: true });
+      }
+    }
+  };
+  walk(local);
+  fs.rmSync(local, { recursive: true, force: true });
+}
+
 /**
  * Brings the mirror up to date: 'data' (the data dir: config, transcripts, records, the recall index), 'sessions'
  * (Pi's session files) or 'log' (the gateway container's log). False when not in stack mode.
@@ -74,7 +140,10 @@ function refresh(what) {
   if (!s) return false;
   if (Date.now() - (fresh.get(what) ?? 0) < MIN_INTERVAL_MS) return true;
   fs.mkdirSync(s.mirror, { recursive: true, mode: 0o700 });
-  if (what === 'data') copyOut(s, s.dataDir, path.join(s.mirror, 'data'));
+  if (what === 'data') {
+    copyOut(s, s.dataDir, path.join(s.mirror, 'data'));
+    snapshotSqlite(s, path.join(s.mirror, 'data'));
+  }
   else if (what === 'sessions') copyOut(s, s.sessionsDir, path.join(s.mirror, 'pi-sessions'));
   else if (what === 'log') fs.writeFileSync(path.join(s.mirror, 'gateway.log'), compose(s, ['logs', '--no-color', '--no-log-prefix', 'gateway']));
   else throw new Error(`stack-files: nothing called ${what}`);
