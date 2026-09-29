@@ -525,6 +525,9 @@ describe('MindStone admin proxy', () => {
         // A private KB's ingest fetches its URL sources (#125).
         ['post', 'personas/analyst/knowledgebases/notes/ingest', 4 * 60_000],
         ['post', 'personas/analyst/knowledgebases/notes/sources', 15_000],
+        // Approving a proposed private KB ingests it before answering.
+        ['post', 'approvals/0b5e7c1a-1111-4222-8333-444455556666/approve', 4 * 60_000],
+        ['post', 'approvals/0b5e7c1a-1111-4222-8333-444455556666/reject', 15_000],
       ]) {
         timeout.mockClear();
         await call('manage', { method, path });

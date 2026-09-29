@@ -14,7 +14,7 @@
  * a workflow, a private knowledge base), marked as part of the persona,
  * approved after it, and shown as plain text.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { request } from 'librechat-data-provider';
 import type { TranslationKeys } from '~/hooks';
@@ -276,6 +276,11 @@ function ComponentFields({ detail }: { detail: Detail }) {
             1: visibleText(kb.personaId),
           })}
         </p>
+        {kb.name && (
+          <p className="text-sm" data-testid="ms-appr-kb-name">
+            {localize('com_mindstone_appr_kb_name', { 0: visibleText(kb.name) })}
+          </p>
+        )}
         {kb.sources.map((source) => (
           <pre key={source.name} className={block}>
             {collapseBlankRuns(visibleText(source.text), (count) =>
@@ -289,6 +294,49 @@ function ComponentFields({ detail }: { detail: Detail }) {
   return null;
 }
 
+/** What the gateway answers for an approved component card (#125). */
+type ApproveResult = {
+  kind?: string;
+  listed?: boolean;
+  note?: string;
+  persona?: { id: string; listed: boolean; note: string };
+  ingested?: { entryCount?: number; error?: string };
+};
+
+/**
+ * The outcome of approving a persona's component, as the gateway said it: a
+ * KB whose ingest failed, or a component that couldn't join its persona, is
+ * not a plain "Approved." (#125 review).
+ */
+function componentOutcome(
+  result: ApproveResult | undefined,
+): { ok: boolean; text: (localize: ReturnType<typeof useLocalize>) => string } | undefined {
+  if (!result) return undefined;
+  if (result.kind === 'persona_kb_create' && result.ingested) {
+    const { error, entryCount } = result.ingested;
+    return typeof error === 'string'
+      ? {
+          ok: false,
+          text: (l) => l('com_mindstone_appr_kb_ingest_failed', { 0: visibleText(error) }),
+        }
+      : {
+          ok: true,
+          text: (l) => l('com_mindstone_appr_kb_ingested', { 0: String(entryCount ?? 0) }),
+        };
+  }
+  const joined =
+    result.kind === 'workflow_create' && typeof result.listed === 'boolean'
+      ? { listed: result.listed, note: result.note ?? '' }
+      : result.persona;
+  if (joined && !joined.listed) {
+    return {
+      ok: false,
+      text: (l) => l('com_mindstone_appr_component_not_joined', { 0: visibleText(joined.note) }),
+    };
+  }
+  return undefined;
+}
+
 /**
  * The existing components a proposed persona lists (#125): what an empty
  * list means, and each listed workflow's steps, since a workflow can route a
@@ -297,9 +345,12 @@ function ComponentFields({ detail }: { detail: Detail }) {
 function PersonaComponents({
   components,
   listedWorkflows,
+  pending,
 }: {
   components: NonNullable<Detail['components']>;
   listedWorkflows?: Detail['listedWorkflows'];
+  /** Only a pending card's approval can still be refused for a missing workflow. */
+  pending: boolean;
 }) {
   const localize = useLocalize();
   const line = (label: TranslationKeys, ids: string[], empty?: TranslationKeys) => {
@@ -332,9 +383,12 @@ function PersonaComponents({
           </pre>
         ) : (
           <p key={workflow.id} className="text-sm text-text-secondary">
-            {localize('com_mindstone_appr_persona_workflow_missing', {
-              0: visibleText(workflow.id),
-            })}
+            {localize(
+              pending
+                ? 'com_mindstone_appr_persona_workflow_missing'
+                : 'com_mindstone_appr_persona_workflow_unreadable',
+              { 0: visibleText(workflow.id) },
+            )}
           </p>
         ),
       )}
@@ -379,18 +433,25 @@ export default function MindStoneApprovalsView() {
     void load();
   }, [load]);
 
+  // The card clicked last: an answer for an earlier click is dropped (#125 review).
+  const opening = useRef<string | null>(null);
   const open = async (id: string) => {
+    opening.current = id;
     setMessage(null);
     setPersonasLink(false);
     setConfirming(null);
     setNeedsForce(false);
     setNote('');
+    // The previous card goes at once, so its buttons can't act while this one loads.
+    setDetail(null);
     try {
       const result = await request.get<{ action: Detail }>(
         `${BASE}/approvals/${encodeURIComponent(id)}`,
       );
+      if (opening.current !== id) return;
       setDetail(result.action);
     } catch (error) {
+      if (opening.current !== id) return;
       setDetail(null);
       setMessage({
         ok: false,
@@ -406,18 +467,23 @@ export default function MindStoneApprovalsView() {
       const body: { force?: boolean; note?: string } = {};
       if (decision === 'approve' && force) body.force = true;
       if (decision === 'reject' && note.trim()) body.note = note;
-      await request.post(`${BASE}/approvals/${encodeURIComponent(detail.id)}/${decision}`, body);
+      const answer = (await request.post(
+        `${BASE}/approvals/${encodeURIComponent(detail.id)}/${decision}`,
+        body,
+      )) as { result?: ApproveResult } | undefined;
       const persona = decision === 'approve' ? detail.persona : undefined;
-      setMessage({
-        ok: true,
-        text: persona
-          ? localize('com_mindstone_appr_persona_saved', { 0: visibleText(persona.name) })
-          : localize(
-              decision === 'approve'
-                ? 'com_mindstone_appr_approved'
-                : 'com_mindstone_appr_rejected',
-            ),
-      });
+      const outcome = decision === 'approve' ? componentOutcome(answer?.result) : undefined;
+      let text: string;
+      if (persona) {
+        text = localize('com_mindstone_appr_persona_saved', { 0: visibleText(persona.name) });
+      } else if (outcome) {
+        text = outcome.text(localize);
+      } else {
+        text = localize(
+          decision === 'approve' ? 'com_mindstone_appr_approved' : 'com_mindstone_appr_rejected',
+        );
+      }
+      setMessage({ ok: outcome?.ok ?? true, text });
       setPersonasLink(Boolean(persona));
       setDetail(null);
       setConfirming(null);
@@ -426,10 +492,21 @@ export default function MindStoneApprovalsView() {
       await load();
     } catch (error) {
       const { error: text, code } = errorBody(error);
-      // An existing memory file or installed skill is only replaced on a second, explicit click.
+      // An existing memory file or installed skill is only replaced on a second,
+      // explicit click; a persona's new skill never replaces one (#125).
       setNeedsForce(
-        decision === 'approve' && (code === 'memory_exists' || code === 'skill_exists'),
+        decision === 'approve' &&
+          (code === 'memory_exists' || (code === 'skill_exists' && !detail.parentApprovalId)),
       );
+      // Refusals that changed the card anyway (its persona was rejected, so it
+      // was too; or the Console stopped waiting on an approve that went on):
+      // the list and the card are read again (#125 review).
+      if (code === 'persona_rejected' || code === 'gateway_timeout' || code === 'already_decided') {
+        void load();
+        void open(detail.id).then(() =>
+          setMessage({ ok: false, text: text ?? localize('com_mindstone_not_changed') }),
+        );
+      }
       // A persona id that exists (persona_exists) is never overwritten, and
       // one the config already uses (persona_referenced) is never saved: the
       // gateway's text says to ask for a new name or reject.
@@ -527,7 +604,7 @@ export default function MindStoneApprovalsView() {
                 {localize('com_mindstone_appr_memory_path', { 0: detail.memory.path })}
               </p>
             )}
-            {detail.parentApprovalId && (
+            {detail.parentApprovalId && detail.status === 'pending' && (
               <p className="mb-1 text-sm text-text-secondary" data-testid="ms-appr-part-of-persona">
                 {localize('com_mindstone_appr_part_of_persona')}
               </p>
@@ -539,6 +616,7 @@ export default function MindStoneApprovalsView() {
                   <PersonaComponents
                     components={detail.components}
                     listedWorkflows={detail.listedWorkflows}
+                    pending={detail.status === 'pending'}
                   />
                 )}
                 {detail.status === 'pending' && (
