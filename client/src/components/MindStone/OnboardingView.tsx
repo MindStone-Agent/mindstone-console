@@ -76,11 +76,13 @@ type MemoryCheck = {
   missingModel?: boolean;
   /** Memories another model embedded (MindStone-Agent #140): embedded again after a switch. */
   reembed?: number;
+  /** Memories this model refused three times (MindStone-Agent #170): found by their words only. */
+  skipped?: number;
 };
 type MemoryCheckResult = {
   ok: boolean;
   dimensions?: number;
-  index?: { embedded?: number; otherModel?: number };
+  index?: { embedded?: number; otherModel?: number; skipped?: number };
   error?: string;
   missingModel?: boolean;
 };
@@ -590,6 +592,10 @@ export default function MindStoneOnboardingView() {
               reembed:
                 typeof result.index?.otherModel === 'number' && result.index.otherModel > 0
                   ? result.index.otherModel
+                  : undefined,
+              skipped:
+                typeof result.index?.skipped === 'number' && result.index.skipped > 0
+                  ? result.index.skipped
                   : undefined,
             }
           : {
@@ -1304,6 +1310,11 @@ export default function MindStoneOnboardingView() {
                     : 'com_mindstone_onb_memory_reembed_off',
                   { 0: String(currentCheck.reembed) },
                 )}
+              </p>
+            )}
+            {!pulling && currentCheck?.ok && currentCheck.skipped !== undefined && (
+              <p className="mb-3 text-sm text-text-secondary" data-testid="ms-onb-memory-skipped">
+                {localize('com_mindstone_onb_memory_skipped', { 0: String(currentCheck.skipped) })}
               </p>
             )}
             <div className="flex gap-2">
