@@ -88,6 +88,7 @@ import {
   modelMatchReasons,
   memoryChangeVerdict,
   recallIndexDims,
+  recallHitsForConversation,
   SETUP_STEPS,
   CHANGE_STEPS,
   IN_PLACE_STEPS,
@@ -1213,14 +1214,14 @@ const J12_STEP_HEADINGS: Record<string, string> = {
   memory: 'Set up memory',
   connectors: 'Connect a chat app (optional)',
 };
-/** How long J12 watches the recall index after the embedding change, for a re-index (none shows it holds only old vectors). */
-const J12_REINDEX_WAIT_MS = 30_000;
+/** J12's recall check after the embedding change: J9's question, whose fact a chat embedded with the old model holds. */
+const J12_RECALL_PROBE = "What is my dog's name? Answer with just the name.";
 /** The memory step's Test (the Console's proxy gives the embed check 25 s; a model's first load can take longer). */
 const J12_MEMORY_CHECK_MS = 90_000;
 /** A memory Test result that says the check ran out of time (a cold model load), not that the model can't embed. */
 const J12_TEST_AGAIN = /aborted|timed? ?out|no answer within/i;
 /** Words the product would use to warn that a new embedding model affects the memories already stored. */
-const J12_WARNING = /re-?index|re-?embed|incompatib|rebuil|existing (memor|vector|embedding)|stored (memor|vector)/i;
+const J12_WARNING = /re-?index|re-?embed|incompatib|rebuil|(existing|stored|saved) (memor|vector|embedding)|(another|a different|other|the old|the previous) (embedding )?model|\d+ memor/i;
 
 type J12Config = {
   etag?: string;
@@ -1329,7 +1330,8 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
   };
 
   let completed = false;
-  let modelPending: string | undefined;
+  /** Parts this Console/Ollama couldn't exercise: J12 ends PENDING with them once everything else passed. */
+  const pendingParts: string[] = [];
   try {
     await test.step('Access: advanced settings on, from the Advanced settings card on Settings', async () => {
       // J4's Start a chat turned them off and J7 turned them on; they last an hour. Saving on Settings needs them.
@@ -1432,11 +1434,13 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       // The other cloud model run-journey.sh found answering (UAT_ALT_MODEL), or, without one, the first other cloud model offered.
       const preferred = process.env.UAT_ALT_MODEL || undefined;
       const alternate = pickAlternateModel(values, original.routing.defaultModel, preferred);
+      let modelPending: string | undefined;
       if (!alternate) {
         modelPending =
           preferred === 'none'
             ? `no cloud model other than ${original.routing.defaultModel} answered the harness's probe (logs/provider.log)`
             : `the Model step offers no ${preferred ? `${preferred} (UAT_ALT_MODEL)` : `cloud model other than ${original.routing.defaultModel}`} (it offers: ${values.join(', ') || 'nothing'})`;
+        pendingParts.push(`the model part: ${modelPending}, so the chosen model is the one set up before`);
       }
       chosenModel = alternate ?? original.routing.defaultModel ?? '';
       expect(chosenModel, 'a model to choose').not.toBe('');
@@ -1469,6 +1473,7 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       const beforeModel = rest.join(':');
       const indexBefore = recallIndexDims();
       const sizes = Object.keys(indexBefore.byDims);
+      const chunksBefore = Object.values(indexBefore.byDims).reduce((sum, n) => sum + n, 0);
       const beforeDims = Number(readState().memoryCheck?.match(/(\d+) dimensions/)?.[1] ?? 0) || (sizes.length === 1 ? Number(sizes[0]) : undefined);
       await navigate(page, '/mindstone');
       await page.getByTestId('ms-setup-memory-change').click();
@@ -1482,21 +1487,19 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       await expect(section.getByRole('radio', { name: 'Ollama (local)' }), 'the saved provider is picked').toBeChecked();
       await expect(select, 'the saved embedding model is picked').toHaveValue(beforeModel);
       expect(await recall.isChecked(), 'automatic recall shows as saved').toBe(original.memory.autoRecall === true);
-      /** The section's words, less the Test result (whose "N dimensions" is not a warning). */
-      const words = () =>
-        section.evaluate((el) => {
-          const copy = el.cloneNode(true) as HTMLElement;
-          copy.querySelector('[data-testid="ms-onb-memory-check"]')?.remove();
-          return (copy.textContent ?? '').replace(/\s+/g, ' ').trim();
-        });
-      const wordsBefore = await words();
-      /** Test, for the model picked now: the page's own check request, then its result in place of "test first". */
+      /** The section's sentences as rendered (a line or a sentence each), the Test result included: the memory check reports memories another model embedded. */
+      const sentences = async () =>
+        (await section.innerText())
+          .split(/\n+|(?<=[.!?])\s+/)
+          .map((line) => line.replace(/\s+/g, ' ').trim())
+          .filter(Boolean);
+      const sentencesBefore = new Set(await sentences());
+      const testButton = section.getByRole('button', { name: 'Test', exact: true });
+      /** Test, for the model picked now: the page's own check request, then its result once the step is no longer busy. */
       const testEmbedding = async (): Promise<string> => {
-        const waiting = ((await check.textContent()) ?? '').trim();
-        await uiResponse(page, { method: 'POST', path: '/api/mindstone/admin/memory/check', timeoutMs: J12_MEMORY_CHECK_MS }, () =>
-          section.getByRole('button', { name: 'Test', exact: true }).click(),
-        );
-        await expect(check, 'the Test shows its result').not.toHaveText(waiting, { timeout: 15_000 });
+        await uiResponse(page, { method: 'POST', path: '/api/mindstone/admin/memory/check', timeoutMs: J12_MEMORY_CHECK_MS }, () => testButton.click());
+        await expect(testButton, 'the Test finishes').toBeEnabled({ timeout: 15_000 });
+        await expect(check, 'the Test shows its result').not.toHaveText(/^$/);
         return ((await check.textContent()) ?? '').trim();
       };
       /**
@@ -1537,7 +1540,12 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
         await recall.setChecked(!(original.memory.autoRecall === true));
         safeField = `autoRecall ${original.memory.autoRecall === true ? 'on -> off' : 'off -> on'}`;
       }
-      const wordsAfter = await words();
+      // A warning is the product's own words about the memories another model embedded, on the step before Save
+      // (the Test result included), and new since the step opened with the saved model.
+      const warned =
+        (await sentences())
+          .filter((sentence) => J12_WARNING.test(sentence) && !sentencesBefore.has(sentence))
+          .join(' ') || undefined;
       await shot(page, testInfo, 'memory-change');
       const saved = await uiResponse(page, { method: 'PATCH', path: '/api/mindstone/admin/config/memory' }, () =>
         section.getByRole('button', { name: 'Save', exact: true }).click(),
@@ -1546,19 +1554,17 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       expect(saved.status, `Save: PATCH /api/mindstone/admin/config/memory (the page says: "${said}")`).toBeLessThan(300);
       await expect(page.getByRole('status').filter({ hasText: 'Saved.' }), 'the change says it saved').toBeVisible({ timeout: 15_000 });
       await shot(page, testInfo, 'memory-saved');
-      // A warning is the product's own words about the memories already stored, new on the page since the change began.
-      const fresh = `${wordsAfter} ${await statusText(page)}`
-        .split(/(?<=[.!?])\s+/)
-        .filter((sentence) => J12_WARNING.test(sentence) && !wordsBefore.includes(sentence));
-      const warned = fresh.join(' ') || undefined;
       await page.getByTestId('ms-onb-change-back').click();
       await expect(page).toHaveURL(/\/mindstone$/);
       const memoryRow = page.getByTestId('ms-setup-memory');
       const memory = (await readConfig()).config?.memory ?? {};
-      proof.memory = { before: { spec: beforeSpec, dims: beforeDims ?? null }, after: after ?? null, safeField: safeField ?? null, tried, warned: warned ?? null, saved: memory, indexBefore };
+      proof.memory = { before: { spec: beforeSpec, dims: beforeDims ?? null, chunks: chunksBefore }, after: after ?? null, safeField: safeField ?? null, tried, warned: warned ?? null, saved: memory, indexBefore };
       await saveProof();
       if (!after) {
         note(testInfo, `memory: only one embedding model is pulled (tried ${tried.map((t) => `${t.model}: "${t.result}"`).join('; ')}), so a safe field was changed instead: ${safeField}`);
+        pendingParts.push(
+          `the embedding-model part: no other embedding model works on this Ollama (${tried.map((t) => `${t.model}: "${t.result}"`).join('; ')}), so the warning before Save and recall after the change could not be exercised; automatic recall was changed instead`,
+        );
         await expect(memoryRow, 'Settings shows the new automatic-recall setting').toContainText(`automatic recall ${original.memory.autoRecall === true ? 'off' : 'on'}`, { timeout: 30_000 });
         await shot(page, testInfo, 'settings-after-memory');
         expect(memory.autoRecall, 'config.memory.autoRecall is what was chosen on Settings').toBe(!(original.memory.autoRecall === true));
@@ -1571,18 +1577,28 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
       expect(memory.vectorStore, 'config.memory.vectorStore is unchanged').toBe(original.memory.vectorStore);
       expect(memory.autoRecall, 'config.memory.autoRecall is unchanged').toBe(original.memory.autoRecall);
 
-      // The vectors already stored: watch the recall index for a re-index, then judge (lib/settings-parity-evidence.js).
-      const started = Date.now();
-      let index = recallIndexDims();
-      let verdict = memoryChangeVerdict({ before: { spec: beforeSpec, dims: beforeDims }, after, warned, index });
-      while (verdict.verdict === 'fail' && Date.now() - started < J12_REINDEX_WAIT_MS) {
-        await page.waitForTimeout(3_000);
-        index = recallIndexDims();
-        verdict = memoryChangeVerdict({ before: { spec: beforeSpec, dims: beforeDims }, after, warned, index });
+      // Recall after the change: a fresh chat asks for J9's fact (told in a chat embedded by the old model). The reply
+      // isn't judged; the chunks recall supplied to it are, by their vector size: none may be the old model's.
+      let recallHits: { chunkId: string; dims: number | null }[] | undefined;
+      if (memory.autoRecall === true && chunksBefore > 0) {
+        await navigate(page, '/c/new');
+        await ensureMindStoneModel(page, testInfo);
+        const probe = await sendAndWaitForReply(page, J12_RECALL_PROBE);
+        await shot(page, testInfo, 'recall-after-change');
+        await attachText(testInfo, 'recall-after-change.txt', replyLog(probe));
+        recallHits = recallHitsForConversation(probe.conversationId);
+        proof.memory = { ...(proof.memory as object), recallProbe: { conversationId: probe.conversationId, error: probe.error, hits: recallHits } };
       }
-      proof.memory = { ...(proof.memory as object), indexAfter: index, watchedMs: Date.now() - started, verdict };
+      const index = recallIndexDims();
+      const verdict = memoryChangeVerdict({ before: { spec: beforeSpec, dims: beforeDims, chunks: chunksBefore }, after, warned, index, recallHits });
+      proof.memory = { ...(proof.memory as object), indexAfter: index, verdict };
       await saveProof();
-      note(testInfo, `embedding ${beforeSpec} (${beforeDims ?? '?'} dims) -> ${after.spec} (${after.dims} dims); warning: ${warned ? `"${warned}"` : 'none'}; recall index before ${JSON.stringify(indexBefore.byDims)}, after ${JSON.stringify(index.byDims)} (${index.pending} pending); ${verdict.why}`);
+      note(
+        testInfo,
+        `embedding ${beforeSpec} (${beforeDims ?? '?'} dims, ${chunksBefore} chunks embedded) -> ${after.spec} (${after.dims} dims); warning before Save: ${warned ? `"${warned}"` : 'none'}; ` +
+          `recall after the change: ${recallHits ? `${recallHits.length} chunk(s) at sizes ${JSON.stringify(recallHits.map((h) => h.dims))}` : 'not run'}; ` +
+          `recall index before ${JSON.stringify(indexBefore.byDims)}, after ${JSON.stringify(index.byDims)} (${index.pending} pending); ${verdict.why}`,
+      );
       if (verdict.verdict === 'fail') deferred.push(verdict.why);
     });
     // Put the memory setting back at once: no chat should embed with the changed model, and J10 recalls with the original.
@@ -1716,11 +1732,12 @@ test('J12 settings parity: every setup choice has its Settings equivalent; the m
 
     expect(deferred, 'J12 checks that failed along the way (each is in the notes and logs/j12-evidence.json)').toEqual([]);
     completed = true;
-    if (modelPending) {
+    if (pendingParts.length) {
       test.fixme(
         true,
-        `PENDING ${ISSUES.settingsParity} (model part): everything else passed, but ${modelPending}, so the chosen model is the one set up before. ` +
-          'Done when: with a second cloud model listed, the chat after the change runs on it.',
+        `PENDING ${ISSUES.settingsParity}: everything else passed, but ${pendingParts.join('; ')}. ` +
+          'Done when: with a second cloud model that answers, the chat after the change runs on it; with a second embedding model pulled, the ' +
+          'memory step warns about the memories the old model embedded before Save, and recall after the change scores none of them.',
       );
     }
   } finally {

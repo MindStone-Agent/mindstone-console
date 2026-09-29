@@ -17,14 +17,14 @@
 // - modelMatchReasons (the model-match check) proves the chat used the model
 //   chosen in Settings only when the saved route, the Settings row and the
 //   Pi session's provider and model all agree, with no fallback;
-// - memoryChangeVerdict passes an embedding change only when the vector size
-//   is unchanged, the index held no vectors, every vector is at the new size
-//   (re-indexed), or the product warned; vectors of the old size left behind
-//   with no warning FAIL as a product bug; no change, or no dimension count,
-//   FAIL too;
+// - memoryChangeVerdict passes an embedding change only when the Console
+//   warned before Save (whenever the old model had embedded memories; the
+//   same vector size is no excuse) and recall after the change scored no
+//   chunk of another size; old vectors left behind with no warning FAIL as a
+//   product bug; no change, or no dimension count, FAIL too;
 // - the recall-index reader's `dims` mode (lib/recall-index.js, the child
 //   process J12 reads the index with) counts chunks by vector size, pending
-//   and unreadable ones apart;
+//   and unreadable ones apart, and `chunkdims` gives given chunks' sizes;
 // - lib/gate.sh: J12 is a required row only with its flag (J10's and J11's
 //   don't bring it in), the DEMO SUBSET is exactly what it was (never J12),
 //   J12 is uncounted without its flag, and pw_explained_by and the stall
@@ -124,17 +124,21 @@ check(modelMatchReasons({ chosen: 'openrouter/meta/llama-3:free', saved: 'openro
 check(modelMatchReasons({ chosen: '', saved: '', answered: answered() }).length === 1, 'model match: no chosen model: fails');
 
 // --- The embedding change ---
-const NOMIC = { spec: 'ollama:nomic-embed-text', dims: 768 };
+const NOMIC = { spec: 'ollama:nomic-embed-text', dims: 768, chunks: 40 };
 const MXBAI = { spec: 'ollama:mxbai-embed-large', dims: 1024 };
+const WARNING = '40 memories were embedded by another model; they are re-embedded before recall uses them.';
 const idx = (byDims, pending = 0) => ({ present: true, byDims, pending, unreadable: 0 });
-const mv = (patch) => memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: undefined, index: idx({ 768: 40 }), ...patch });
+const mv = (patch) => memoryChangeVerdict({ before: NOMIC, after: MXBAI, warned: undefined, index: idx({ 768: 40 }), recallHits: undefined, ...patch });
 const silent = mv({});
-check(silent.verdict === 'fail' && /^PRODUCT BUG: /.test(silent.why) && silent.stale === 40 && /768 dimensions\) to ollama:mxbai-embed-large \(1024\) with no warning and no re-index/.test(silent.why), `embedding change: 768-dim vectors left behind for a 1024-dim model, no warning: FAIL as a product bug ("${silent.why.slice(0, 90)}…")`);
-check(mv({ index: idx({ 768: 40, 1024: 3 }, 2) }).verdict === 'fail' && mv({ index: idx({ 768: 40, 1024: 3 }, 2) }).stale === 40, 'embedding change: a mixed index (new vectors next to old ones) is still the bug');
-check(mv({ index: idx({ 1024: 43 }) }).verdict === 'pass' && /re-indexed/.test(mv({ index: idx({ 1024: 43 }) }).why), 'embedding change: every vector at the new size (re-indexed): pass');
-check(mv({ index: idx({}, 12) }).verdict === 'pass' && mv({ index: { present: false, byDims: {}, pending: 0 } }).verdict === 'pass', 'embedding change: an index with no vectors (only pending ones), or none at all: pass, nothing became incompatible');
-check(mv({ warned: 'Changing the model re-embeds your memories' }).verdict === 'pass', 'embedding change: the product warned: pass (the warning is its behaviour), stale vectors noted');
-check(mv({ after: { spec: 'ollama:other-768', dims: 768 } }).verdict === 'pass', 'embedding change: the same vector size: pass (size stays compatible)');
+check(silent.verdict === 'fail' && /^PRODUCT BUG: /.test(silent.why) && silent.stale === 40 && /no warning before Save, though 40 memories were embedded by ollama:nomic-embed-text/.test(silent.why), `embedding change: 768-dim vectors left behind for a 1024-dim model, no warning: FAIL as a product bug ("${silent.why.slice(0, 90)}…")`);
+check(mv({ index: idx({ 768: 40, 1024: 3 }, 2) }).verdict === 'fail' && mv({ index: idx({ 768: 40, 1024: 3 }, 2) }).stale === 40, 'embedding change: a mixed index (new vectors next to old ones), no warning: still the bug');
+check(mv({ index: idx({ 1024: 43 }) }).verdict === 'fail' && !/PRODUCT BUG/.test(mv({ index: idx({ 1024: 43 }) }).why), 'embedding change: re-indexed but no warning before Save: fails (the Console must say so), not as stale vectors');
+check(mv({ after: { spec: 'ollama:other-768', dims: 768 } }).verdict === 'fail', 'embedding change: the same vector size, memories from the old model, no warning: fails (size is no excuse)');
+check(mv({ warned: WARNING }).verdict === 'pass' && /warned before Save/.test(mv({ warned: WARNING }).why), 'embedding change: the Console warned before Save, no recall after: pass');
+check(mv({ warned: WARNING, recallHits: [{ chunkId: 'c1', dims: 1024 }, { chunkId: 'c2', dims: null }] }).verdict === 'pass', 'embedding change: warned, and recall after the change scored only new-size chunks (or ones since removed): pass');
+const scoredOld = mv({ warned: WARNING, recallHits: [{ chunkId: 'transcript:j9#0', dims: 768 }, { chunkId: 'c1', dims: 1024 }] });
+check(scoredOld.verdict === 'fail' && /recall after the change scored 1 chunk\(s\) embedded at another size.*transcript:j9#0 at 768/.test(scoredOld.why), 'embedding change: warned, but recall scored an old 768-dim chunk (the J9 fact) against the new model: fails');
+check(mv({ before: { ...NOMIC, chunks: 0 }, index: idx({}) }).verdict === 'pass', 'embedding change: no memories embedded before the change: nothing to warn about, pass');
 check(mv({ after: NOMIC }).verdict === 'fail' && /did not change/.test(mv({ after: NOMIC }).why), 'embedding change: the model did not change: fails');
 check(mv({ after: { spec: MXBAI.spec } }).verdict === 'fail' && /no dimension count/.test(mv({ after: { spec: MXBAI.spec } }).why), "embedding change: the new model's Test gave no dimension count: fails");
 check(mv({ before: { dims: 768 } }).verdict === 'fail', 'embedding change: an unknown model before the change: fails');
@@ -157,6 +161,8 @@ check(mv({ before: { dims: 768 } }).verdict === 'fail', 'embedding change: an un
     const rows = queryRecallIndex(file, 'dims', []);
     const got = Object.fromEntries(rows.map((r) => [String(r.dims), r.n]));
     check(got['768'] === 2 && got['1024'] === 1 && got.null === 1 && got['-1'] === 1 && rows.length === 4, `recall-index dims (child process, WAL writer open): 2 at 768, 1 at 1024, 1 pending, 1 unreadable (${JSON.stringify(got)})`);
+    const per = Object.fromEntries(queryRecallIndex(file, 'chunkdims', ['a', 'c', 'd', 'gone']).map((r) => [r.chunk_id, r.dims]));
+    check(per.a === 768 && per.c === 1024 && per.d === null && !('gone' in per), `recall-index chunkdims: each given chunk's size, null when not embedded, nothing for a missing one (${JSON.stringify(per)})`);
   } finally {
     writer.close();
     fs.rmSync(tmp, { recursive: true, force: true });

@@ -835,7 +835,7 @@ export function recallIndexExists(): boolean {
 // Out of process: Playwright's loader hook can't load node:sqlite in the test process (lib/recall-index.js).
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { queryRecallIndex } = require('./recall-index.js') as {
-  queryRecallIndex: (dbPath: string, mode: 'embedded' | 'chunks' | 'dims', args: string[]) => Record<string, unknown>[];
+  queryRecallIndex: (dbPath: string, mode: 'embedded' | 'chunks' | 'dims' | 'chunkdims', args: string[]) => Record<string, unknown>[];
 };
 
 /** Recall-index chunks whose text holds `token` and that are embedded (embedding_json set): the fact is ready to recall. */
@@ -868,6 +868,27 @@ export function recallIndexDims(): IndexDims {
     else out.byDims[String(row.dims)] = n;
   }
   return out;
+}
+
+/**
+ * The chunks recall supplied to a Console conversation (every memory_recall_injected event's hits), each with
+ * its vector's size in the recall index now (J12): null when the chunk has no vector or is gone.
+ */
+export function recallHitsForConversation(conversationId: string): { chunkId: string; dims: number | null }[] {
+  const ids = [
+    ...new Set(
+      conversationEntries(conversationId)
+        .filter((e) => e.role === 'event' && e.metadata?.event === 'memory_recall_injected')
+        .flatMap((e) => ((e.metadata as { hits?: { chunkId?: unknown }[] }).hits ?? []).map((h) => h?.chunkId))
+        .filter((id): id is string => typeof id === 'string'),
+    ),
+  ];
+  if (!ids.length) return [];
+  const file = recallIndexPath();
+  const sizes = new Map(
+    fs.existsSync(file) ? queryRecallIndex(file, 'chunkdims', ids).map((r) => [String(r.chunk_id), r.dims === null || r.dims === undefined ? null : Number(r.dims)]) : [],
+  );
+  return ids.map((chunkId) => ({ chunkId, dims: sizes.get(chunkId) ?? null }));
 }
 
 /**
@@ -1176,10 +1197,11 @@ const settingsParity = require('./settings-parity-evidence.js') as {
   pickAlternateModel: (values: string[], current: string | undefined, preferred?: string) => string | undefined;
   modelMatchReasons: (arg: { chosen: string; saved?: string; shown?: string; answered?: AnsweredBy }) => string[];
   memoryChangeVerdict: (arg: {
-    before: { spec?: string; dims?: number };
+    before: { spec?: string; dims?: number; chunks?: number };
     after: { spec?: string; dims?: number };
     warned?: string;
     index?: IndexDims;
+    recallHits?: { chunkId: string; dims: number | null }[];
   }) => { verdict: 'pass' | 'fail'; why: string; stale: number };
 };
 export const { SETUP_STEPS, CHANGE_STEPS, IN_PLACE_STEPS, changeHref, j12Decision, parityReasons, pickAlternateModel, modelMatchReasons, memoryChangeVerdict } =
