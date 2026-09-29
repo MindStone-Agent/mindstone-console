@@ -125,7 +125,7 @@ The install rows keep their ids, so the gate and the DEMO SUBSET are unchanged:
 | C1 | the Console's files | `librechat.yaml` and `console.env.example` were downloaded at `<console-ref>` |
 | C2 | `console.env` | `MINDSTONE_GATEWAY_URL` is `http://gateway:19789/v1`, registration is off, the gateway token is the same in both files, and `gateway.env` has only the sha256 of the admin credential (compared in the shell, never printed) |
 | C3 | the running stack | the installed project passes `compose-guard.mjs` too; `gateway`, `console` and `mongodb` are running; `/` answers 200 |
-| X2 | the image | as natively, on the stack's `uat-journey-<id>-console` image |
+| X2 | the image | as natively, on the stack's `uat-journey-<id>-console` image, with one difference. That image is built from the Console's git URL, and BuildKit doesn't apply `.dockerignore` to a git context, so `/app/mindstone` is there, holding the clone's tracked files. X2 then checks what that `.dockerignore` rule is for: no `/app/mindstone/.env`, `data-node`, `uploads` or `logs`, plus the usual `/app/.env` and `.env*` checks. The run records finding **F-STACK-2**. |
 | C4 | A3: sign in | the installer said `Admin account created: <email>`; `admin-password` is `-rw-------`; the README's login check (the request on stdin) prints 200 |
 
 What changes after the install:

@@ -337,9 +337,11 @@ test('J2 guided setup in the UI: access, provider, model, persona, (memory, conn
       if (process.env.UAT_INSTALL === 'stack') {
         // The stack's gateway reaches Ollama on the host as its OLLAMA_BASE_URL, and the Ollama choice comes filled in
         // with it (MindStone-Agent #171, README A4): checked, never typed.
-        const shown = await address.inputValue();
-        note(testInfo, `stack: the Ollama Server address came filled in as ${shown}`);
-        expect(shown, `the Ollama choice comes filled in with the stack's Ollama address (${wantedBase})`).toBe(wantedBase);
+        // The page fills it in just after the choice renders (an effect), so this waits for it.
+        await expect(address, `the Ollama choice comes filled in with the stack's Ollama address (${wantedBase})`).toHaveValue(wantedBase ?? '', {
+          timeout: 10_000,
+        });
+        note(testInfo, `stack: the Ollama Server address came filled in as ${await address.inputValue()}`);
       } else if (wantedBase && (await address.inputValue()) !== wantedBase && !/\/\/(127\.0\.0\.1|localhost):11434\/v1$/.test(wantedBase)) {
         await address.fill(wantedBase);
         note(testInfo, `server address set to ${wantedBase}`);

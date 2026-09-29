@@ -1107,14 +1107,29 @@ fi # the native install, S0-C3
 # absent, no non-empty .env files anywhere under /app. A throwaway container, labelled with
 # our project so teardown removes it if anything goes wrong; no network.
 CURRENT_STEP=X2
-if docker run --rm --network none --label "com.docker.compose.project=${PROJECT}" --entrypoint sh "${CONSOLE_IMAGE}" -c '
+# Stack mode (X2_GIT_CONTEXT=1): the image is built from the Console's git URL, a clean clone, and BuildKit doesn't
+# apply .dockerignore to a git context, so /app/mindstone is there with the tracked files only (finding F-STACK-2).
+# There, what that .dockerignore rule keeps out is checked instead: mindstone/'s .env and its live data.
+if docker run --rm --network none --label "com.docker.compose.project=${PROJECT}" --entrypoint sh \
+  -e X2_GIT_CONTEXT="$([[ "${INSTALL_MODE}" == stack ]] && echo 1 || echo 0)" "${CONSOLE_IMAGE}" -c '
   fail=0
-  if [ -e /app/mindstone ]; then echo "FOUND: /app/mindstone"; fail=1; else echo "absent: /app/mindstone"; fi
+  if [ "$X2_GIT_CONTEXT" = 1 ] && [ -d /app/mindstone ]; then
+    echo "present: /app/mindstone (git-URL build context; .dockerignore not applied): $(ls -A /app/mindstone | tr "\n" " ")"
+    for f in .env data-node uploads logs; do
+      if [ -e "/app/mindstone/$f" ]; then echo "FOUND: /app/mindstone/$f"; fail=1; else echo "absent: /app/mindstone/$f"; fi
+    done
+  elif [ -e /app/mindstone ]; then echo "FOUND: /app/mindstone"; fail=1; else echo "absent: /app/mindstone"; fi
   if [ -s /app/.env ]; then echo "FOUND: /app/.env is not empty"; fail=1; else echo "empty or absent: /app/.env"; fi
   found=$(find /app -name node_modules -prune -o -type f \( -name ".env" -o -name ".env.*" \) ! -name "*.example" -size +0c -print 2>/dev/null)
   if [ -n "$found" ]; then echo "FOUND non-empty env files:"; echo "$found"; fail=1; else echo "no non-empty .env files under /app (node_modules skipped)"; fi
   exit $fail' >"${LOG_DIR}/image-check.log" 2>&1; then
-  record X2 PASS "the Console image holds no secrets (/app/mindstone absent, /app/.env empty or absent)" "${LOG_DIR}/image-check.log"
+  if grep -q '^present: /app/mindstone' "${LOG_DIR}/image-check.log"; then
+    record X2 PASS "the Console image holds no secrets (stack: /app/mindstone from the git clone has no .env, data-node, uploads or logs; /app/.env empty or absent)" "${LOG_DIR}/image-check.log" \
+      "$(grep '^present:' "${LOG_DIR}/image-check.log")"
+    finding F-STACK-2 "The stack builds the Console from its git URL (\`deploy/docker/compose.yml\`, \`CONSOLE_BUILD_CONTEXT\` unset), and BuildKit doesn't apply the Console's \`.dockerignore\` to a git context, so its image has what that file keeps out of the native image: \`/app/mindstone\` (tracked files only: $(grep '^present:' "${LOG_DIR}/image-check.log" | sed 's/^.*: //')), and \`docs\`, \`e2e\`, hidden files, \`Dockerfile\`. A git clone has no \`.env\` or live data, so no secret is baked in (X2 checks that), but the image isn't the one the \`.dockerignore\` describes."
+  else
+    record X2 PASS "the Console image holds no secrets (/app/mindstone absent, /app/.env empty or absent)" "${LOG_DIR}/image-check.log"
+  fi
 else
   record X2 FAIL "the Console image may hold secrets" "${LOG_DIR}/image-check.log" "$(grep FOUND "${LOG_DIR}/image-check.log" | head -3 | tr '\n' ' ')"
 fi
