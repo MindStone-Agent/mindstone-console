@@ -103,6 +103,8 @@ const ENDPOINTS = [
   { method: 'get', path: 'personas/analyst/knowledgebases/notes/sources', write: false },
   { method: 'post', path: 'personas/analyst/knowledgebases/notes/sources', write: true },
   { method: 'post', path: 'personas/analyst/knowledgebases/notes/ingest', write: true },
+  { method: 'post', path: 'knowledgebases/g1/reembed', write: true },
+  { method: 'post', path: 'personas/analyst/knowledgebases/notes/reembed', write: true },
   // USER.md from Settings (MindStone-Agent #140).
   { method: 'get', path: 'user', write: false },
   { method: 'patch', path: 'user', write: true },
@@ -395,6 +397,9 @@ describe('MindStone admin proxy', () => {
       ['get', 'workflows/..'],
       ['post', 'knowledgebases'],
       ['get', 'knowledgebases/g1'],
+      ['get', 'knowledgebases/g1/reembed'],
+      ['post', 'knowledgebases/G1/reembed'],
+      ['post', 'knowledgebases/g1/reembed/x'],
       ['patch', 'personas/analyst/knowledgebases'],
       ['post', 'personas/analyst/knowledgebases/Notes/sources'],
       ['post', 'personas/analyst/knowledgebases/../sources'],

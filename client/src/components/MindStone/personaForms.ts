@@ -48,7 +48,7 @@ export type KnowledgebaseSummary = {
   sourceCount: number;
   error?: string;
   /** Being embedded again after a change of embedding model, or given up on (MindStone-Agent #158). */
-  reembed?: { failures: number; nextAttemptAt?: string; gaveUp?: boolean; reason?: string };
+  reembed?: { failures?: number; nextAttemptAt?: string; gaveUp?: boolean; reason?: unknown };
 };
 
 export function formFromPersona(persona: LoadedPersona): PersonaForm {

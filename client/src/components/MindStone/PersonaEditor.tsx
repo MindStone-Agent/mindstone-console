@@ -402,7 +402,17 @@ export default function PersonaEditor({
                     {visibleText(kb.id)}
                   </span>
                   {kb.reembed && (
-                    <KbReembedNote reembed={kb.reembed} testId={`ms-pe-global-kb-reembed-${kb.id}`} />
+                    <KbReembedNote
+                      reembed={kb.reembed}
+                      testId={`ms-pe-global-kb-reembed-${kb.id}`}
+                      retryPath={`${BASE}/knowledgebases/${encodeURIComponent(kb.id)}/reembed`}
+                      onRetried={() => {
+                        void request
+                          .get<{ knowledgebases: KnowledgebaseSummary[] }>(`${BASE}/knowledgebases`)
+                          .then((result) => setGlobalKbs(result.knowledgebases))
+                          .catch(() => undefined);
+                      }}
+                    />
                   )}
                 </label>
               </li>

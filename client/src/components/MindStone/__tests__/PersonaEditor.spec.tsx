@@ -203,17 +203,55 @@ describe('persona editor (MindStone-Agent #125)', () => {
         },
       ],
       privateKbs: [
-        { id: 'notes', name: 'Notes', indexed: true, entryCount: 2, sourceCount: 1, reembed: { failures: 5, gaveUp: true, reason: 'bad\u202Etext' } },
+        { id: 'notes', name: 'Notes', indexed: true, entryCount: 2, sourceCount: 1, reembed: { failures: 3, gaveUp: true, reason: 'bad\u202Etext' } },
         { id: 'plain', name: 'Plain', indexed: true, entryCount: 1, sourceCount: 1 },
       ],
     });
     await renderEditor('atlas');
     const waiting = await screen.findByTestId('ms-pe-global-kb-reembed-g1');
     expect(waiting.textContent).toMatch(/^com_mindstone_kb_reembed_waiting:\S.* com_mindstone_kb_reembed_reason:the embedder failed$/);
+    expect(waiting.className).not.toContain('text-red-600');
     const gaveUp = await screen.findByTestId('ms-pkb-reembed-notes');
-    expect(gaveUp.textContent).toMatch(/^com_mindstone_kb_reembed_gave_up:5 /);
+    expect(gaveUp.textContent).toMatch(/^com_mindstone_kb_reembed_gave_up:3 /);
+    expect(gaveUp.className).toContain('text-red-600');
     expect(gaveUp.textContent).not.toContain('\u202E');
     expect(screen.queryByTestId('ms-pkb-reembed-plain')).not.toBeInTheDocument();
+    // Only a given-up KB offers a retry.
+    expect(screen.queryByTestId('ms-pe-global-kb-reembed-g1-retry')).not.toBeInTheDocument();
+    expect(screen.getByTestId('ms-pkb-reembed-notes-retry')).toBeInTheDocument();
+  });
+
+  it('a given-up knowledge base can be tried again, and the list is read again (MindStone-Agent #158)', async () => {
+    let reset = false;
+    serve({
+      persona: ATLAS,
+      globalKbs: [],
+      privateKbs: () => [
+        { id: 'notes', name: 'Notes', indexed: true, entryCount: 2, sourceCount: 1, ...(reset ? {} : { reembed: { failures: 5, gaveUp: true } }) },
+      ],
+    });
+    mockPost.mockImplementation((url: string) => {
+      if (url === `${BASE}/personas/atlas/knowledgebases/notes/reembed`) {
+        reset = true;
+        return Promise.resolve({ ok: true });
+      }
+      return Promise.reject(new Error(`unexpected POST ${url}`));
+    });
+    await renderEditor('atlas');
+    fireEvent.click(await screen.findByTestId('ms-pkb-reembed-notes-retry'));
+    await waitFor(() => expect(screen.queryByTestId('ms-pkb-reembed-notes')).not.toBeInTheDocument());
+    expect(mockPost).toHaveBeenCalledWith(`${BASE}/personas/atlas/knowledgebases/notes/reembed`, {});
+  });
+
+  it("a reembed with a reason that isn't text, or no count, still renders (MindStone-Agent #158)", async () => {
+    serve({
+      persona: ATLAS,
+      globalKbs: [{ id: 'g1', name: 'G', indexed: true, entryCount: 1, sourceCount: 1, reembed: { gaveUp: true, reason: { not: 'text' } } }],
+    });
+    await renderEditor('atlas');
+    const note = await screen.findByTestId('ms-pe-global-kb-reembed-g1');
+    expect(note.textContent).toMatch(/^com_mindstone_kb_reembed_gave_up:\?/);
+    expect(note.textContent).not.toContain('com_mindstone_kb_reembed_reason');
   });
 
   it('adds a private knowledge base with a text source, then ingests it', async () => {

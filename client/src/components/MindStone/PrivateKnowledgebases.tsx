@@ -187,7 +187,12 @@ export default function PrivateKnowledgebases({
                     : localize('com_mindstone_pkb_not_indexed')}
                 </span>
                 {kb.reembed && (
-                  <KbReembedNote reembed={kb.reembed} testId={`ms-pkb-reembed-${kb.id}`} />
+                  <KbReembedNote
+                    reembed={kb.reembed}
+                    testId={`ms-pkb-reembed-${kb.id}`}
+                    retryPath={`${personaPath}/${encodeURIComponent(kb.id)}/reembed`}
+                    onRetried={() => void load()}
+                  />
                 )}
               </span>
               <span className="flex gap-2">
