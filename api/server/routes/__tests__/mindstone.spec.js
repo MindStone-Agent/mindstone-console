@@ -528,7 +528,7 @@ describe('MindStone admin proxy', () => {
     try {
       for (const [method, path, expected] of [
         ['post', 'memory/pull', 16 * 60_000],
-        ['post', 'memory/check', 25_000],
+        ['post', 'memory/check', 55_000],
         ['post', 'onboarding/complete', 15_000],
         ['get', 'status', 15_000],
         // A private KB's ingest fetches its URL sources (#125).

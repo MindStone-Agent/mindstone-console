@@ -154,6 +154,49 @@ describe('changing one setup choice', () => {
     );
   });
 
+  it('says re-embedding needs a backfill when automatic recall is turned off', async () => {
+    mockPost.mockImplementation(async (url: string) => {
+      if (url === `${BASE}/memory/check`) {
+        return { ok: true, dimensions: 1024, index: { embedded: 7, otherModel: 5 } };
+      }
+      throw new Error(`unexpected POST ${url}`);
+    });
+    renderAt('change=memory&from=settings');
+    await screen.findByRole('heading', { name: 'com_mindstone_onb_memory_title' });
+    fireEvent.click(screen.getByRole('checkbox'));
+    fireEvent.click(button('com_mindstone_onb_memory_test'));
+    expect(await screen.findByTestId('ms-onb-memory-reembed')).toHaveTextContent(
+      'com_mindstone_onb_memory_reembed_off 5',
+    );
+  });
+
+  it('a connector whose token is in the host environment keeps it when none is typed', async () => {
+    steps = { ...steps, connectors: DONE };
+    config = {
+      ...config,
+      channels: {
+        telegram: {
+          enabled: true,
+          tokenEnv: 'TELEGRAM_BOT_TOKEN',
+          ownerSenders: ['9'],
+          allowedSenders: ['9'],
+        },
+      },
+    };
+    renderAt('change=connectors&from=settings');
+    await waitFor(() =>
+      expect(
+        screen.getByRole('radio', { name: 'com_mindstone_onb_connector_telegram' }),
+      ).toBeChecked(),
+    );
+    expect(button('com_mindstone_onb_change_save')).toBeEnabled();
+    fireEvent.click(button('com_mindstone_onb_change_save'));
+    await screen.findByText(/com_mindstone_onb_connector_saved/);
+    const body = patchesTo('channels')[0][1] as { telegram: Record<string, unknown> };
+    // Neither a token file nor a cleared env var: the host's token stays in use.
+    expect(body.telegram).toEqual({ enabled: true, ownerSenders: ['9'], allowedSenders: ['9'] });
+  });
+
   it("says nothing about re-embedding when no memory is another model's", async () => {
     mockPost.mockImplementation(async (url: string) => {
       if (url === `${BASE}/memory/check`) {

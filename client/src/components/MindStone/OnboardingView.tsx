@@ -58,6 +58,8 @@ type Config = {
 type SavedConnector = {
   enabled?: boolean;
   tokenFile?: string;
+  tokenEnv?: string;
+  appTokenEnv?: string;
   appTokenFile?: string;
   ownerSenders?: unknown;
   allowedSenders?: unknown;
@@ -784,8 +786,9 @@ export default function MindStoneOnboardingView() {
   const wildcard = hasWildcard(owners) || hasWildcard(allowed);
   const savedChosen = savedConnector(connector);
   // A saved token counts: an empty field keeps it.
-  const keepsBot = Boolean(savedChosen?.tokenFile);
-  const keepsApp = Boolean(savedChosen?.appTokenFile);
+  // In a file or in the gateway host's environment: either way an empty field leaves it as it is.
+  const keepsBot = Boolean(savedChosen?.tokenFile || savedChosen?.tokenEnv);
+  const keepsApp = Boolean(savedChosen?.appTokenFile || savedChosen?.appTokenEnv);
   const connectorReady =
     chosenConnector !== undefined &&
     (botToken !== '' || keepsBot) &&
@@ -1292,9 +1295,15 @@ export default function MindStoneOnboardingView() {
                 </span>
               )}
             </div>
+            {/* Re-embedding happens after a chat only while automatic recall is on (#140 review). */}
             {!pulling && currentCheck?.ok && currentCheck.reembed !== undefined && (
               <p className="mb-3 text-sm text-text-secondary" data-testid="ms-onb-memory-reembed">
-                {localize('com_mindstone_onb_memory_reembed', { 0: String(currentCheck.reembed) })}
+                {localize(
+                  autoRecall
+                    ? 'com_mindstone_onb_memory_reembed'
+                    : 'com_mindstone_onb_memory_reembed_off',
+                  { 0: String(currentCheck.reembed) },
+                )}
               </p>
             )}
             <div className="flex gap-2">
