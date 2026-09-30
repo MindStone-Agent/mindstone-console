@@ -428,10 +428,18 @@ export async function ensureMindStoneModel(page: Page, testInfo: TestInfo): Prom
   }
   await trigger.click();
   await page.getByRole('option', { name: new RegExp(ENDPOINT_LABEL, 'i') }).first().click();
-  const model = page.getByRole('option', { name: CHAT_MODEL, exact: true });
+  // The menu shows an agent's name instead of mindstone/<agentId> once the Console
+  // knows it (console #53); look the name up and pick the option either way.
+  const names = await consoleApi<{ names?: Record<string, string> }>(
+    page,
+    'GET',
+    '/api/mindstone-model-names',
+  ).catch(() => ({ status: 0, json: {} as { names?: Record<string, string> } }));
+  const label = names.json?.names?.[CHAT_MODEL] ?? CHAT_MODEL;
+  const model = page.getByRole('option', { name: label, exact: true });
   if (await appears(model, 3_000)) await model.click();
   await expect(trigger).not.toHaveText(/select a model/i);
-  note(testInfo, `model menu set to ${ENDPOINT_LABEL} / ${CHAT_MODEL}`);
+  note(testInfo, `model menu set to ${ENDPOINT_LABEL} / ${CHAT_MODEL} (shown as "${label}")`);
 }
 
 /**
