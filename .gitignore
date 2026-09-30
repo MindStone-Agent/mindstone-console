@@ -56,6 +56,10 @@ node_modules/
 meili_data/
 api/node_modules/
 client/node_modules/
+# A node_modules symlink (a worktree sharing another checkout's) is a file, not a directory
+/node_modules
+api/node_modules
+client/node_modules
 bower_components/
 *.d.ts
 !vite-env.d.ts
