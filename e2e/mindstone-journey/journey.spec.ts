@@ -1312,15 +1312,16 @@ test('J13 MindStone navigation: every page one click from the chat page, the Mem
     try {
       await navigate(page, '/c/new');
       await page.getByTestId('header-open-sidebar-button').click();
-      const switcher = page.getByTestId('panel-switcher-button');
-      await expect(switcher, "the drawer's panel switcher").toBeVisible({ timeout: 30_000 });
-      if (!(await page.getByTestId('mindstone-section').isVisible())) {
-        await switcher.click();
-        await page.getByRole('menuitem').filter({ hasText: /^\s*MindStone\s*$/ }).first().click();
-      }
-      await page.getByTestId('mindstone-section').getByTestId('mindstone-nav-personas').click();
+      const drawer = page.locator('#mobile-drawer');
+      await expect(drawer, 'the drawer is open').not.toHaveAttribute('inert', { timeout: 30_000 });
+      // The rail doesn't exist at this width: the drawer's panel switcher is how MindStone is chosen. Always go through
+      // it (N1 already left MindStone as the saved panel, and choosing it again keeps it), so the switcher is exercised.
+      await drawer.getByTestId('panel-switcher-button').click();
+      await page.getByRole('menuitemcheckbox', { name: 'MindStone', exact: true }).click();
+      await drawer.getByTestId('mindstone-section').getByTestId('mindstone-nav-personas').click();
       await expect(page.getByRole('heading', { level: 1, name: 'Personas', exact: true })).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByTestId('panel-switcher-button'), 'the drawer closes when a page is chosen').toBeHidden();
+      // The closed drawer stays in the page, moved off screen and made inert.
+      await expect(drawer, 'the drawer closes when a page is chosen').toHaveAttribute('inert', '');
       await shot(page, testInfo, 'n4-personas-400px');
       note(testInfo, `N4 at 400px: Personas opened at ${new URL(page.url()).pathname}, drawer closed`);
     } finally {
