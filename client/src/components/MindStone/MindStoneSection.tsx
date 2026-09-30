@@ -4,13 +4,13 @@
  * menu or a typed address. The pages check admin access on the server too.
  */
 import { memo } from 'react';
+import { useMediaQuery } from '@librechat/client';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Brain, CheckSquare, Drama, Server, Settings, Wrench } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { TranslationKeys } from '~/hooks';
 import useSidebarToggle from '~/hooks/Nav/useSidebarToggle';
 import { useLocalize } from '~/hooks';
-import { useMediaQuery } from '@librechat/client';
 import { cn } from '~/utils';
 
 export const MINDSTONE_PAGES: { to: string; label: TranslationKeys; icon: LucideIcon }[] = [

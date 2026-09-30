@@ -19,9 +19,9 @@ import type {
 } from 'librechat-data-provider';
 import type { ProviderIconResolution } from './useProviderIcon';
 import type { Endpoint } from '~/common';
+import useMindStoneModelNames, { MINDSTONE_ENDPOINT } from './useMindStoneModelNames';
 import { useHasAccess, useShowMarketplace } from '~/hooks';
 import { resolveProviderIcon } from './useProviderIcon';
-import useMindStoneModelNames, { MINDSTONE_ENDPOINT } from './useMindStoneModelNames';
 import { useGetEndpointsQuery } from '~/data-provider';
 import { mapEndpoints } from '~/utils';
 

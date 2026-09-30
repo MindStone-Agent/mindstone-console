@@ -1,5 +1,5 @@
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import MindStoneSection, { MINDSTONE_PAGES } from '../MindStoneSection';
 
 jest.mock('~/hooks', () => ({ useLocalize: () => (key: string) => key }));
