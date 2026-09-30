@@ -144,10 +144,7 @@ function Issues({ issues }: { issues: Issue[] }) {
   return (
     <>
       {issues.map((issue, i) => (
-        <p
-          key={i}
-          className={TONE_CLASS[issue.tone]}
-        >
+        <p key={i} className={TONE_CLASS[issue.tone]}>
           {issue.text}
         </p>
       ))}
