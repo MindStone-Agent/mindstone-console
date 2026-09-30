@@ -131,16 +131,20 @@ const POLICIES: Record<string, TranslationKeys> = {
   approval_required: 'com_mindstone_sys_policy_approval',
 };
 
-type Issue = { tone: 'error' | 'warning'; text: string };
+/** A note is information, not a problem: it isn't counted. */
+type Issue = { tone: 'error' | 'warning' | 'note'; text: string };
+
+const TONE_CLASS: Record<Issue['tone'], string> = {
+  error: 'text-sm text-red-500',
+  warning: 'text-sm text-orange-500',
+  note: 'text-sm text-text-secondary',
+};
 
 function Issues({ issues }: { issues: Issue[] }) {
   return (
     <>
       {issues.map((issue, i) => (
-        <p
-          key={i}
-          className={issue.tone === 'error' ? 'text-sm text-red-500' : 'text-sm text-orange-500'}
-        >
+        <p key={i} className={TONE_CLASS[issue.tone]}>
           {issue.text}
         </p>
       ))}
@@ -154,6 +158,75 @@ function Row({ label, children, testId }: { label: string; children: ReactNode; 
       <dt className="text-text-secondary">{label}:</dt>
       <dd>{children}</dd>
     </div>
+  );
+}
+
+type Localize = ReturnType<typeof useLocalize>;
+type SqliteStatus = NonNullable<NonNullable<SystemStatusData['memory']>['sqlite']>;
+
+/** What's wrong with the memory store, if anything. */
+function memoryIssuesOf(sqlite: SqliteStatus | undefined, localize: Localize): Issue[] {
+  const issues: Issue[] = [];
+  if (sqlite && sqlite.present !== false && sqlite.sqliteVec?.available === false) {
+    if (sqlite.vectorBackend === 'js-cosine') {
+      // Vector search works without the extension (built-in cosine search): a note, not a problem.
+      issues.push({ tone: 'note', text: localize('com_mindstone_sys_sqlite_vec_note') });
+    } else if (sqlite.sqliteVec.error) {
+      issues.push({
+        tone: 'warning',
+        text: localize('com_mindstone_sys_sqlite_vec', { 0: masked(sqlite.sqliteVec.error) }),
+      });
+    }
+  }
+  if (sqlite?.error) issues.push({ tone: 'error', text: masked(sqlite.error) });
+  return issues;
+}
+
+/**
+ * The memory store's status: search backend, what's indexed and embedded, and
+ * any problem. Shown in the system status and on the Memory page (#53).
+ */
+export function MemoryStatus({ memory }: { memory?: SystemStatusData['memory'] }) {
+  const localize = useLocalize();
+  const sqlite = memory?.sqlite;
+  if (!sqlite) {
+    return (
+      <p className="text-sm text-text-secondary" data-testid="ms-sys-memory-unknown">
+        {localize('com_mindstone_sys_none')}
+      </p>
+    );
+  }
+  const heading = 'mb-1 mt-3 font-medium';
+  const memoryIssues = memoryIssuesOf(sqlite, localize);
+  return (
+    <section aria-labelledby="ms-sys-memory" data-testid="ms-sys-memory">
+      <h3 id="ms-sys-memory" className={heading}>
+        {localize('com_mindstone_sys_memory')}
+      </h3>
+      {sqlite.present === false ? (
+        <p className="text-sm text-text-secondary">{localize('com_mindstone_sys_memory_none')}</p>
+      ) : (
+        <dl>
+          <Row label={localize('com_mindstone_sys_search')}>{text(sqlite.vectorBackend)}</Row>
+          <Row label={localize('com_mindstone_sys_indexed')}>
+            {localize('com_mindstone_sys_memory_counts', {
+              0: n(sqlite.sources),
+              1: n(sqlite.chunks),
+              2: n(sqlite.embeddedChunks),
+            })}
+          </Row>
+          {Boolean(count(sqlite.duplicateTextChunks)) && (
+            <Row label={localize('com_mindstone_sys_duplicates')}>
+              {n(sqlite.duplicateTextChunks)}
+            </Row>
+          )}
+          {Boolean(sqlite.updatedAt) && (
+            <Row label={localize('com_mindstone_sys_updated')}>{when(sqlite.updatedAt)}</Row>
+          )}
+        </dl>
+      )}
+      <Issues issues={memoryIssues} />
+    </section>
   );
 }
 
@@ -201,16 +274,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
   }
   if (config?.error) configIssues.push({ tone: 'error', text: masked(config.error) });
 
-  const memoryIssues: Issue[] = [];
-  if (sqlite && sqlite.present !== false && sqlite.sqliteVec?.available === false) {
-    if (sqlite.sqliteVec.error) {
-      memoryIssues.push({
-        tone: 'warning',
-        text: localize('com_mindstone_sys_sqlite_vec', { 0: masked(sqlite.sqliteVec.error) }),
-      });
-    }
-  }
-  if (sqlite?.error) memoryIssues.push({ tone: 'error', text: masked(sqlite.error) });
+  const memoryIssues = memoryIssuesOf(sqlite, localize);
 
   const piIssues: Issue[] =
     pi?.active && pi.usesGlobalPiAgentDir
@@ -289,7 +353,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
 
   const problemCount =
     configIssues.length +
-    memoryIssues.length +
+    memoryIssues.filter((issue) => issue.tone !== 'note').length +
     piIssues.length +
     contentIssues.length +
     (connectorRows ?? []).reduce((total, c) => total + connectorIssues(c).length, 0) +
@@ -380,38 +444,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
         </section>
       )}
 
-      {sqlite && (
-        <section aria-labelledby="ms-sys-memory" data-testid="ms-sys-memory">
-          <h3 id="ms-sys-memory" className={heading}>
-            {localize('com_mindstone_sys_memory')}
-          </h3>
-          {sqlite.present === false ? (
-            <p className="text-sm text-text-secondary">
-              {localize('com_mindstone_sys_memory_none')}
-            </p>
-          ) : (
-            <dl>
-              <Row label={localize('com_mindstone_sys_search')}>{text(sqlite.vectorBackend)}</Row>
-              <Row label={localize('com_mindstone_sys_indexed')}>
-                {localize('com_mindstone_sys_memory_counts', {
-                  0: n(sqlite.sources),
-                  1: n(sqlite.chunks),
-                  2: n(sqlite.embeddedChunks),
-                })}
-              </Row>
-              {Boolean(count(sqlite.duplicateTextChunks)) && (
-                <Row label={localize('com_mindstone_sys_duplicates')}>
-                  {n(sqlite.duplicateTextChunks)}
-                </Row>
-              )}
-              {Boolean(sqlite.updatedAt) && (
-                <Row label={localize('com_mindstone_sys_updated')}>{when(sqlite.updatedAt)}</Row>
-              )}
-            </dl>
-          )}
-          <Issues issues={memoryIssues} />
-        </section>
-      )}
+      {sqlite && <MemoryStatus memory={memory} />}
 
       {pi && (
         <section aria-labelledby="ms-sys-pi" data-testid="ms-sys-pi">

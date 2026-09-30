@@ -9,17 +9,20 @@
 import { useEffect, useState } from 'react';
 import { request } from 'librechat-data-provider';
 import type { ConditionForm, WorkflowForm, WorkflowStepForm } from './personaForms';
+import type { TranslationKeys } from '~/hooks';
 import { emptyStep, moveItem, nextStepId, stepForm, workflowBody } from './personaForms';
 import { visibleText } from './visibleText';
 import { useLocalize } from '~/hooks';
 
 const BASE = '/api/mindstone/admin';
-const CONDITION_FIELDS: Array<keyof ConditionForm> = [
-  'messagePrefix',
-  'sourceChannel',
-  'sourceSubstrate',
-  'sessionKeyPrefix',
-];
+// Literal keys, so the unused-translation check can find them.
+const CONDITION_LABELS: Record<keyof ConditionForm, TranslationKeys> = {
+  messagePrefix: 'com_mindstone_wf_cond_messagePrefix',
+  sourceChannel: 'com_mindstone_wf_cond_sourceChannel',
+  sourceSubstrate: 'com_mindstone_wf_cond_sourceSubstrate',
+  sessionKeyPrefix: 'com_mindstone_wf_cond_sessionKeyPrefix',
+};
+const CONDITION_FIELDS = Object.keys(CONDITION_LABELS) as Array<keyof ConditionForm>;
 
 function errorText(error: unknown): string | undefined {
   const data = (error as { response?: { data?: { error?: unknown } } })?.response?.data;
@@ -136,7 +139,7 @@ export default function WorkflowEditor({
     <div className="grid grid-cols-2 gap-2">
       {CONDITION_FIELDS.map((field) => (
         <label key={field} className="flex flex-col gap-1 text-xs">
-          {localize(`com_mindstone_wf_cond_${field}` as 'com_mindstone_wf_cond_messagePrefix')}
+          {localize(CONDITION_LABELS[field])}
           <input
             className={input}
             value={condition[field]}

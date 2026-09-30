@@ -21,6 +21,7 @@ export function filterItems<
     models?: Array<{ name: string; isGlobal?: boolean }>;
     searchAliases?: string[];
     showMarketplace?: boolean;
+    modelNames?: Record<string, string>;
   },
 >(
   items: T[],
@@ -60,6 +61,12 @@ export function filterItems<
           return true;
         }
 
+        // A display name for the model id, such as a MindStone agent's (#53)
+        const shownName = item.modelNames?.[modelId.name];
+        if (shownName && shownName.toLowerCase().includes(searchTermLower)) {
+          return true;
+        }
+
         if (isAgentsEndpoint(item.value) && agentsMap && modelId.name in agentsMap) {
           const agentName = agentsMap[modelId.name]?.name;
           return typeof agentName === 'string' && agentName.toLowerCase().includes(searchTermLower);
@@ -80,6 +87,18 @@ export function filterItems<
 
     return false;
   });
+}
+
+/** The name a model shows as: an agent's, an assistant's, or a display name such as a MindStone agent's (#53). */
+export function modelDisplayName(endpoint: Endpoint | undefined, modelId: string): string {
+  if (!endpoint) return modelId;
+  if (isAgentsEndpoint(endpoint.value) && endpoint.agentNames?.[modelId]) {
+    return endpoint.agentNames[modelId];
+  }
+  if (isAssistantsEndpoint(endpoint.value) && endpoint.assistantNames?.[modelId]) {
+    return endpoint.assistantNames[modelId];
+  }
+  return endpoint.modelNames?.[modelId] ?? modelId;
 }
 
 export function shouldRenderEndpointOption(endpoint: {
@@ -114,6 +133,12 @@ export function filterModels(
       const assistant = assistantsMap[endpoint.value][modelId];
       modelName =
         typeof assistant.name === 'string' && assistant.name ? (assistant.name as string) : modelId;
+    } else if (endpoint.modelNames?.[modelId]) {
+      // A MindStone agent's name (#53); the id still matches too
+      return (
+        endpoint.modelNames[modelId].toLowerCase().includes(searchTermLower) ||
+        modelId.toLowerCase().includes(searchTermLower)
+      );
     }
 
     return modelName.toLowerCase().includes(searchTermLower);
@@ -228,6 +253,10 @@ export const getDisplayValue = ({
       endpoint.assistantNames[selectedValues.model]
     ) {
       return endpoint.assistantNames[selectedValues.model];
+    }
+
+    if (endpoint.modelNames?.[selectedValues.model]) {
+      return endpoint.modelNames[selectedValues.model];
     }
 
     return selectedValues.model;

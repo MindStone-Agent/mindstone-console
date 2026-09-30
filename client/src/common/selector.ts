@@ -9,6 +9,8 @@ export interface Endpoint {
   icon: React.ReactNode;
   agentNames?: Record<string, string>;
   assistantNames?: Record<string, string>;
+  /** Display names for model ids, such as MindStone's agents (mindstone/<agentId>, #53). */
+  modelNames?: Record<string, string>;
   modelIcons?: Record<string, string | undefined>;
   showMarketplace?: boolean;
   searchAliases?: string[];

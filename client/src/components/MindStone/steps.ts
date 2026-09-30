@@ -54,6 +54,7 @@ export function changeableStep(
 const RETURN_PAGES = {
   settings: { path: '/mindstone', label: 'com_mindstone_onb_change_back_settings' },
   providers: { path: '/mindstone/providers', label: 'com_mindstone_onb_change_back_providers' },
+  memory: { path: '/mindstone/memory', label: 'com_mindstone_onb_change_back_memory' },
 } as const;
 
 export type ReturnPage = (typeof RETURN_PAGES)[keyof typeof RETURN_PAGES];

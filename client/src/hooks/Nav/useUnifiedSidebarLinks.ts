@@ -1,18 +1,33 @@
 import { useMemo } from 'react';
 import { useRecoilValue } from 'recoil';
-import { BarChart3, MessagesSquare } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { BarChart3, Brain, MessagesSquare } from 'lucide-react';
 import { useUserKeyQuery } from 'librechat-data-provider/react-query';
-import { getConfigDefaults, getEndpointField } from 'librechat-data-provider';
+import { getConfigDefaults, getEndpointField, SystemRoles } from 'librechat-data-provider';
 import type { TEndpointsConfig } from 'librechat-data-provider';
 import type { NavLink } from '~/common';
 import { useGetEndpointsQuery, useGetStartupConfig, useInsightsAccessQuery } from '~/data-provider';
 import ConversationsSection from '~/components/UnifiedSidebar/ConversationsSection';
+import MindStoneSection from '~/components/MindStone/MindStoneSection';
 import useSideNavLinks from '~/hooks/Nav/useSideNavLinks';
 import { useAuthContext } from '~/hooks';
 import store from '~/store';
 
 const defaultInterface = getConfigDefaults().interface;
+
+/** The MindStone section, for admins (#53). */
+export const mindStoneLink: NavLink = {
+  title: 'com_mindstone_nav',
+  label: '',
+  icon: Brain,
+  id: 'mindstone',
+  Component: MindStoneSection,
+};
+
+/** The chats, then, for an admin, MindStone's pages, so they're found first (#53). */
+export function leadingLinks(conversationLink: NavLink, isAdmin: boolean): NavLink[] {
+  return isAdmin ? [conversationLink, mindStoneLink] : [conversationLink];
+}
 
 export default function useUnifiedSidebarLinks() {
   const navigate = useNavigate();
@@ -63,6 +78,8 @@ export default function useUnifiedSidebarLinks() {
     includeHidePanel: false,
   });
 
+  const isAdmin = user?.role === SystemRoles.ADMIN;
+
   const links = useMemo(() => {
     const conversationLink: NavLink = {
       title: 'com_ui_chat_history',
@@ -71,12 +88,13 @@ export default function useUnifiedSidebarLinks() {
       id: 'conversations',
       Component: ConversationsSection,
     };
+    const firstLinks = leadingLinks(conversationLink, isAdmin);
 
     if (
       !insightsFeatureEnabled ||
       (!isInsightsRoute && !isInsightsAccessLoading && insightsAccess?.access !== true)
     ) {
-      return [conversationLink, ...sideNavLinks];
+      return [...firstLinks, ...sideNavLinks];
     }
 
     const insightsLink: NavLink = {
@@ -95,8 +113,9 @@ export default function useUnifiedSidebarLinks() {
     const nextLinks = [...sideNavLinks];
     nextLinks.splice(mcpIndex >= 0 ? mcpIndex + 1 : nextLinks.length, 0, insightsLink);
 
-    return [conversationLink, ...nextLinks];
+    return [...firstLinks, ...nextLinks];
   }, [
+    isAdmin,
     insightsAccess?.access,
     insightsFeatureEnabled,
     isInsightsAccessLoading,

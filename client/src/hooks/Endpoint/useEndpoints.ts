@@ -19,6 +19,7 @@ import type {
 } from 'librechat-data-provider';
 import type { ProviderIconResolution } from './useProviderIcon';
 import type { Endpoint } from '~/common';
+import useMindStoneModelNames, { MINDSTONE_ENDPOINT } from './useMindStoneModelNames';
 import { useHasAccess, useShowMarketplace } from '~/hooks';
 import { resolveProviderIcon } from './useProviderIcon';
 import { useGetEndpointsQuery } from '~/data-provider';
@@ -69,6 +70,9 @@ export const useEndpoints = ({
   startupConfig: TStartupConfig | undefined;
 }) => {
   const modelsQuery = useGetModelsQuery();
+  const mindStoneModelNames = useMindStoneModelNames(
+    (modelsQuery.data?.[MINDSTONE_ENDPOINT]?.length ?? 0) > 0,
+  );
   const { data: endpoints = [] } = useGetEndpointsQuery({ select: mapEndpoints });
   const interfaceConfig = startupConfig?.interface ?? defaultInterface;
   const includedEndpoints = useMemo(
@@ -210,6 +214,10 @@ export const useEndpoints = ({
           name: model,
           isGlobal: false,
         }));
+        // A custom endpoint's value is its configured name, not an EModelEndpoint member.
+        if ((ep as string) === MINDSTONE_ENDPOINT && mindStoneModelNames) {
+          result.modelNames = mindStoneModelNames;
+        }
       }
 
       acc.push(result);
@@ -222,6 +230,7 @@ export const useEndpoints = ({
     endpointsConfig,
     filteredEndpoints,
     modelsQuery.data,
+    mindStoneModelNames,
     showAgentMarketplace,
   ]);
 

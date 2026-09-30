@@ -8,6 +8,7 @@ import type { Endpoint } from '~/common';
 import { useModelSelectorContext } from '../ModelSelectorContext';
 import { CustomMenuItem as MenuItem } from '../CustomMenu';
 import useActiveItem from '../useActiveItem';
+import { modelDisplayName } from '../utils';
 import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
 
@@ -53,15 +54,8 @@ function EndpointModelItemComponent({
   const avatarUrl = endpoint?.modelIcons?.[modelId ?? ''] || null;
 
   // Use custom names if available
-  if (endpoint && modelId && isAgentsEndpoint(endpoint.value) && endpoint.agentNames?.[modelId]) {
-    modelName = endpoint.agentNames[modelId];
-  } else if (
-    endpoint &&
-    modelId &&
-    isAssistantsEndpoint(endpoint.value) &&
-    endpoint.assistantNames?.[modelId]
-  ) {
-    modelName = endpoint.assistantNames[modelId];
+  if (modelId) {
+    modelName = modelDisplayName(endpoint, modelId);
   }
 
   const handleFavoriteClick = (e: React.MouseEvent) => {
