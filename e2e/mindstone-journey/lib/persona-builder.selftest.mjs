@@ -176,11 +176,11 @@ const sh = (script) => spawnSync('bash', ['-c', `set -Eeuo pipefail; source "${p
 const out = (script) => sh(script).stdout.trim();
 const rc = (script) => sh(script).status;
 const has = (list, id) => ` ${list} `.includes(` ${id} `);
-const BASE = 'S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 J9 X1 X2 X3 X4 X5';
-check(out('gate_required_steps 0') === BASE && out('gate_required_steps 0 0') === BASE && out('gate_required_steps 1') === `${BASE} J11`, 'gate.sh: without the J10 flag the required rows are the 24 (plus J11 with its own flag)');
+const BASE = 'S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 J9 J13 X1 X2 X3 X4 X5';
+check(out('gate_required_steps 0') === BASE && out('gate_required_steps 0 0') === BASE && out('gate_required_steps 1') === `${BASE} J11`, 'gate.sh: without the J10 flag the required rows are the 25 (plus J11 with its own flag)');
 check(out('gate_required_steps 0 1') === `${BASE} J10` && out('gate_required_steps 1 1') === `${BASE} J10 J11`, 'gate.sh: UAT_EXPECT_PERSONA_BUILDER=1 adds J10, and nothing else');
 check(!has(out('gate_required_steps 1 0'), 'J10'), "gate.sh: J11's flag doesn't bring J10 in");
-check(out('gate_demo_steps') === 'S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J9 X1 X2 X3 X4 X5', 'gate.sh: the DEMO SUBSET is unchanged (J1-J6, J9 and S/C/X), never J10');
+check(out('gate_demo_steps') === 'S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J9 J13 X1 X2 X3 X4 X5', 'gate.sh: the DEMO SUBSET is unchanged (J1-J6, J9, J13 and S/C/X), never J10');
 check(has(out('echo "$GATE_DEMO_UNCOUNTED"'), 'J10') && has(out('echo "$GATE_OPTIONAL_STEPS"'), 'J10'), 'gate.sh: J10 is always a known row, and always uncounted by the demo');
 // (J12's own flag is set here, so only J10's and J11's are judged; lib/settings-parity.selftest.mjs covers J12.)
 check(out('gate_uncounted 0 0 1') === 'J10 J11' && out('gate_uncounted 1 0 1') === 'J10' && out('gate_uncounted 0 1 1') === 'J11' && out('gate_uncounted 1 1 1') === '', 'gate.sh: J10 is uncounted by the gate exactly when its flag is off');

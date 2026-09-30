@@ -260,9 +260,9 @@ try {
   const out = (script) => sh(script).stdout.trim();
   const rc = (script) => sh(script).status;
   check(!` ${out('gate_required_steps 0')} `.includes(' J11 ') && ` ${out('gate_required_steps 1')} `.endsWith(' J11 '), 'gate.sh: J11 is a required row only with the flag');
-  check(out('gate_required_steps 1').replace(/ J11$/, '') === out('gate_required_steps 0') && out('gate_required_steps 0').split(' ').length === 24, 'gate.sh: the flag adds J11 and nothing else to the 24 rows');
+  check(out('gate_required_steps 1').replace(/ J11$/, '') === out('gate_required_steps 0') && out('gate_required_steps 0').split(' ').length === 25, 'gate.sh: the flag adds J11 and nothing else to the 25 rows');
   const demo = ` ${out('gate_demo_steps')} `;
-  check(!demo.includes(' J11 ') && !demo.includes(' J7 ') && !demo.includes(' J8 ') && demo.includes(' J9 ') && demo.includes(' J6 ') && demo.includes(' X5 '), 'gate.sh: the demo subset is J1-J6, J9 and S/C/X, never J11');
+  check(!demo.includes(' J11 ') && !demo.includes(' J7 ') && !demo.includes(' J8 ') && demo.includes(' J9 ') && demo.includes(' J13 ') && demo.includes(' J6 ') && demo.includes(' X5 '), 'gate.sh: the demo subset is J1-J6, J9, J13 and S/C/X, never J11');
   // (J10's and J12's own flags are set here, so only J11's is judged; lib/persona-builder.selftest.mjs covers J10,
   // lib/settings-parity.selftest.mjs J12.)
   check(out('gate_uncounted 0 1 1') === 'J11' && out('gate_uncounted 1 1 1') === '' && ` ${out('echo "$GATE_DEMO_UNCOUNTED"')} `.includes(' J11 '), 'gate.sh: J11 is uncounted by the gate without the flag, counted with it, and always uncounted by the demo');

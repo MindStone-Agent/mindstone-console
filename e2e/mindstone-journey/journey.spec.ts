@@ -34,6 +34,7 @@ import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import type { BrowserContext, Page, Request, TestInfo } from '@playwright/test';
 import {
+  ENDPOINT_LABEL,
   ERROR_REPLY,
   FLOWS,
   PROVIDER,
@@ -132,7 +133,7 @@ const TODAY_STATUS_LINKS = ['Run guided setup again', 'Diagnostics', 'Approvals'
 const IGNORED_STATUS_LINKS = ['Set up memory', 'Tell the agent about you', 'Personas'];
 
 /** Steps that judge the state after setup: when J2 failed they report "blocked by J2", not "state changed". */
-const NEEDS_SETUP = /^J[789] /;
+const NEEDS_SETUP = /^J([789]|13) /;
 
 /** How long J9 polls the recall index for an embedded chunk holding the fact chat 1 told (capture and indexing); then it FAILs "not captured". */
 const RECALL_CAPTURE_WAIT_MS = 180_000;
@@ -1224,6 +1225,108 @@ test('J9 memory recall across chats: a fact told in one chat is recalled in a fr
     const restored = await setAutoRecall(true).catch((error: Error) => ({ status: 0, json: { error: error.message } }));
     note(testInfo, `memory.autoRecall put back on: HTTP ${restored.status}${restored.status >= 300 || restored.status === 0 ? ` ${JSON.stringify(restored.json)}` : ''}`);
   }
+});
+
+/** The MindStone pages J13 opens from the chat page (console #53): each link's test id and the heading its page shows. */
+const J13_PAGES: { id: string; heading: string }[] = [
+  { id: 'personas', heading: 'Personas' },
+  { id: 'skills', heading: 'Skills' },
+  { id: 'memory', heading: 'Memory' },
+  { id: 'approvals', heading: 'Approvals' },
+  { id: 'providers', heading: 'Model providers' },
+  { id: 'mindstone', heading: 'MindStone settings' },
+];
+/** A model id as the gateway lists it, which the menu must not show once the Console knows the agent's name. */
+const J13_BARE_MODEL_ID = /\bmindstone\/[\w.-]+/i;
+
+test('J13 MindStone navigation: every page one click from the chat page, the Memory page, agent names in the model menu, Personas at 400px', async ({}, testInfo) => {
+  await ensureSignedIn(page, { stayIfSignedIn: true });
+
+  await test.step('N1: from the chat page, each MindStone page opens from the sidebar (the rail tab, then its link)', async () => {
+    const opened: string[] = [];
+    for (const target of J13_PAGES) {
+      // The chat page is the starting point each time; the MindStone page itself is never typed.
+      await navigate(page, '/c/new');
+      const tab = page.getByTestId('nav-panel-mindstone');
+      await expect(tab, 'the MindStone tab on the sidebar rail (admins only)').toBeVisible({ timeout: 30_000 });
+      // The tab toggles its panel: click it only when the panel isn't already the open one.
+      let tabClicks = 0;
+      if ((await tab.getAttribute('aria-pressed')) !== 'true') {
+        await tab.click();
+        tabClicks += 1;
+      }
+      const section = page.getByTestId('mindstone-section');
+      await expect(section, 'the MindStone section after at most one click on the tab').toBeVisible();
+      await section.getByTestId(`mindstone-nav-${target.id}`).click();
+      await expect(page.getByRole('heading', { level: 1, name: target.heading, exact: true })).toBeVisible({ timeout: 30_000 });
+      opened.push(`${target.heading} (${new URL(page.url()).pathname}, tab clicks ${tabClicks})`);
+    }
+    await shot(page, testInfo, 'n1-last-page');
+    note(testInfo, `N1 opened: ${opened.join('; ')}`);
+  });
+
+  await test.step('N2: the Memory page shows the embedding model and the memory store status', async () => {
+    const config = await consoleApi<{ config?: { memory?: { embeddingProvider?: string } } }>(page, 'GET', '/api/mindstone/admin/config');
+    const embedding = config.json.config?.memory?.embeddingProvider ?? '';
+    expect(embedding, 'the saved memory.embeddingProvider (set by J2)').not.toBe('');
+    await navigate(page, '/c/new');
+    const tab = page.getByTestId('nav-panel-mindstone');
+    if ((await tab.getAttribute('aria-pressed')) !== 'true') await tab.click();
+    await page.getByTestId('mindstone-section').getByTestId('mindstone-nav-memory').click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Memory', exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId('ms-mem-embedding'), 'the embedding model, as saved').toContainText(embedding, { timeout: 30_000 });
+    const status = page.getByTestId('ms-sys-memory');
+    await expect(status, 'the memory store status (search backend and indexed counts)').toBeVisible();
+    await shot(page, testInfo, 'n2-memory');
+    note(testInfo, `N2 Memory page: embedding "${embedding}"; status: ${(await status.innerText()).replace(/\s+/g, ' ').slice(0, 300)}`);
+  });
+
+  await test.step('N3: the model menu shows agent names, not bare mindstone/<id> options, and the selected model reads as a name', async () => {
+    const names = await consoleApi<{ names?: Record<string, string> }>(page, 'GET', '/api/mindstone-model-names');
+    expect(names.status, 'GET /api/mindstone-model-names').toBe(200);
+    const labels = Object.values(names.json.names ?? {});
+    expect(labels.length, 'the Console knows at least one agent name').toBeGreaterThan(0);
+    for (const label of labels) expect(label, 'an agent name is a name, not a model id').not.toMatch(J13_BARE_MODEL_ID);
+
+    await navigate(page, '/c/new');
+    await ensureMindStoneModel(page, testInfo);
+    const trigger = page.getByRole('button', { name: 'Select a model' }).first();
+    const selected = ((await trigger.textContent()) ?? '').trim();
+    expect(selected, 'the selected model reads as a name').not.toMatch(J13_BARE_MODEL_ID);
+
+    await trigger.click();
+    await page.getByRole('option', { name: new RegExp(ENDPOINT_LABEL, 'i') }).first().click();
+    const options = page.getByRole('option');
+    await expect(options.filter({ hasText: labels[0] }).first(), `the agent "${labels[0]}" is listed by name`).toBeVisible({ timeout: 30_000 });
+    const texts = (await options.allTextContents()).map((t) => t.trim());
+    await shot(page, testInfo, 'n3-model-menu');
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    expect(texts.filter((t) => J13_BARE_MODEL_ID.test(t)), 'model menu options showing a bare mindstone/<id>').toEqual([]);
+    note(testInfo, `N3 selected "${selected}"; options: ${texts.join(' | ').slice(0, 400)}`);
+  });
+
+  await test.step('N4: at 400px wide, Personas opens from the sidebar drawer', async () => {
+    const size = page.viewportSize();
+    await page.setViewportSize({ width: 400, height: 800 });
+    try {
+      await navigate(page, '/c/new');
+      await page.getByTestId('header-open-sidebar-button').click();
+      const switcher = page.getByTestId('panel-switcher-button');
+      await expect(switcher, "the drawer's panel switcher").toBeVisible({ timeout: 30_000 });
+      if (!(await page.getByTestId('mindstone-section').isVisible())) {
+        await switcher.click();
+        await page.getByRole('menuitem').filter({ hasText: /^\s*MindStone\s*$/ }).first().click();
+      }
+      await page.getByTestId('mindstone-section').getByTestId('mindstone-nav-personas').click();
+      await expect(page.getByRole('heading', { level: 1, name: 'Personas', exact: true })).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('panel-switcher-button'), 'the drawer closes when a page is chosen').toBeHidden();
+      await shot(page, testInfo, 'n4-personas-400px');
+      note(testInfo, `N4 at 400px: Personas opened at ${new URL(page.url()).pathname}, drawer closed`);
+    } finally {
+      await page.setViewportSize(size ?? { width: 1366, height: 900 });
+    }
+  });
 });
 
 /** Each guided-setup step's own heading, which its Change link must open (and nothing else). */

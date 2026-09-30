@@ -394,11 +394,11 @@ const sh = (script) => spawnSync('bash', ['-c', `set -Eeuo pipefail; source "${p
 const out = (script) => sh(script).stdout.trim();
 const rc = (script) => sh(script).status;
 const has = (list, id) => ` ${list} `.includes(` ${id} `);
-const BASE = 'S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 J9 X1 X2 X3 X4 X5';
-check(out('gate_required_steps 0') === BASE && out('gate_required_steps 0 0 0') === BASE && out('gate_required_steps 1 1') === `${BASE} J10 J11`, 'gate.sh: without the J12 flag the required rows are unchanged (the 24, plus J10/J11 with their flags)');
+const BASE = 'S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 J9 J13 X1 X2 X3 X4 X5';
+check(out('gate_required_steps 0') === BASE && out('gate_required_steps 0 0 0') === BASE && out('gate_required_steps 1 1') === `${BASE} J10 J11`, 'gate.sh: without the J12 flag the required rows are unchanged (the 25, plus J10/J11 with their flags)');
 check(out('gate_required_steps 0 0 1') === `${BASE} J12` && out('gate_required_steps 1 1 1') === `${BASE} J10 J11 J12`, 'gate.sh: UAT_EXPECT_SETTINGS_PARITY=1 adds J12, and nothing else');
 check(!has(out('gate_required_steps 1 1 0'), 'J12'), "gate.sh: J10's and J11's flags don't bring J12 in");
-check(out('gate_demo_steps') === 'S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J9 X1 X2 X3 X4 X5', 'gate.sh: the DEMO SUBSET is unchanged (J1-J6, J9 and S/C/X), never J12');
+check(out('gate_demo_steps') === 'S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J9 J13 X1 X2 X3 X4 X5', 'gate.sh: the DEMO SUBSET is unchanged (J1-J6, J9, J13 and S/C/X), never J12');
 check(has(out('echo "$GATE_DEMO_UNCOUNTED"'), 'J12') && has(out('echo "$GATE_OPTIONAL_STEPS"'), 'J12'), 'gate.sh: J12 is always a known row, and always uncounted by the demo');
 check(out('gate_uncounted 1 1 0') === 'J12' && out('gate_uncounted 1 1 1') === '' && out('gate_uncounted 0 0 1') === 'J10 J11' && out('gate_uncounted 1 1') === 'J12', 'gate.sh: J12 is uncounted by the gate exactly when its flag is off (the default)');
 
