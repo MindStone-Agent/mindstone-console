@@ -14,8 +14,16 @@ const { requireJwtAuth } = require('~/server/middleware');
 const router = express.Router();
 
 const CACHE_MS = 60_000;
+/** A failed read is remembered too, so a down gateway isn't asked on every request. */
+const FAILURE_CACHE_MS = 30_000;
 const NAME_MAX = 80;
-let cached = { at: 0, names: null };
+let cached = { at: 0, names: null, ttl: CACHE_MS };
+/** One gateway read at a time, shared by the requests that arrive while it runs. */
+let pending = null;
+
+/** Control, bidi and zero-width characters out: a name can't disguise itself in the menu. */
+// eslint-disable-next-line no-control-regex -- stripping control characters is the point
+const HIDDEN = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g;
 
 /** Gateway base URL: MINDSTONE_GATEWAY_URL is the OpenAI base (…/v1); the admin API sits at the root. */
 function gatewayBase() {
@@ -30,7 +38,7 @@ function namesFromStatus(body) {
   if (!Array.isArray(agents)) return names;
   for (const agent of agents) {
     const id = agent?.agentId;
-    const name = typeof agent?.name === 'string' ? agent.name.trim() : '';
+    const name = typeof agent?.name === 'string' ? agent.name.replace(HIDDEN, '').trim() : '';
     if (typeof id === 'string' && /^[A-Za-z0-9_.-]+$/.test(id) && name) {
       names[`mindstone/${id}`] = name.slice(0, NAME_MAX);
     }
@@ -57,27 +65,39 @@ async function readNames() {
   return namesFromStatus(await response.json());
 }
 
+/** The names, from the cache or one shared gateway read; never throws. */
+function currentNames() {
+  if (cached.names && Date.now() - cached.at < cached.ttl) return Promise.resolve(cached.names);
+  if (!pending) {
+    pending = readNames()
+      .then((names) => {
+        cached = { at: Date.now(), names, ttl: CACHE_MS };
+        return names;
+      })
+      .catch((error) => {
+        logger.warn(
+          '[mindstone] could not read agent names for the model menu:',
+          error?.message ?? error,
+        );
+        cached = { at: Date.now(), names: {}, ttl: FAILURE_CACHE_MS };
+        return {};
+      })
+      .finally(() => {
+        pending = null;
+      });
+  }
+  return pending;
+}
+
 router.get('/', requireJwtAuth, async (req, res) => {
   res.set('Cache-Control', 'private, no-store');
-  if (cached.names && Date.now() - cached.at < CACHE_MS) {
-    return res.json({ names: cached.names });
-  }
-  try {
-    const names = await readNames();
-    cached = { at: Date.now(), names };
-    return res.json({ names });
-  } catch (error) {
-    logger.warn(
-      '[mindstone] could not read agent names for the model menu:',
-      error?.message ?? error,
-    );
-    return res.json({ names: {} });
-  }
+  return res.json({ names: await currentNames() });
 });
 
 router.namesFromStatus = namesFromStatus;
 router.resetCache = () => {
-  cached = { at: 0, names: null };
+  cached = { at: 0, names: null, ttl: CACHE_MS };
+  pending = null;
 };
 
 module.exports = router;

@@ -89,6 +89,44 @@ describe('MindStone model names (#53)', () => {
     expect(res.body).toEqual({ names: {} });
   });
 
+  it('asks the gateway once for requests that arrive together, and remembers a failure', async () => {
+    let finish;
+    global.fetch = jest.fn(
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve({ ok: true, json: async () => STATUS });
+        }),
+    );
+    const both = Promise.all([
+      request(app({ id: 'u1' })).get('/api/mindstone-model-names'),
+      request(app({ id: 'u2' })).get('/api/mindstone-model-names'),
+    ]);
+    await new Promise((r) => setTimeout(r, 50));
+    finish();
+    const [a, b] = await both;
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(a.body).toEqual(b.body);
+
+    router.resetCache();
+    global.fetch = jest.fn(async () => {
+      throw new Error('connection refused');
+    });
+    await request(app({ id: 'u1' })).get('/api/mindstone-model-names');
+    await request(app({ id: 'u1' })).get('/api/mindstone-model-names');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('strips hidden characters from names', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        system: { agents: [{ agentId: 'default', name: 'Ca\u202Eirn\u200B' }] },
+      }),
+    }));
+    const res = await request(app({ id: 'u1' })).get('/api/mindstone-model-names');
+    expect(res.body).toEqual({ names: { 'mindstone/default': 'Cairn' } });
+  });
+
   it('asks the gateway at most once a minute', async () => {
     await request(app({ id: 'u1' })).get('/api/mindstone-model-names');
     await request(app({ id: 'u2' })).get('/api/mindstone-model-names');
