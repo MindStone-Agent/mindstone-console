@@ -134,19 +134,19 @@ const POLICIES: Record<string, TranslationKeys> = {
 /** A note is information, not a problem: it isn't counted. */
 type Issue = { tone: 'error' | 'warning' | 'note'; text: string };
 
+const TONE_CLASS: Record<Issue['tone'], string> = {
+  error: 'text-sm text-red-500',
+  warning: 'text-sm text-orange-500',
+  note: 'text-sm text-text-secondary',
+};
+
 function Issues({ issues }: { issues: Issue[] }) {
   return (
     <>
       {issues.map((issue, i) => (
         <p
           key={i}
-          className={
-            issue.tone === 'error'
-              ? 'text-sm text-red-500'
-              : issue.tone === 'warning'
-                ? 'text-sm text-orange-500'
-                : 'text-sm text-text-secondary'
-          }
+          className={TONE_CLASS[issue.tone]}
         >
           {issue.text}
         </p>
