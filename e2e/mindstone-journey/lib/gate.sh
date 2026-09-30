@@ -12,7 +12,7 @@
 # uncounted steps failed (on their own errors: lib/gate-rows.mjs), not a stall in it.
 
 # Every row the gate needs without any of the flags, each exactly once and each PASS.
-GATE_BASE_STEPS="S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 J9 X1 X2 X3 X4 X5"
+GATE_BASE_STEPS="S0 S1 S2 S3 S5 C0 C1 C2 C3 C4 J1 J2 J3 J4 J5 J6 J7 J8 J9 J13 X1 X2 X3 X4 X5"
 # Rows that are always known (never "unknown row"), whether or not the gate counts them.
 GATE_OPTIONAL_STEPS="J10 J11 J12"
 # The DEMO SUBSET leaves J10, J11 and J12 out, always.
@@ -29,7 +29,8 @@ gate_required_steps() {
 }
 
 # gate_demo_steps: the demo subset, everything but the features still being built (J7 Skill Builder, J8
-# persona drafting). J9 (memory recall across chats) is on the demo path, so it stays in. Never J10, J11 or J12.
+# persona drafting). J9 (memory recall across chats) and J13 (MindStone navigation, console #53) are on the
+# demo path, so they stay in. Never J10, J11 or J12.
 gate_demo_steps() {
   printf '%s' "${GATE_BASE_STEPS/ J7 J8/}"
 }

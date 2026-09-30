@@ -572,10 +572,10 @@ summary() {
   # The demo subset, on its own line: a J3/J5/J9 regression can't hide behind J7/J8.
   if [[ ${#demo_reasons[@]} -eq 0 ]]; then
     demo="PASS${override}"
-    log "${c_green}DEMO SUBSET (J1–J6, J9 + S/C/X): PASS${override}${c_reset}"
+    log "${c_green}DEMO SUBSET (J1–J6, J9, J13 + S/C/X): PASS${override}${c_reset}"
   else
     demo="NOT PASSED${override}: ${demo_reasons[*]}"
-    log "${c_red}DEMO SUBSET (J1–J6, J9 + S/C/X): NOT PASSED${override}${c_reset} (${demo_reasons[*]})"
+    log "${c_red}DEMO SUBSET (J1–J6, J9, J13 + S/C/X): NOT PASSED${override}${c_reset} (${demo_reasons[*]})"
   fi
   log "$(colour_for "${j10_status:-MISSING}")${j10_line}${c_reset}"
   log "$(colour_for "${j11_status:-MISSING}")${j11_line}${c_reset}"
@@ -596,7 +596,7 @@ summary() {
     echo
     echo "**GATE: ${gate}**"
     echo
-    echo "**DEMO SUBSET (J1–J6, J9 + S/C/X): ${demo}**"
+    echo "**DEMO SUBSET (J1–J6, J9, J13 + S/C/X): ${demo}**"
     echo
     echo "**${j10_line}.**"
     echo
