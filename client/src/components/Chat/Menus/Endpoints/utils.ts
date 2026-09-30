@@ -230,6 +230,10 @@ export const getDisplayValue = ({
       return endpoint.assistantNames[selectedValues.model];
     }
 
+    if (endpoint.modelNames?.[selectedValues.model]) {
+      return endpoint.modelNames[selectedValues.model];
+    }
+
     return selectedValues.model;
   }
 

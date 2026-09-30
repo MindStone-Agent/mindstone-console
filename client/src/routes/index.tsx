@@ -17,6 +17,7 @@ import MindStoneSettingsView from '~/components/MindStone/SettingsView';
 import MindStonePersonasView from '~/components/MindStone/PersonasView';
 import MindStoneSecretsView from '~/components/MindStone/SecretsView';
 import MindStoneSkillsView from '~/components/MindStone/SkillsView';
+import MindStoneMemoryView from '~/components/MindStone/MemoryView';
 import AgentMarketplace from '~/components/Agents/Marketplace';
 import { OAuthSuccess, OAuthError } from '~/components/OAuth';
 import { AuthContextProvider } from '~/hooks/AuthContext';
@@ -186,6 +187,11 @@ export const router = createBrowserRouter(
               /** MindStone personas (MindStone-Agent #105). The server route enforces admin. */
               path: 'mindstone/personas',
               element: <MindStonePersonasView />,
+            },
+            {
+              /** MindStone memory: setup and status (#53). The server route enforces admin. */
+              path: 'mindstone/memory',
+              element: <MindStoneMemoryView />,
             },
             {
               path: 'prompts',

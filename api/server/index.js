@@ -403,6 +403,8 @@ const startServer = async () => {
   app.use('/api/admin/langfuse', routes.adminLangfuse);
   app.use('/api/admin/grants', routes.adminGrants);
   app.use('/api/mindstone', routes.mindstone);
+  /** Display names for MindStone's models, for every signed-in user (#53). */
+  app.use('/api/mindstone-model-names', routes.mindstoneModelNames);
   app.use('/api/admin/groups', routes.adminGroups);
   app.use('/api/admin/roles', routes.adminRoles);
   app.use('/api/admin/skills', routes.adminSkills);

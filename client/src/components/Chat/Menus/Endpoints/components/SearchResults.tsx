@@ -135,8 +135,13 @@ export function SearchResults({ results, localize, searchValue }: SearchResultsP
                     endpoint.assistantNames[model.name]
                   ) {
                     modelName = endpoint.assistantNames[model.name];
+                  } else if (endpoint.modelNames?.[model.name]) {
+                    modelName = endpoint.modelNames[model.name];
                   }
-                  return modelName.toLowerCase().includes(lowerQuery);
+                  return (
+                    modelName.toLowerCase().includes(lowerQuery) ||
+                    model.name.toLowerCase().includes(lowerQuery)
+                  );
                 });
 
             if (!filteredModels.length && !showMarketplace) {
