@@ -58,7 +58,9 @@ const problems = (): SystemStatusData => ({
   memory: {
     sqlite: {
       present: true,
-      vectorBackend: 'js-cosine',
+      // No vectors at all: the missing extension is a problem (with built-in
+      // cosine search working it's only a note, #53)
+      vectorBackend: 'lexical',
       sqliteVec: { available: false, error: 'extension not found' },
     },
   },

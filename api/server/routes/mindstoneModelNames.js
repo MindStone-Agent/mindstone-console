@@ -31,6 +31,14 @@ function gatewayBase() {
   return url.replace(/\/+$/, '').replace(/\/v1$/, '');
 }
 
+/** The title setup gives an agent before its identity has a name of its own. */
+const PLACEHOLDER_TITLE = /^mindstone agent identity pending$/i;
+
+/** An agent without a name of its own reads as MindStone, not as its id or setup's placeholder. */
+function fallbackName(id) {
+  return id === 'default' ? 'MindStone' : `MindStone (${id})`;
+}
+
 /** { "mindstone/<agentId>": name } from the status agents list; anything malformed is skipped. */
 function namesFromStatus(body) {
   const agents = body?.system?.agents;
@@ -38,10 +46,10 @@ function namesFromStatus(body) {
   if (!Array.isArray(agents)) return names;
   for (const agent of agents) {
     const id = agent?.agentId;
-    const name = typeof agent?.name === 'string' ? agent.name.replace(HIDDEN, '').trim() : '';
-    if (typeof id === 'string' && /^[A-Za-z0-9_.-]+$/.test(id) && name) {
-      names[`mindstone/${id}`] = name.slice(0, NAME_MAX);
-    }
+    const title = typeof agent?.name === 'string' ? agent.name.replace(HIDDEN, '').trim() : '';
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(id)) continue;
+    const name = title && !PLACEHOLDER_TITLE.test(title) ? title : fallbackName(id);
+    names[`mindstone/${id}`] = name.slice(0, NAME_MAX);
   }
   return names;
 }

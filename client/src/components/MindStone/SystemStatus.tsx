@@ -131,7 +131,8 @@ const POLICIES: Record<string, TranslationKeys> = {
   approval_required: 'com_mindstone_sys_policy_approval',
 };
 
-type Issue = { tone: 'error' | 'warning'; text: string };
+/** A note is information, not a problem: it isn't counted. */
+type Issue = { tone: 'error' | 'warning' | 'note'; text: string };
 
 function Issues({ issues }: { issues: Issue[] }) {
   return (
@@ -139,7 +140,13 @@ function Issues({ issues }: { issues: Issue[] }) {
       {issues.map((issue, i) => (
         <p
           key={i}
-          className={issue.tone === 'error' ? 'text-sm text-red-500' : 'text-sm text-orange-500'}
+          className={
+            issue.tone === 'error'
+              ? 'text-sm text-red-500'
+              : issue.tone === 'warning'
+                ? 'text-sm text-orange-500'
+                : 'text-sm text-text-secondary'
+          }
         >
           {issue.text}
         </p>
@@ -164,7 +171,10 @@ type SqliteStatus = NonNullable<NonNullable<SystemStatusData['memory']>['sqlite'
 function memoryIssuesOf(sqlite: SqliteStatus | undefined, localize: Localize): Issue[] {
   const issues: Issue[] = [];
   if (sqlite && sqlite.present !== false && sqlite.sqliteVec?.available === false) {
-    if (sqlite.sqliteVec.error) {
+    if (sqlite.vectorBackend === 'js-cosine') {
+      // Vector search works without the extension (built-in cosine search): a note, not a problem.
+      issues.push({ tone: 'note', text: localize('com_mindstone_sys_sqlite_vec_note') });
+    } else if (sqlite.sqliteVec.error) {
       issues.push({
         tone: 'warning',
         text: localize('com_mindstone_sys_sqlite_vec', { 0: masked(sqlite.sqliteVec.error) }),
@@ -346,7 +356,7 @@ export default function SystemStatus({ system }: { system?: SystemStatusData | n
 
   const problemCount =
     configIssues.length +
-    memoryIssues.length +
+    memoryIssues.filter((issue) => issue.tone !== 'note').length +
     piIssues.length +
     contentIssues.length +
     (connectorRows ?? []).reduce((total, c) => total + connectorIssues(c).length, 0) +

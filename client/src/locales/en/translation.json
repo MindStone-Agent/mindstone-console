@@ -3234,6 +3234,7 @@
   "com_mindstone_sys_duplicates": "Duplicate chunks",
   "com_mindstone_sys_updated": "Updated",
   "com_mindstone_sys_sqlite_vec": "Vector search extension unavailable: {{0}}",
+  "com_mindstone_sys_sqlite_vec_note": "Search is built in: the sqlite-vec extension isn't loaded, which is fine for small memory stores.",
   "com_mindstone_sys_pi": "Pi session safety",
   "com_mindstone_sys_resume_cap": "Resume cap",
   "com_mindstone_sys_entries": "{{0}} entries",

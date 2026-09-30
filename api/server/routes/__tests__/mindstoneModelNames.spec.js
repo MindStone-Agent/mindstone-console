@@ -62,6 +62,7 @@ describe('MindStone model names (#53)', () => {
       names: {
         'mindstone/default': 'Cairn',
         'mindstone/analyst': 'Threat Analyst',
+        'mindstone/noname': 'MindStone (noname)',
         'mindstone/long': 'x'.repeat(80),
       },
     });
@@ -114,6 +115,24 @@ describe('MindStone model names (#53)', () => {
     await request(app({ id: 'u1' })).get('/api/mindstone-model-names');
     await request(app({ id: 'u1' })).get('/api/mindstone-model-names');
     expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows MindStone, not setup's placeholder title, for an agent without a name of its own", async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        system: {
+          agents: [
+            { agentId: 'default', name: 'MindStone Agent Identity Pending' },
+            { agentId: 'helper', name: 'mindstone agent identity pending' },
+          ],
+        },
+      }),
+    }));
+    const res = await request(app({ id: 'u1' })).get('/api/mindstone-model-names');
+    expect(res.body).toEqual({
+      names: { 'mindstone/default': 'MindStone', 'mindstone/helper': 'MindStone (helper)' },
+    });
   });
 
   it('strips hidden characters from names', async () => {
