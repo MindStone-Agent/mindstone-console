@@ -1238,6 +1238,8 @@ const J13_PAGES: { id: string; heading: string }[] = [
 ];
 /** A model id as the gateway lists it, which the menu must not show once the Console knows the agent's name. */
 const J13_BARE_MODEL_ID = /\bmindstone\/[\w.-]+/i;
+/** Setup's placeholder IDENTITY.md title, which the menu shows as "MindStone" until the agent has a name (MindStone-Agent #185). */
+const J13_PLACEHOLDER_TITLE = /Identity Pending/i;
 
 test('J13 MindStone navigation: every page one click from the chat page, the Memory page, agent names in the model menu, Personas at 400px', async ({}, testInfo) => {
   await ensureSignedIn(page, { stayIfSignedIn: true });
@@ -1287,12 +1289,14 @@ test('J13 MindStone navigation: every page one click from the chat page, the Mem
     const labels = Object.values(names.json.names ?? {});
     expect(labels.length, 'the Console knows at least one agent name').toBeGreaterThan(0);
     for (const label of labels) expect(label, 'an agent name is a name, not a model id').not.toMatch(J13_BARE_MODEL_ID);
+    expect(labels.filter((l) => J13_PLACEHOLDER_TITLE.test(l)), "agent names showing setup's placeholder title").toEqual([]);
 
     await navigate(page, '/c/new');
     await ensureMindStoneModel(page, testInfo);
     const trigger = page.getByRole('button', { name: 'Select a model' }).first();
     const selected = ((await trigger.textContent()) ?? '').trim();
     expect(selected, 'the selected model reads as a name').not.toMatch(J13_BARE_MODEL_ID);
+    expect(selected, "the selected model isn't setup's placeholder title").not.toMatch(J13_PLACEHOLDER_TITLE);
 
     await trigger.click();
     await page.getByRole('option', { name: new RegExp(ENDPOINT_LABEL, 'i') }).first().click();
@@ -1303,6 +1307,7 @@ test('J13 MindStone navigation: every page one click from the chat page, the Mem
     await page.keyboard.press('Escape');
     await page.keyboard.press('Escape');
     expect(texts.filter((t) => J13_BARE_MODEL_ID.test(t)), 'model menu options showing a bare mindstone/<id>').toEqual([]);
+    expect(texts.filter((t) => J13_PLACEHOLDER_TITLE.test(t)), "model menu options showing setup's placeholder title").toEqual([]);
     note(testInfo, `N3 selected "${selected}"; options: ${texts.join(' | ').slice(0, 400)}`);
   });
 
